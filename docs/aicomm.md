@@ -108,7 +108,7 @@ aicomm 只對 sidecar 發兩種請求，位址固定為 sidecar 文件的預設 
 - 結束碼：`find` 0＝至少找到一台、1＝每一台都確定沒有、2＝查不了（設定或 Gateway）、3＝找到 0 台但有的台查不到；`call` 0＝有回應（不論 HTTP 碼）、2＝連不到、3＝逾時（結果未知）。約定外的結束碼都是 `peer-bad-answer`。
 - aicomm 對子行程另外多等 2 秒（`--timeout` 加 2）當上限，超過就自己收掉子行程：`find` 是 `not-woken lookup-incomplete`、`call` 是 `unknown poke-timeout`。
 - `peer:<port>` 是 pool 內 sidecar 的**埠號，不是機器位址**；`wake:` 行的 `<說明>` 只放原因碼（而且只有一行），`pool-peer` 的 stdout／stderr 不會被轉印進去。
-- 執行檔：環境變數 `AICOMM_POOL_PEER`（只給測試與手動用）優先，沒設就從 PATH 找 `pool-peer`；找不到或不能執行是 `not-woken peer-unavailable`。這個變數不是 sidecar 位址，也不是使用者可設定的叫醒位址；能打哪些 port 由 `pool-peer` 與上面的埠段決定。
+- 執行檔：環境變數 `AICOMM_POOL_PEER`（只給測試與手動用）優先，沒設就從 PATH 找 `pool-peer`，再沒有才找 `~/.mylinuxpool/bin/pool-peer`（要存在且可執行）；都找不到或不能執行是 `not-woken peer-unavailable`。這個變數不是 sidecar 位址，也不是使用者可設定的叫醒位址；能打哪些 port 由 `pool-peer` 與上面的埠段決定。
 
 ## 位址覆寫（只給測試與手動）
 

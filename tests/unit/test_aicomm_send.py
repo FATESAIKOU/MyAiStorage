@@ -9,6 +9,7 @@ import http.client
 import json
 import os
 import re
+import shutil
 import socket
 import sys
 import urllib.parse
@@ -987,6 +988,7 @@ def test_c4_without_the_hook_pool_peer_comes_from_path(world, tmp_path, monkeypa
     from aicomm import cli
 
     bindir = tmp_path / "path-bin"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     marker = use_peer_from_path(world, bindir, monkeypatch)
     world.peers({"find": found(5201, "idle"), "call": {"5201": called(200)}})
     # running without the hook, aicomm must resolve the executable on PATH - the wrapper
@@ -1001,10 +1003,106 @@ def test_c4_without_the_hook_pool_peer_comes_from_path(world, tmp_path, monkeypa
 def test_c4_without_the_hook_and_nothing_on_path_the_peer_is_unavailable(world, tmp_path, monkeypatch, capsys):
     # no hook, and PATH (the fake `angareion` dir only) has no `pool-peer`: nothing found,
     # nothing run; here a worker without either setup still answers "not woken", cleanly.
+    # HOME is patched to tmp too (#392): a real `~/.mylinuxpool/bin/pool-peer` must not
+    # be picked up by the bindir fallback.
+    from aicomm import cli
+
     monkeypatch.delenv("AICOMM_POOL_PEER")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     bindir = tmp_path / "path-bin"
     bindir.mkdir()
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{tmp_path / 'bin'}")
+    assert cli._peer_executable() is None
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
+    assert world.peer_calls() == []
+
+
+def use_peer_from_home_bin(world, home, monkeypatch, angareion_bin):
+    """The `~/.mylinuxpool/bin` fallback (#392), for real: no hook and nothing on PATH.
+
+    Like `use_peer_from_path`, but the wrapper sits in HOME's install bin; aicomm must
+    find it through the HOME fallback (not PATH), and the wrapper leaves a marker next
+    to itself to prove it (not an env hook) ran. Returns the marker path.
+    """
+    monkeypatch.delenv("AICOMM_POOL_PEER")
+    monkeypatch.setenv("HOME", str(home))
+    bindir = home / ".mylinuxpool" / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    marker = bindir / "bin-peer-was-used"
+    wrapper = bindir / "pool-peer"
+    wrapper.write_text(
+        f'#!/bin/sh\necho fell-back > "{marker}"\n'
+        f'exec "{sys.executable}" "{world.fake_peer}" "$@"\n', encoding="utf-8")
+    wrapper.chmod(0o755)
+    # PATH carries the fake `angareion` dir only - no `pool-peer` on it.
+    monkeypatch.setenv("PATH", str(angareion_bin))
+    world.peers({"find": found(5201, "idle"), "call": {}})
+    return marker
+
+
+def test_c4_without_the_hook_pool_peer_comes_from_home_bin(world, tmp_path, monkeypatch, capsys):
+    # #392: PATH has no `pool-peer`, but HOME's `~/.mylinuxpool/bin` does (the fake
+    # wrapper) - aicomm must resolve and run that one, and the send still walks through.
+    from aicomm import cli
+
+    home = tmp_path / "home"
+    marker = use_peer_from_home_bin(world, home, monkeypatch, tmp_path / "bin")
+    world.peers({"find": found(5201, "idle"), "call": {"5201": called(200)}})
+    assert shutil.which("pool-peer") is None
+    assert cli._peer_executable() == str(home / ".mylinuxpool" / "bin" / "pool-peer")
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 woken peer:5201\n"
+    assert marker.exists()  # the wrapper ran: the executable came from HOME, not a hook
+    assert [c["argv"][0] for c in world.peer_calls()] == ["find", "call"]
+
+
+def test_when_path_and_home_bin_have_a_peer_the_path_one_wins(world, tmp_path, monkeypatch, capsys):
+    # #392: both PATH and `~/.mylinuxpool/bin` carry a `pool-peer` - PATH wins, the bindir
+    # file is never run.
+    from aicomm import cli
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    bindir = home / ".mylinuxpool" / "bin"
+    bindir.mkdir(parents=True)
+    bin_marker = bindir / "bin-peer-was-used"
+    bin_decoy = bindir / "pool-peer"
+    # The decoy must satisfy the `run_aicomm` guard (it never runs the real peer), but a
+    # good run must never execute it: PATH's wrapper does the find/call, and if aicomm
+    # picked the decoy by mistake it exits 1 (`not-woken not-found`) and leaves its
+    # marker - both turn this test red.
+    bin_decoy.write_text(
+        f'#!/bin/sh\n# decoy peer; the fake one would be: "{world.fake_peer}"\n'
+        f'echo used > "{bin_marker}"\nexit 1\n', encoding="utf-8")
+    bin_decoy.chmod(0o755)
+    path_marker = use_peer_from_path(world, tmp_path / "path-bin", monkeypatch)
+    world.peers({"find": found(5201, "idle"), "call": {"5201": called(200)}})
+    assert cli._peer_executable() == str(tmp_path / "path-bin" / "pool-peer")
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 woken peer:5201\n"
+    assert path_marker.exists()
+    assert not bin_marker.exists()  # the bindir decoy stayed unused
+
+
+def test_when_the_home_bin_peer_is_not_executable_it_is_as_if_absent(world, tmp_path, monkeypatch, capsys):
+    # #392: a `~/.mylinuxpool/bin/pool-peer` without the exec bit does not count - no
+    # candidate at all, the send answers `peer-unavailable` as before.
+    from aicomm import cli
+
+    monkeypatch.delenv("AICOMM_POOL_PEER")
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    bindir = home / ".mylinuxpool" / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "pool-peer").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    bindir.joinpath("pool-peer").chmod(0o644)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}")
+    assert shutil.which("pool-peer") is None
+    assert cli._peer_executable() is None
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
     assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
@@ -1014,6 +1112,7 @@ def test_c4_without_the_hook_and_nothing_on_path_the_peer_is_unavailable(world, 
 def test_the_hook_wins_over_path(world, tmp_path, monkeypatch, capsys):
     bindir = tmp_path / "path-bin"
     bindir.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     marker = tmp_path / "path-peer-was-used"
     decoy = bindir / "pool-peer"
     decoy.write_text(f'#!/bin/sh\necho used > "{marker}"\nexit 1\n', encoding="utf-8")

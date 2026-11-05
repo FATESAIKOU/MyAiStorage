@@ -4,10 +4,11 @@ aicomm talks to three things: the `angareion` command and MyLinuxPool's `pool-pe
 command (both found on PATH or given by an environment variable), and the local sidecar
 (HTTP on loopback). All three are replaced here, so a test never reaches the real channel,
 the real pool or the real sidecar. `run_aicomm` refuses to run unless `AICOMM_SIDECAR` is
-set and the peer is a test one too: either `AICOMM_POOL_PEER` set, or - when a PATH-fallback
-test leaves it unset - PATH with no `pool-peer` at all, or only a wrapper around the fake
-one. So a test that forgets its fakes fails instead of knocking on the real sidecar or on
-a real `pool-peer` (a worker has one on PATH).
+set and the peer is a test one too: either `AICOMM_POOL_PEER` set, or - when a
+PATH/HOME-fallback test leaves it unset - neither PATH nor `~/.mylinuxpool/bin` has a
+`pool-peer`, or the one(s) found are wrappers around the fake one. So a test that forgets
+its fakes fails instead of knocking on the real sidecar or on a real `pool-peer` (a worker
+has one on PATH).
 """
 
 from __future__ import annotations
@@ -288,24 +289,32 @@ class Result:
 
 
 def _path_peer_is_test_only() -> bool:
-    """True when a `pool-peer` on PATH is one a test may run: none at all, or our fake's.
+    """True when every `pool-peer` aicomm could fall back to is one a test may run.
 
-    With `AICOMM_POOL_PEER` unset, aicomm falls back to `shutil.which("pool-peer")`. One
-    test family runs that fallback for real; that is allowed only when PATH has no
-    `pool-peer` at all, or `which` resolves to a wrapper that runs the fake script -
-    never to the real `pool-peer` a worker may have on PATH.
+    With `AICOMM_POOL_PEER` unset, aicomm falls back to `shutil.which("pool-peer")` and,
+    since #392, to `~/.mylinuxpool/bin/pool-peer` (HOME). One test family exercises both
+    fallbacks for real; that is allowed only when each candidate that exists resolves to
+    a wrapper that runs the fake script - never to the real `pool-peer` a worker has on
+    PATH or in its own home. The tests (and the repo's `isolated_home` fixture) always
+    point HOME at a tmp dir, so a real install bin is out of reach either way.
     """
     script = os.environ.get("FAKE_PEER_SCRIPT")
     if not script:
         return False
-    found = shutil.which("pool-peer")
-    if found is None:
-        return True
-    try:
-        text = Path(found).read_text(encoding="utf-8")
-    except OSError:
-        return False
-    return script in text
+    candidates = [shutil.which("pool-peer")]
+    in_bin = Path.home() / ".mylinuxpool" / "bin" / "pool-peer"
+    if in_bin.is_file() and os.access(in_bin, os.X_OK):
+        candidates.append(str(in_bin))
+    for found in candidates:
+        if found is None:
+            continue
+        try:
+            text = Path(found).read_text(encoding="utf-8")
+        except OSError:
+            return False
+        if script not in text:
+            return False
+    return True
 
 
 def run_aicomm(argv: list[str], monkeypatch, capsys, stdin: str | None = None) -> Result:
@@ -314,10 +323,11 @@ def run_aicomm(argv: list[str], monkeypatch, capsys, stdin: str | None = None) -
         "AICOMM_SIDECAR is not set: a test must point aicomm at its own fake sidecar"
     )
     assert os.environ.get("AICOMM_POOL_PEER") or _path_peer_is_test_only(), (
-        "AICOMM_POOL_PEER is not set and PATH has no test `pool-peer` either: a test must "
-        "point aicomm at its own fake `pool-peer` (the hook, or a wrapper that runs the "
-        "fake script, which is what the PATH-fallback family does) - never at the real "
-        "one a worker has on PATH"
+        "AICOMM_POOL_PEER is not set and neither PATH nor `~/.mylinuxpool/bin` (HOME) "
+        "has a test `pool-peer`: a test must point aicomm at its own fake `pool-peer` "
+        "(the hook, or a wrapper that runs the fake script, which is what the "
+        "PATH/HOME-fallback families do) - never at the real one a worker has on PATH "
+        "or in its own home"
     )
     from aicomm import cli
 
@@ -335,10 +345,11 @@ def aicomm_world(tmp_path, monkeypatch):
     The environment is cleaned first, so nothing from the shell (a real AICOMM_SIDECAR, a
     real identity, FAKE_ANG_*/FAKE_PEER_* leftovers) leaks into a test. The fake
     `pool-peer` is there too, but `AICOMM_POOL_PEER` points at a path that does not exist
-    until a test calls `use_peer()`: the peer fallback is then off. The PATH-fallback
-    family instead deletes the hook and puts a wrapper that runs the fake script on PATH;
-    the `run_aicomm` guard allows that wrapper (and nothing else) as the peer. No test
-    ever runs a real `pool-peer` from PATH. The test modules import this as `world`.
+    until a test calls `use_peer()`: the peer fallback is then off. The fallback family
+    instead deletes the hook and puts a wrapper that runs the fake script on PATH or in
+    HOME's `~/.mylinuxpool/bin`; the `run_aicomm` guard allows such wrappers (and nothing
+    else) as the peer. No test ever runs a real `pool-peer`. The test modules import this
+    as `world`.
     """
     for name in list(os.environ):
         if name.startswith(("FAKE_ANG_", "FAKE_PEER_", "AICOMM_")):
