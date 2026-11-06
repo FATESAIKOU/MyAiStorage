@@ -20,9 +20,69 @@ from agora import credscan
 
 ALNUM = string.ascii_letters + string.digits
 
+# Every literal a credscan rule starts with (#399). If a random draw happened to
+# contain one of these followed by enough token characters, that rule - not the
+# one the test is exercising - would claim the hit (scan_text drops later,
+# overlapping matches) and the assertion would flake. `-----BEGIN` needs a space
+# no alphabet here contains, it is listed only to keep the guarantee total.
+_RULE_LITERALS = (
+    "ya29.", "1//0", "GOCSPX-", "ghp_", "gho_", "ghs_", "ghu_", "github_pat_",
+    "sk-ant-", "sk-", "AKIA", "xoxb-", "xoxa-", "xoxp-", "AIza", "-----BEGIN",
+)
+
+
+def test_rule_literals_account_for_every_credscan_rule():
+    """_RULE_LITERALS is hand-copied from credscan.PATTERNS; fail loudly on drift."""
+    assert len(credscan.PATTERNS) == 12, "credscan 新增規則：把它的前綴加進 _RULE_LITERALS"
+
+
+_RANDOM = random.SystemRandom()
+
+# For every proper prefix of every literal: the characters that would turn a
+# tail ending there into that literal. Built once so `rnd` only inspects the
+# last _MAX_TAIL characters of the output instead of rescanning every literal
+# at every position.
+_BAN_AFTER: dict[str, frozenset[str]] = {}
+for _lit in _RULE_LITERALS:
+    for _k in range(1, len(_lit)):
+        _BAN_AFTER.setdefault(_lit[:_k], set()).add(_lit[_k])
+_BAN_AFTER = {p: frozenset(b) for p, b in _BAN_AFTER.items()}
+_MAX_TAIL = max(map(len, _BAN_AFTER))
+
+
+def _candidates(tail: str, alphabet: str) -> list[str]:
+    """Characters of `alphabet` that would not extend a literal prefix in `tail`.
+
+    `tail` is the output so far, at most _MAX_TAIL characters; the ban is the
+    union of _BAN_AFTER over every suffix of `tail` that is one of its keys,
+    so a position never offers the character that would complete a literal.
+    """
+    banned: set[str] = set()
+    for k in range(1, min(len(tail), _MAX_TAIL) + 1):
+        after = _BAN_AFTER.get(tail[-k:])
+        if after:
+            banned |= after
+    return [c for c in alphabet if c not in banned] if banned else list(alphabet)
+
 
 def rnd(n: int, alphabet: str = ALNUM) -> str:
-    return "".join(random.SystemRandom().choice(alphabet) for _ in range(n))
+    """A random draw that can never contain any _RULE_LITERALS substring.
+
+    The guarantee is structural, not retry-on-failure: after the output so far,
+    a character that would extend some trailing suffix into one of the literals
+    (the tail ends with `lit[:k]` and the next char would be `lit[k]`) is simply
+    not offered to the RNG. By induction the finished string holds no literal,
+    for the alphabets used here (each at least 36 characters, a position bans
+    at most a few characters); an alphabet too small can run the candidate
+    pool dry.
+    """
+    out: list[str] = []
+    tail = ""  # the last _MAX_TAIL characters of `out`
+    for _ in range(n):
+        c = _RANDOM.choice(_candidates(tail, alphabet))
+        out.append(c)
+        tail = (tail + c)[-_MAX_TAIL:]
+    return "".join(out)
 
 
 def gh_token() -> str:
@@ -187,6 +247,23 @@ def test_long_jwt_like_secret_field_is_reported(tmp_path):
     f.write_text("access" + "_token=" + rnd(560, ALNUM + "._-") + "\n")
     code, out = run([f], tmp_path)
     assert code == 1 and "secret-field: 1" in out
+
+
+def test_rnd_big_draw_never_trips_a_rule_before_secret_field():
+    """200 draws of the #399 line: no rule outruns secret-field, ever."""
+    alphabet = ALNUM + "._-"
+    for i in range(200):
+        line = "access" + "_token=" + rnd(560, alphabet)
+        hits = credscan.scan_text(line)
+        assert [name for name, *_ in hits] == ["secret-field"], (i, hits)
+        assert hits[0][1] == 560
+
+
+def test_rnd_bans_the_character_that_would_complete_a_literal():
+    """A tail one character short of a literal bans exactly that character."""
+    assert _candidates("sk", "-") == []  # "sk-ant-" and "sk-" both ban '-'
+    assert "b" not in _candidates("xox", "bxo")  # "xoxb-" would need the 'b'
+    assert _candidates("ak", "ab") == ["a", "b"]  # an unrelated tail bans nothing
 
 
 def test_token_after_long_path_is_reported(tmp_path):
