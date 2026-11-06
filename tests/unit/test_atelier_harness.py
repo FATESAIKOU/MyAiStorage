@@ -163,22 +163,57 @@ PMO_V2_KEY_SENTENCES = (
 #: design §6) and later must keep in its body, on top of the `v2` list above:
 #: the H1 annotation (group requests inside `secretary-pmo` are handled by the
 #: inbox script only - the PMO never runs the low-level channel/registry
-#: commands itself) and the H4 wake-up SOP (a `[group-pending]` signal means: list,
-#: review, then run or reject). Chosen so that deleting any one of the sentences
+#: commands itself). The H4 trigger sentence (see PMO_V3_TO_4_GROUP_SENTENCES
+#: below) once lived here too, but this list applies to every later version,
+#: and `v5` switched the trigger tag - so the trigger now has its own
+#: version-range-bound list. Chosen so that deleting any one of the sentences
 #: turns the check red (a flipped meaning is not caught).
 PMO_V3_KEY_SENTENCES = (
     "建群／封存請求由 `dispatch.py` 的 `inbox` 腳本處理",
     "你不自己手跑建立／刪除頻道、改註冊簿、改頻道的 issue 本文的底層指令代做",
     "只能用 `dispatch.py inbox group run|reject` 送出",
+)
+
+#: The H4 group-request trigger (`dispatch.py` prints `[group-pending]`, the PMO
+#: then lists, reviews, and runs or rejects). Bounded to PMO pm `v3` and `v4`
+#: exactly: those versions still read the tag out of `dispatch.py`'s output.
+#: `v5` switched the day-to-day tools to this repo's own `pmo`, whose tick
+#: prints `[group-handoff]` instead (`src/pmo/inbox.py`, documented in
+#: docs/design-notes/110-pmo-skill.md) - the equivalent `[group-handoff]`
+#: sentence lives in PMO_V5_KEY_SENTENCES. The range is exact (not "v3+")
+#: so that a later version handling the tag differently does not inherit a
+#: sentence its harness no longer states.
+PMO_V3_TO_4_GROUP_SENTENCES = (
     "收到 `[group-pending]` 就跑 `dispatch.py inbox group list`",
 )
 
-#: What the PMO `v4` (#313 PR-C, #321) must keep in its body: the full PMO v3
-#: list plus the peer architect boundary and the transition clause (M3).
+#: What the PMO `v4` (#313 PR-C, #321) must keep in its body: the PMO v3
+#: list plus the version-bound v3/v4 trigger sentence, the peer architect
+#: boundary, and the transition clause (M3).
 PMO_V4_KEY_SENTENCES = PMO_V3_KEY_SENTENCES + (
     "不越過 PM 直接指揮隊員，也不越過架構師定介面。",
     "PMO 席位名單尚無該專案架構師時，照 v3 的方式做，在工單上註明「架構師：未開席」。",
     "你也不能決定的交本人。裁的時候不替架構師定介面。",
+)
+
+#: What the PMO `v5` (#T-7 S1, the switch of the day-to-day tools from
+#: MyPMO's `dispatch.py` to this repo's `pmo`) must keep in its body: the PMO
+#: v4 list (the `group` requests and the worker actions still live in
+#: `dispatch.py` after the switch, so those sentences stay verbatim) plus the
+#: `[group-handoff]` trigger sentence - this repo's `pmo` prints that tag, not
+#: the v3/v4-only `[group-pending]` one - and the two checklist additions: the
+#: wake-up bootstrap steps and the "one reader" rule, both stated without
+#: naming this repo's tools (the concrete commands are the environment note's
+#: job, docs/pmo/environment-note.template.md「開機步驟」). Chosen so that
+#: deleting any one of the sentences turns the check red (a flipped meaning
+#: is not caught).
+PMO_V5_KEY_SENTENCES = PMO_V4_KEY_SENTENCES + (
+    "收到 `[group-handoff]` 就跑 `dispatch.py inbox group list`",
+    "開機（每次被開、重開、重啟後接回）",
+    "再確認自己的定時叫醒還在、頻率合適",
+    "沒有事件就結束這一輪",
+    "PMO 身分的收信只走一個入口",
+    "不另外開第二個讀者、不跑背景讀信迴圈",
 )
 
 #: Content limits for `v>=1` (B-15/B-16): the body names capabilities, never the
@@ -288,6 +323,7 @@ PMO_V2_REL = "atelier/pmo/pm/v2.md"
 PM_V3_REL = "atelier/worker-team/pm/v3.md"
 PMO_V3_REL = "atelier/pmo/pm/v3.md"
 PMO_V4_REL = "atelier/pmo/pm/v4.md"
+PMO_V5_REL = "atelier/pmo/pm/v5.md"
 ARCH_REL = "atelier/worker-team/arch/v1.md"
 
 
@@ -480,12 +516,21 @@ def findings_for(path: str, text: str) -> Findings:
         and version_match is not None and int(version_match.group(1)) >= 3
     pmo_version_4_or_later = team == "pmo" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 4
+    # The H4 trigger sentence is version-bound (see its list above): v3 and v4
+    # read `[group-pending]` out of `dispatch.py`'s output, v5 reads this
+    # repo's `[group-handoff]` - so this flag is an exact range, not "or later".
+    pmo_version_3_to_4 = team == "pmo" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) in (3, 4)
+    pmo_version_5_or_later = team == "pmo" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) >= 5
     for applies, sentences, label in (
             (role == "pm" and is_v1_or_later, PM_KEY_SENTENCES, "v1 起的 pm"),
             (pmo_version_2_or_later, PMO_V2_KEY_SENTENCES, "v2 起的 pmo pm"),
             (pmo_version_3_or_later, PMO_V3_KEY_SENTENCES, "v3 起的 pmo pm"),
+            (pmo_version_3_to_4, PMO_V3_TO_4_GROUP_SENTENCES, "v3、v4 的 pmo pm"),
             (pm_version_3_or_later, PM_V3_KEY_SENTENCES, "v3 起的 worker-team pm"),
             (pmo_version_4_or_later, PMO_V4_KEY_SENTENCES, "v4 起的 pmo pm"),
+            (pmo_version_5_or_later, PMO_V5_KEY_SENTENCES, "v5 起的 pmo pm"),
             (role == "impl" and is_v1_or_later, IMPL_KEY_SENTENCES, "v1 起的 impl"),
             (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev"),
             (role == "arch" and is_v1_or_later, ARCH_KEY_SENTENCES, "v1 起的 arch")):
@@ -764,9 +809,13 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     + [(REV_REL, REV_REVIEW_BY_NON_AUTHOR, "rev 職務要寫")]
     + [(PMO_V2_REL, sentence, "關鍵句") for sentence in PMO_V2_KEY_SENTENCES]
     + [(PMO_V3_REL, sentence, "關鍵句") for sentence in PMO_V3_KEY_SENTENCES]
+    + [(rel, sentence, "關鍵句")
+       for rel in (PMO_V3_REL, PMO_V4_REL)
+       for sentence in PMO_V3_TO_4_GROUP_SENTENCES]
     + [(ARCH_REL, sentence, "關鍵句") for sentence in ARCH_KEY_SENTENCES]
     + [(PM_V3_REL, sentence, "關鍵句") for sentence in PM_V3_KEY_SENTENCES]
     + [(PMO_V4_REL, sentence, "關鍵句") for sentence in PMO_V4_KEY_SENTENCES]
+    + [(PMO_V5_REL, sentence, "關鍵句") for sentence in PMO_V5_KEY_SENTENCES]
 )
 
 
