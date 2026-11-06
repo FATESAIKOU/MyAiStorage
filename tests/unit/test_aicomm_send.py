@@ -1070,13 +1070,17 @@ def test_when_path_and_home_bin_have_a_peer_the_path_one_wins(world, tmp_path, m
     bindir.mkdir(parents=True)
     bin_marker = bindir / "bin-peer-was-used"
     bin_decoy = bindir / "pool-peer"
-    # The decoy must satisfy the `run_aicomm` guard (it never runs the real peer), but a
-    # good run must never execute it: PATH's wrapper does the find/call, and if aicomm
-    # picked the decoy by mistake it exits 1 (`not-woken not-found`) and leaves its
-    # marker - both turn this test red.
+    # The decoy must satisfy the `run_aicomm` guard - since #393 low-3 that guard wants a
+    # wrapper that really execs the fake, and a comment mention no longer passes - but a
+    # good run must never execute it: PATH's wrapper does the find/call, and the exec
+    # runs the fake with the scenario nailed to "nothing there", so a mistaken pick
+    # still answers find rc 1 and still leaves its marker - both turn this test red.
+    # (`exec env` is POSIX sh: the assignment is for the exec'd fake alone.)
+    dead_scenario = tmp_path / "no-such-scenario"
     bin_decoy.write_text(
-        f'#!/bin/sh\n# decoy peer; the fake one would be: "{world.fake_peer}"\n'
-        f'echo used > "{bin_marker}"\nexit 1\n', encoding="utf-8")
+        f'#!/bin/sh\necho used > "{bin_marker}"\n'
+        f'exec env FAKE_PEER_SCENARIO="{dead_scenario}" '
+        f'"{sys.executable}" "{world.fake_peer}" "$@"\n', encoding="utf-8")
     bin_decoy.chmod(0o755)
     path_marker = use_peer_from_path(world, tmp_path / "path-bin", monkeypatch)
     world.peers({"find": found(5201, "idle"), "call": {"5201": called(200)}})
