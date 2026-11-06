@@ -139,11 +139,11 @@ AI 之間溝通的指令 `aicomm`：`send` 寫進 Angareion，收件人若是 po
 ### Requirement: sidecar 位址固定為預設 loopback 位址
 skill MUST 使用 sidecar 文件的預設位址（loopback）；MUST NOT 讀任何設定檔，MUST NOT 提供使用者可設定的位址。測試用覆寫（環境變數 `AICOMM_SIDECAR`，作者提議 P5，可被拒絕）若存在，MUST 只收單一位址、MUST 為 loopback；需要叫醒時覆寫值不是 loopback MUST 以 exit 1 拒絕，且 MUST 在寫進 Angareion 之前拒絕。「需要叫醒」＝沒有 `--no-wake`，且（`--to` 加 `--mention`）排除自己後的候選不是空的。不需要叫醒時 MUST NOT 對 sidecar 發任何請求。這個檢查 MUST NOT 被宣稱為防止跨機叫醒（轉發埠本身是 loopback）。
 
-跨機叫醒用的執行檔另由環境變數 `AICOMM_POOL_PEER` 指定（只給測試與手動用；sidecar 開的 agent 的環境是白名單，拿不到這個變數）；沒設就從 PATH 找 `pool-peer`。這個變數只決定呼叫哪一個執行檔與 argv，MUST NOT 被當成 sidecar 位址，也 MUST NOT 被當成使用者可設定的叫醒位址（跨機能打哪些 port 由 `pool-peer` 與埠段決定）。
+跨機叫醒用的執行檔另由環境變數 `AICOMM_POOL_PEER` 指定（只給測試與手動用；sidecar 開的 agent 的環境是白名單，拿不到這個變數）；沒設就從 PATH 找 `pool-peer`，PATH 沒有再找 `~/.mylinuxpool/bin/pool-peer`（見「找 `pool-peer` 執行檔」）。這個變數只決定呼叫哪一個執行檔與 argv，MUST NOT 被當成 sidecar 位址，也 MUST NOT 被當成使用者可設定的叫醒位址（跨機能打哪些 port 由 `pool-peer` 與埠段決定）。
 
 #### Scenario: 預設位址
 - **WHEN** 沒有覆寫
-- **THEN** 對預設的 loopback 位址查詢與戳，不讀任何設定檔；跨機的執行檔從 PATH 找 `pool-peer`
+- **THEN** 對預設的 loopback 位址查詢與戳，不讀任何設定檔；跨機的執行檔從 PATH 找 `pool-peer`，PATH 沒有再找 `~/.mylinuxpool/bin/pool-peer`
 
 #### Scenario: 覆寫為非 loopback 且要叫醒
 - **WHEN** 覆寫值是非 loopback 主機，且 `send` 帶 `--to`、沒有 `--no-wake`
@@ -278,11 +278,27 @@ skill MUST 對外只提供 `send`、`inbox` 與 `log` 三個子指令（另有 `
 - **THEN** stderr 是 `wake: <agent> woken peer:5201`；`call` 的 argv 是 `call 5201 POST /agents/<quoted-id>/poke --timeout 5`，stdin 是 `{"text": <固定短句>, "interrupt": false}`；exit 0
 
 ### Requirement: 找 `pool-peer` 執行檔
-設了環境變數 `AICOMM_POOL_PEER` 時 MUST 用它，沒設 MUST 從 PATH 找 `pool-peer`。找不到或不能執行 MUST 是 `not-woken peer-unavailable`，不算錯（不影響結束碼，`--require-wake` 除外）。
+設了環境變數 `AICOMM_POOL_PEER` 時 MUST 用它，沒設 MUST 改依序找 PATH 上的 `pool-peer` 與 `~/.mylinuxpool/bin/pool-peer`（先 PATH，再 bindir；bindir 那個必須存在且可執行才算，取家目錄失敗或 bindir 不可讀視為沒有）。都沒有或不能執行 MUST 是 `not-woken peer-unavailable`，不算錯（不影響結束碼，`--require-wake` 除外）。
 
 #### Scenario: 沒有 `pool-peer`
 - **WHEN** 本機回 404，`AICOMM_POOL_PEER` 指向不存在的檔，PATH 上也沒有 `pool-peer`
 - **THEN** stderr 是 `wake: <agent> not-woken peer-unavailable`；exit 0
+
+#### Scenario: PATH 沒有、bindir 有且可執行
+- **WHEN** 本機回 404，`AICOMM_POOL_PEER` 沒設，PATH 上沒有 `pool-peer`，但 `~/.mylinuxpool/bin/pool-peer` 存在且可執行
+- **THEN** 用 `~/.mylinuxpool/bin/pool-peer` 當 `pool-peer` 執行檔
+
+#### Scenario: PATH 與 bindir 都有
+- **WHEN** 本機回 404，`AICOMM_POOL_PEER` 沒設，PATH 上與 `~/.mylinuxpool/bin/pool-peer` 都有可執行的 `pool-peer`
+- **THEN** 用 PATH 上那一個當 `pool-peer` 執行檔
+
+#### Scenario: bindir 檔存在但不可執行
+- **WHEN** 本機回 404，`AICOMM_POOL_PEER` 沒設，PATH 上沒有 `pool-peer`，`~/.mylinuxpool/bin/pool-peer` 存在但不可執行
+- **THEN** 視為沒有，stderr 是 `wake: <agent> not-woken peer-unavailable`；exit 0
+
+#### Scenario: 取家目錄失敗
+- **WHEN** 本機回 404，`AICOMM_POOL_PEER` 沒設，PATH 上沒有 `pool-peer`，取家目錄失敗（無法判斷 `~/.mylinuxpool/bin`）
+- **THEN** 視為沒有，stderr 是 `wake: <agent> not-woken peer-unavailable`（不是 internal-error）；exit 0
 
 ### Requirement: 跨機叫醒的時間預算
 收件人 MUST 一個一個處理。`find` 的 10 秒與 `call` 的 5 秒 MUST 用 `--timeout` 傳給 `pool-peer`；aicomm 對子行程 MUST 另外多等 2 秒當上限，超過就自己收掉子行程，MUST NOT 讓 `send` 卡住或失敗。
