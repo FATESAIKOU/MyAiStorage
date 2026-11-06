@@ -302,9 +302,14 @@ def _path_peer_is_test_only() -> bool:
     if not script:
         return False
     candidates = [shutil.which("pool-peer")]
-    in_bin = Path.home() / ".mylinuxpool" / "bin" / "pool-peer"
-    if in_bin.is_file() and os.access(in_bin, os.X_OK):
-        candidates.append(str(in_bin))
+    try:
+        # Broken like cli sees it (#394): a `Path.home()` that raises means there is no
+        # install bin to reach, i.e. one candidate the guard never has to check.
+        in_bin = Path.home() / ".mylinuxpool" / "bin" / "pool-peer"
+        if in_bin.is_file() and os.access(in_bin, os.X_OK):
+            candidates.append(str(in_bin))
+    except (OSError, RuntimeError):
+        pass
     for found in candidates:
         if found is None:
             continue
