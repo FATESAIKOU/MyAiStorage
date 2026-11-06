@@ -337,9 +337,15 @@ def _peer_executable() -> str | None:
     on_path = shutil.which(POOL_PEER_COMMAND)
     if on_path:
         return on_path
-    in_bin = Path.home() / ".mylinuxpool" / "bin" / POOL_PEER_COMMAND
-    if in_bin.is_file() and os.access(in_bin, os.X_OK):
-        return str(in_bin)
+    try:
+        # `Path.home()` can raise RuntimeError (no HOME and no passwd entry for the uid)
+        # or OSError (permission trouble walking the home): either way there is no
+        # install dir to check, which is as absent as one without the executable (#394).
+        in_bin = Path.home() / ".mylinuxpool" / "bin" / POOL_PEER_COMMAND
+        if in_bin.is_file() and os.access(in_bin, os.X_OK):
+            return str(in_bin)
+    except (OSError, RuntimeError):
+        pass
     return None
 
 

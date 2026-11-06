@@ -1109,6 +1109,27 @@ def test_when_the_home_bin_peer_is_not_executable_it_is_as_if_absent(world, tmp_
     assert world.peer_calls() == []
 
 
+def test_when_path_home_fails_the_peer_is_unavailable(world, tmp_path, monkeypatch, capsys):
+    # #394: `Path.home()` can raise RuntimeError (no HOME and no passwd entry for the
+    # uid) - the bindir fallback must treat that as "no install dir", not die: the send
+    # answers `peer-unavailable`, never an internal error.
+    from aicomm import cli
+
+    monkeypatch.delenv("AICOMM_POOL_PEER")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    assert shutil.which("pool-peer") is None
+
+    def broken_home():
+        raise RuntimeError("HOME not set, and no passwd entry for the uid")
+
+    monkeypatch.setattr(cli.Path, "home", staticmethod(broken_home))
+    assert cli._peer_executable() is None
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
+    assert world.peer_calls() == []
+
+
 def test_the_hook_wins_over_path(world, tmp_path, monkeypatch, capsys):
     bindir = tmp_path / "path-bin"
     bindir.mkdir()
