@@ -19,6 +19,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import stat
@@ -288,15 +289,64 @@ class Result:
         self.code, self.out, self.err = code, out, err
 
 
+# What "a shell wrapper around the fake peer" means (#393 low-3): a POSIX-ish shell
+# shebang as the fallback family writes - `#!/bin/sh`, `#!/bin/dash`, `#!/usr/bin/sh`,
+# `#!/usr/bin/env sh/bash/...`, also with env flags like `#!/usr/bin/env -S bash -eu`.
+# The fake peer itself has `#!/…python` and is never a PATH/HOME candidate on its own,
+# so a candidate that starts like that is not a wrapper and must not pass.
+_SHELL_SHEBANG = re.compile(
+    r"#!\S*[ /](?:ba|da|a|k|z)?sh(?: |$)"
+    r"|#!\S*/env(?: -\S+)* (?:ba|da|a|k|z)?sh(?: |$)"
+)
+
+# A python interpreter: `python`, `python3`, `.../python3.12` - the only thing an
+# accepted wrapper may actually start around the fake.
+_PYTHON = re.compile(r"^(?:.*/)?python(?:[\d.]+)?$")
+
+
+def _wrapper_line_runs(line: str, script: str) -> bool:
+    """One wrapper line execs `script`: a run, never a mention (#393 low-3).
+
+    After `shlex` tokenizes the line (quotes stripped out, comments dropped by
+    `comments=True`), the rule is: the line must directly start a python interpreter,
+    or an `exec` chain that resolves to one, and `script` must be one of that
+    interpreter's arguments. For the `exec` form the chain may go through `env`,
+    `KEY=VALUE` assignments and `-flag` options, which are skipped; the token after the
+    chain then has to be a python interpreter (`python`, `python3`, `.../python3.12`),
+    and `script` has to follow it. Everything else is a mention, not a run: a whole-line
+    comment leaves no tokens at all, and `exec cat <fake>` or `exec echo <fake>` hand
+    the fake to a command that is not python, while `exec <real-pool-peer> <fake>` runs
+    the real peer with the fake as a mere extra argument - all rejected.
+    """
+    try:
+        tokens = shlex.split(line, comments=True)
+    except ValueError:  # an unbalanced quote could hide anything: strict is strict
+        return False
+    if not tokens or script not in tokens:
+        return False
+    i = 0
+    if tokens[0] == "exec":
+        i = 1
+        while i < len(tokens) and (
+            tokens[i] == "env" or "=" in tokens[i] or tokens[i].startswith("-")
+        ):
+            i += 1
+    if i >= len(tokens) or _PYTHON.search(tokens[i]) is None:
+        return False  # the command being started is not a python interpreter
+    return script in tokens[i + 1:]  # an argument to it: this is a run
+
+
 def _path_peer_is_test_only() -> bool:
     """True when every `pool-peer` aicomm could fall back to is one a test may run.
 
     With `AICOMM_POOL_PEER` unset, aicomm falls back to `shutil.which("pool-peer")` and,
     since #392, to `~/.mylinuxpool/bin/pool-peer` (HOME). One test family exercises both
-    fallbacks for real; that is allowed only when each candidate that exists resolves to
-    a wrapper that runs the fake script - never to the real `pool-peer` a worker has on
-    PATH or in its own home. The tests (and the repo's `isolated_home` fixture) always
-    point HOME at a tmp dir, so a real install bin is out of reach either way.
+    fallbacks for real; that is allowed only when each candidate that exists is a shell
+    wrapper that really execs the fake script as an argument to its python interpreter -
+    never the real `pool-peer` a worker has on PATH or in its own home, and not a file
+    that merely mentions the fake inside a comment or an exec line (#393 low-3). The tests (and the repo's
+    `isolated_home` fixture) always point HOME at a tmp dir, so a real install bin is
+    out of reach either way.
     """
     script = os.environ.get("FAKE_PEER_SCRIPT")
     if not script:
@@ -317,7 +367,14 @@ def _path_peer_is_test_only() -> bool:
             text = Path(found).read_text(encoding="utf-8")
         except OSError:
             return False
-        if script not in text:
+        lines = text.splitlines()
+        if not lines or not _SHELL_SHEBANG.match(lines[0].strip()):
+            return False  # not a shell wrapper at all
+        # A run line. `_wrapper_line_runs` drops comments itself (shlex
+        # `comments=True`), so a mention in a comment has nothing left to match, while
+        # a `#` inside a path token stays part of the path - the old `#` split ate
+        # those into truncated tokens and blocked legal wrappers (#396 low-5).
+        if not any(_wrapper_line_runs(line, script) for line in lines[1:]):
             return False
     return True
 
