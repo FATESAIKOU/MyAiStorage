@@ -5,10 +5,11 @@ from __future__ import annotations
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
 import json
+import threading
 
 from _angareion_fakes import StaticResolver, entity
 from angareion.backend import Cursor, FakeBackend, Target
-from angareion.client import POLL_INTERVAL_SECONDS, Angareion
+from angareion.client import POLL_INTERVAL_SECONDS, READ_CONCURRENCY, Angareion
 from angareion.messages import Message
 from angareion.state import CursorStore, channel_cursor_key, recipient_cursor_key
 
@@ -315,3 +316,145 @@ def test_read_to_me_with_since_does_not_touch_any_cursor(tmp_path):
     assert [m.id for m in batch.messages] == ["01BBBB"]
     batch.commit()
     assert not app.cursors.path.exists()
+
+
+class CoordinatedBackend(FakeBackend):
+    """FakeBackend that forces entity reads to overlap and to finish in a pinned order (#417).
+
+    No sleeps and no timing thresholds: a `Barrier` makes the first two reads
+    wait for each other (so a sequential read blocks until the barrier times
+    out), and a condition variable makes one designated channel finish only
+    after every other entity read has finished.
+    """
+
+    def __init__(
+        self,
+        resolver,
+        *,
+        barrier_pair: tuple[str, str],
+        last_finisher: str,
+        total_entities: int,
+        barrier_timeout: float = 5.0,
+    ):
+        super().__init__(resolver)
+        self._lock = threading.Lock()
+        self._finished = threading.Condition(self._lock)
+        self._done: set[str] = set()
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self.read_channels: list[str] = []
+        self.completion_order: list[str] = []
+        self._barrier = threading.Barrier(len(barrier_pair), timeout=barrier_timeout)
+        self._barrier_pair = set(barrier_pair)
+        self._last_finisher = last_finisher
+        self._total_entities = total_entities
+
+    def read(self, entity_, cursor, **kwargs):
+        with self._lock:
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            self.read_channels.append(entity_.channel)
+        try:
+            if entity_.channel in self._barrier_pair:
+                # Both reads must be inside `read` at the same time; a
+                # sequential read never gets a partner and breaks the barrier.
+                self._barrier.wait()
+            if entity_.channel == self._last_finisher:
+                with self._finished:
+                    if not self._finished.wait_for(
+                        lambda: len(self._done) == self._total_entities - 1,
+                        timeout=10.0,
+                    ):
+                        raise AssertionError(
+                            f"{entity_.channel} read waited for the other entity reads but they never finished"
+                        )
+            return super().read(entity_, cursor, **kwargs)
+        finally:
+            with self._finished:
+                self._done.add(entity_.channel)
+                self._finished.notify_all()
+            with self._lock:
+                self.in_flight -= 1
+                self.completion_order.append(entity_.channel)
+
+
+def test_read_to_me_fetches_entities_concurrently_and_sorts_by_received_time(tmp_path):
+    """15 channels are 15 independent listings; they must not queue one by one (#417).
+
+    The three orders are deliberately distinct, so the output can only come
+    from the shared sort:
+
+    * submission order = ch00, ch01, …, ch11;
+    * completion order ends with ch05 (it waits for every other read), so it is
+      not the submission order and not the sorted order either;
+    * `received_at` runs opposite to the entity order, so the expected output
+      is ch11, ch10, …, ch00 (oldest arrival first).
+    """
+    channels = [f"ch{i:02d}" for i in range(12)]
+    entities = [entity(channel=name, issue=i + 1) for i, name in enumerate(channels)]
+    resolver = StaticResolver(entities)
+    backend = CoordinatedBackend(
+        resolver,
+        barrier_pair=("ch00", "ch01"),
+        last_finisher="ch05",
+        total_entities=len(channels),
+    )
+
+    # One message per channel, timestamps falling with the entity order: the
+    # output must follow received_at (oldest first), not submission/completion order.
+    for i, target in enumerate(entities):
+        backend.add_entity(target.channel, number=target.issue)
+        backend.deliver(
+            target,
+            _make_msg(channel=target.channel, msg_id=f"01AAAA{i:02d}"),
+            comment_id=i + 1,
+            created_at=f"2026-10-10T12:00:{len(channels) - 1 - i:02d}Z",
+        )
+
+    store = CursorStore(tmp_path, ME)
+    app = Angareion(backend, store, resolver, ME)
+
+    batch = app.read(Target(recipient=ME))
+
+    expected = list(reversed(channels))
+    assert sorted(backend.read_channels) == sorted(channels)  # one read per channel
+    assert backend.max_in_flight >= 2  # the barrier only clears when both reads overlap
+    assert backend.max_in_flight <= READ_CONCURRENCY
+    # The fixture really does separate the three orders.
+    assert backend.completion_order != channels
+    assert backend.completion_order != expected
+    assert [m.channel for m in batch.messages] == expected  # oldest arrival first
+    keys = [(m.received_at, m.channel, m.id) for m in batch.messages]
+    assert keys == sorted(keys)
+
+
+def test_read_to_me_with_a_single_channel_does_not_start_a_thread_pool(tmp_path, monkeypatch):
+    """One job (a to-me read over a single channel) is read inline, not in a pool (#417)."""
+    import angareion.client as client_module
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("a one-entity to-me read must not start a ThreadPoolExecutor")
+
+    monkeypatch.setattr(client_module, "ThreadPoolExecutor", forbidden)
+    resolver = StaticResolver([GENERAL])
+    backend = FakeBackend(resolver)
+    backend.add_entity("general", number=10)
+    backend.deliver(GENERAL, _make_msg(msg_id="01AAAA"), comment_id=1, created_at="2026-10-10T12:00:00Z")
+    app = Angareion(backend, CursorStore(tmp_path, ME), resolver, ME)
+
+    assert [m.id for m in app.read(Target(recipient=ME)).messages] == ["01AAAA"]
+
+
+def test_read_a_single_channel_does_not_start_a_thread_pool(tmp_path, monkeypatch):
+    """A `--channel` read has one job; it must not pay the pool's setup cost."""
+    import angareion.client as client_module
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("a single-entity read must not start a ThreadPoolExecutor")
+
+    monkeypatch.setattr(client_module, "ThreadPoolExecutor", forbidden)
+    backend = _backend()
+    backend.deliver(GENERAL, _make_msg(msg_id="01AAAA"), comment_id=1, created_at="2026-10-10T12:00:00Z")
+    app = _app(tmp_path, backend)
+
+    assert [m.id for m in app.read(Target(channel="general")).messages] == ["01AAAA"]
