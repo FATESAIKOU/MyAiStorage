@@ -2,7 +2,7 @@
 
 ## pstack (interrogate review method)
 
-`atelier/worker-team/rev/v1.md` (the `atelier:worker-team-rev@v1` harness) condenses and rewrites, in Chinese, the review method of the **pstack** plugin's `interrogate` skill (the reviewer prompt, the review rubric, the code-quality lens and the lead-judgment notes). It is not a translation of the original text.
+`atelier/worker-team/rev/v1.md` and the later versions of that harness (`atelier:worker-team-rev@v1` onward) condense and rewrite, in Chinese, the review method of the **pstack** plugin's `interrogate` skill (the reviewer prompt, the review rubric, the code-quality lens and the lead-judgment notes). It is not a translation of the original text.
 
 pstack is distributed under the MIT License:
 
