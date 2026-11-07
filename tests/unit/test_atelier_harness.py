@@ -139,6 +139,23 @@ ARCH_KEY_SENTENCES = (
     "作者模式例外：你親寫的設計，以非作者審查者照架構清單的「可以」加 PMO 向本人說明為核准；你對自己設計的「可以」不算數。",
 )
 
+#: The v1 seat sentence (`ARCH_KEY_SENTENCES` L130) says「長期常駐」; `v2` (#403,
+#: owner 2026-11-04) replaces it with「按需開」. `ARCH_KEY_SENTENCES` stays bound to
+#: `v1` only - it is not weakened, and `v2` is not forced to keep「常駐」.
+ARCH_V1_SEAT_SENTENCE = "你是專案的架構師：一個專案一位，固定名，長期常駐。"
+#: The v2 replacement (the whole sentence, so deleting or rewording it goes red).
+ARCH_V2_SEAT_SENTENCE = (
+    "你是專案的架構師：一個專案一位，固定名（-1）；"
+    "按需開：PM 需要設計或結構審時才開，用完關掉。"
+)
+#: What an `arch` harness of `v>=2` must keep: the v1 list with the seat sentence
+#: replaced, plus the on-demand closing sentence from `do`（關掉後下次再由 PM 開）,
+#: so both places the change touches are pinned.
+ARCH_V2_KEY_SENTENCES = tuple(
+    ARCH_V2_SEAT_SENTENCE if sentence == ARCH_V1_SEAT_SENTENCE else sentence
+    for sentence in ARCH_KEY_SENTENCES
+) + ("照環境說明的關閉步驟關掉；下次需要時由 PM 再開。",)
+
 #: What the PMO `v2` (#246, aligned to the handbook at 44ec9dc) and later must keep
 #: in its body: the merge rules incl. the transition clause, the first-line
 #: conventions, and the secretary rule. Chosen so that deleting any one of the
@@ -325,6 +342,7 @@ PMO_V3_REL = "atelier/pmo/pm/v3.md"
 PMO_V4_REL = "atelier/pmo/pm/v4.md"
 PMO_V5_REL = "atelier/pmo/pm/v5.md"
 ARCH_REL = "atelier/worker-team/arch/v1.md"
+ARCH_V2_REL = "atelier/worker-team/arch/v2.md"
 
 
 @dataclass
@@ -523,6 +541,12 @@ def findings_for(path: str, text: str) -> Findings:
         and version_match is not None and int(version_match.group(1)) in (3, 4)
     pmo_version_5_or_later = team == "pmo" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 5
+    # `arch` is version-bound per file (#403): v1 keeps the「長期常駐」sentence,
+    # v2 replaces it with「按需開」, so each list applies only to its own version.
+    arch_version_1 = role == "arch" \
+        and version_match is not None and int(version_match.group(1)) == 1
+    arch_version_2_or_later = role == "arch" \
+        and version_match is not None and int(version_match.group(1)) >= 2
     for applies, sentences, label in (
             (role == "pm" and is_v1_or_later, PM_KEY_SENTENCES, "v1 起的 pm"),
             (pmo_version_2_or_later, PMO_V2_KEY_SENTENCES, "v2 起的 pmo pm"),
@@ -533,7 +557,8 @@ def findings_for(path: str, text: str) -> Findings:
             (pmo_version_5_or_later, PMO_V5_KEY_SENTENCES, "v5 起的 pmo pm"),
             (role == "impl" and is_v1_or_later, IMPL_KEY_SENTENCES, "v1 起的 impl"),
             (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev"),
-            (role == "arch" and is_v1_or_later, ARCH_KEY_SENTENCES, "v1 起的 arch")):
+            (arch_version_1, ARCH_KEY_SENTENCES, "v1 的 arch"),
+            (arch_version_2_or_later, ARCH_V2_KEY_SENTENCES, "v2 起的 arch")):
         if not applies:
             continue
         for sentence in sentences:
@@ -813,6 +838,7 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
        for rel in (PMO_V3_REL, PMO_V4_REL)
        for sentence in PMO_V3_TO_4_GROUP_SENTENCES]
     + [(ARCH_REL, sentence, "關鍵句") for sentence in ARCH_KEY_SENTENCES]
+    + [(ARCH_V2_REL, sentence, "關鍵句") for sentence in ARCH_V2_KEY_SENTENCES]
     + [(PM_V3_REL, sentence, "關鍵句") for sentence in PM_V3_KEY_SENTENCES]
     + [(PMO_V4_REL, sentence, "關鍵句") for sentence in PMO_V4_KEY_SENTENCES]
     + [(PMO_V5_REL, sentence, "關鍵句") for sentence in PMO_V5_KEY_SENTENCES]
@@ -843,7 +869,8 @@ def test_a_missing_impl_or_rev_key_sentence_is_flagged(rel, sentence, expected, 
         f"格式檢查沒有抓到「{sentence}」被拿掉：{found.errors}"
 
 
-@pytest.mark.parametrize("rel", (IMPL_REL, REV_REL, ARCH_REL), ids=("impl", "rev", "arch"))
+@pytest.mark.parametrize("rel", (IMPL_REL, REV_REL, ARCH_REL, ARCH_V2_REL),
+                         ids=("impl", "rev", "arch", "arch-v2"))
 def test_the_impl_and_rev_harnesses_pass_the_format_check(rel):
     found = findings_for(rel, (REPO / rel).read_text(encoding="utf-8"))
     assert not found.errors, "\n".join(found.errors)
