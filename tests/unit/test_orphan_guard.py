@@ -146,6 +146,29 @@ def _pids_matching(marker: str) -> list[int]:
     return pids
 
 
+def _reaper_pids(agent_pid: int) -> list[int]:
+    """The reapers (`python -m agora.orphan_guard --pid <agent_pid> ...`) in place."""
+    out = subprocess.run(["ps", "-eww", "-o", "pid=,command="], capture_output=True, text=True,
+                         timeout=10)
+    needle = f"agora.orphan_guard --pid {agent_pid} "
+    pids = []
+    for line in out.stdout.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if pid.isdigit() and needle in command + " ":
+            pids.append(int(pid))
+    return pids
+
+
+def _wait_for(check, timeout: float):
+    """Poll `check()` until it is truthy (returned) or `timeout` seconds pass (falsy)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        found = check()
+        if found or time.monotonic() >= deadline:
+            return found
+        time.sleep(0.02)
+
+
 def _wait_gone(pid: int, timeout=30.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -414,9 +437,16 @@ def test_killing_agora_continue_takes_the_agent_with_it(claude_lab, capsys, tmp_
                 raise AssertionError(f"continue died early: {err_path.read_text()!r}")
             time.sleep(0.02)
         assert marker, f"never saw the agent session line: {err_path.read_text()!r}"
-        pids = _pids_matching(marker)
+        # The marker line is printed before the agent is spawned, and the reaper
+        # is started only after it (#415): wait for the agent, then for the
+        # reaper that watches it. Killing agora earlier leaves no reaper to act.
+        pids = _wait_for(lambda: (p := _pids_matching(marker)) and len(p) == 1 and p, 60) or \
+            _pids_matching(marker)
         assert len(pids) == 1, f"expected exactly the fake agent, got {pids}"
         agent_pid = pids[0]
+        assert _wait_for(lambda: _reaper_pids(agent_pid), 60), (
+            f"no reaper ever watched the agent; stderr was "
+            f"{err_path.read_text(encoding='utf-8', errors='replace')!r}")
 
         agora.kill()                                  # SIGKILL: no goodbye byte
         assert agora.wait(timeout=30) == -signal.SIGKILL
