@@ -224,13 +224,41 @@ PMO_V4_KEY_SENTENCES = PMO_V3_KEY_SENTENCES + (
 #: job, docs/pmo/environment-note.template.md「開機步驟」). Chosen so that
 #: deleting any one of the sentences turns the check red (a flipped meaning
 #: is not caught).
-PMO_V5_KEY_SENTENCES = PMO_V4_KEY_SENTENCES + (
+#:
+#: The receiving-entry sentence is split out because `v6` rewrote it: `v5` says
+#: 「PMO 身分的收信只走一個入口」, `v6` says the entry is the environment's
+#: single one. Both wordings are pinned on their own file (v5 exactly vs
+#: `v6` and later), so the v5 check is not weakened and v6 is not forced to
+#: keep the old words.
+PMO_V5_SHARED_SENTENCES = PMO_V4_KEY_SENTENCES + (
     "收到 `[group-handoff]` 就跑 `dispatch.py inbox group list`",
     "開機（每次被開、重開、重啟後接回）",
     "再確認自己的定時叫醒還在、頻率合適",
     "沒有事件就結束這一輪",
-    "PMO 身分的收信只走一個入口",
     "不另外開第二個讀者、不跑背景讀信迴圈",
+)
+
+#: `v5`'s own wording of the receiving-entry rule（只套 `v5`）。
+PMO_V5_RECEIVING_SENTENCE = "PMO 身分的收信只走一個入口"
+
+#: What the PMO `v5` body must keep: the shared list above plus its own
+#: receiving-entry wording. Applied to `v5` exactly - see the note above.
+PMO_V5_KEY_SENTENCES = PMO_V5_SHARED_SENTENCES + (PMO_V5_RECEIVING_SENTENCE,)
+
+#: What the PMO `v6` (#408, MyPMO#325 期 6 M1) must keep in its body: the v5
+#: shared list (the group requests and the boot sequence are unchanged) plus
+#: the rewritten receiving-entry sentence and the two new body rules - the
+#: waiting/monitoring duty is handed to the PMO's own team members (not the PMs'
+#: ones; the PMO only judges, merges, stops the loss and asks the owner) and a
+#: call whose rewrite by a tool hook got no verdict is sent again as rewritten.
+#: Each is a whole sentence, so deleting or rewording one goes red.
+PMO_V6_KEY_SENTENCES = PMO_V5_SHARED_SENTENCES + (
+    "收信入口是環境指定的單一收信入口",
+    "等待與例行監看交給你自己的 PMO 隊員",
+    # the rule is in both `judge` and `dont`; each is pinned by its own whole
+    # sentence, so deleting or rewording either one goes red (#408 review).
+    "那不是被拒；把改寫後的呼叫原樣再送一次（不改回原來的，也不另外改）",
+    "不當成拒絕：把改寫後的呼叫原樣再送一次；不改回原來的、不另外改",
 )
 
 #: Content limits for `v>=1` (B-15/B-16): the body names capabilities, never the
@@ -341,6 +369,7 @@ PM_V3_REL = "atelier/worker-team/pm/v3.md"
 PMO_V3_REL = "atelier/pmo/pm/v3.md"
 PMO_V4_REL = "atelier/pmo/pm/v4.md"
 PMO_V5_REL = "atelier/pmo/pm/v5.md"
+PMO_V6_REL = "atelier/pmo/pm/v6.md"
 ARCH_REL = "atelier/worker-team/arch/v1.md"
 ARCH_V2_REL = "atelier/worker-team/arch/v2.md"
 
@@ -539,8 +568,12 @@ def findings_for(path: str, text: str) -> Findings:
     # repo's `[group-handoff]` - so this flag is an exact range, not "or later".
     pmo_version_3_to_4 = team == "pmo" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) in (3, 4)
-    pmo_version_5_or_later = team == "pmo" and role == "pm" \
-        and version_match is not None and int(version_match.group(1)) >= 5
+    # `v5` is pinned to `v5` exactly: `v6` rewrote the receiving-entry sentence,
+    # so the old words are not forced on it (the v5 file keeps every sentence).
+    pmo_version_5 = team == "pmo" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) == 5
+    pmo_version_6_or_later = team == "pmo" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) >= 6
     # `arch` is version-bound per file (#403): v1 keeps the「長期常駐」sentence,
     # v2 replaces it with「按需開」, so each list applies only to its own version.
     arch_version_1 = role == "arch" \
@@ -554,7 +587,8 @@ def findings_for(path: str, text: str) -> Findings:
             (pmo_version_3_to_4, PMO_V3_TO_4_GROUP_SENTENCES, "v3、v4 的 pmo pm"),
             (pm_version_3_or_later, PM_V3_KEY_SENTENCES, "v3 起的 worker-team pm"),
             (pmo_version_4_or_later, PMO_V4_KEY_SENTENCES, "v4 起的 pmo pm"),
-            (pmo_version_5_or_later, PMO_V5_KEY_SENTENCES, "v5 起的 pmo pm"),
+            (pmo_version_5, PMO_V5_KEY_SENTENCES, "v5 的 pmo pm"),
+            (pmo_version_6_or_later, PMO_V6_KEY_SENTENCES, "v6 起的 pmo pm"),
             (role == "impl" and is_v1_or_later, IMPL_KEY_SENTENCES, "v1 起的 impl"),
             (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev"),
             (arch_version_1, ARCH_KEY_SENTENCES, "v1 的 arch"),
@@ -842,6 +876,7 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     + [(PM_V3_REL, sentence, "關鍵句") for sentence in PM_V3_KEY_SENTENCES]
     + [(PMO_V4_REL, sentence, "關鍵句") for sentence in PMO_V4_KEY_SENTENCES]
     + [(PMO_V5_REL, sentence, "關鍵句") for sentence in PMO_V5_KEY_SENTENCES]
+    + [(PMO_V6_REL, sentence, "關鍵句") for sentence in PMO_V6_KEY_SENTENCES]
 )
 
 
