@@ -279,8 +279,11 @@ def test_c23_the_documented_reason_codes_are_the_cli_constants(path):
 def test_c18_the_wake_line_grammar_is_written_down(path):
     text = path.read_text(encoding="utf-8")
     for form in ("wake: <agent> woken local",
+                 "wake: <agent> woken local queued record=local/<id>",
+                 "wake: <agent> woken peer:<port>[,<port>…]",
                  "wake: <agent> not-woken <原因碼>",
-                 "wake: <agent> unknown <原因碼>"):
+                 "wake: <agent> unknown <原因碼>",
+                 "record=<records>"):
         assert form in text
     assert "每個收件人" in text and "一行" in text
 
@@ -325,3 +328,36 @@ def test_the_docs_describe_the_order_local_first_then_the_pool():
         text = path.read_text(encoding="utf-8")
         assert "先問本機" in text or "先本機" in text
         assert "pool-peer" in text
+
+
+# --- #406: the queued outcome and the sidecar record id are written down -------------------
+
+
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_406_c14_queued_and_the_record_id_are_written_down(path):
+    text = path.read_text(encoding="utf-8")
+    for needle in (
+        "woken local queued",
+        "record=",
+        "回報一律帶 `--to`",
+        "GET /pokes/",
+        "`queued` 不要重送",
+        "不是原因碼",
+        "poke_not_found",
+        "不代表沒叫醒",
+        "每一行之後沒有其他文字",
+    ):
+        assert needle in text, needle
+
+
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_406_c14_the_two_record_queries_are_written_down(path):
+    text = path.read_text(encoding="utf-8")
+    assert "curl -s 127.0.0.1:8471/pokes/<id>" in text
+    assert "pool-peer call <port> GET /pokes/<id>" in text
+
+
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_406_c14_the_explanation_field_is_gone(path):
+    text = path.read_text(encoding="utf-8")
+    assert "<說明>" not in text

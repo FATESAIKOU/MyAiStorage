@@ -62,30 +62,41 @@ aicomm log [同 angareion log 的全部旗標] [--json]                         
 ## 送達與叫醒
 
 - **送達＝訊息寫進 Angareion**。寫入成功，`send` 就是 exit 0，不管叫醒成不成功；叫醒結果只寫在 stderr，不改變結束碼（`--require-wake` 除外）。**exit 0 只代表已送達。** stdout 第一行永遠是訊息 id，不要因為叫醒失敗就重送。
-- 叫醒的結果每個收件人剛好一行，本機與跨機共用同一個格式（`<說明>` 只有一行）；看 stderr 的 `wake:` 行才知道對方有沒有被叫醒：
+- 叫醒的結果每個收件人剛好一行，本機與跨機共用同一個格式；每一行之後沒有其他文字。看 stderr 的 `wake:` 行才知道對方有沒有被叫醒：
 
   ```
-  wake: <agent> woken local[ interrupt]
-  wake: <agent> woken peer:<port>[,<port>…][ interrupt]
-  wake: <agent> not-woken <原因碼>[ <說明>]
-  wake: <agent> unknown <原因碼>[ <說明>]
+  wake: <agent> woken local[ interrupt| queued][ record=<records>]
+  wake: <agent> woken peer:<port>[,<port>…][ interrupt| queued][ record=<records>]
+  wake: <agent> not-woken <原因碼>[ record=<records>]
+  wake: <agent> unknown <原因碼>[ record=<records>]
+
+  <records> := <rec>[,<rec>…]
+  <rec>     := local/<id> | peer:<port>/<id>
+  <id>      := [A-Za-z0-9_-]{1,64}
   ```
 
   `woken` 是叫醒了；`not-woken` 是確定沒戳到、或對方明確拒絕；`unknown` 是**可能已經戳到**（例如戳逾時）——看到 `unknown` 不要重送。
+- **回報一律帶 `--to`，送完看 stderr 的 `wake:` 行**：廣播不叫醒任何人；要對方動作的回報（完成、提問）必須帶 `--to`。看到什麼就怎麼做：
+  - `woken`：不用再做。
+  - `woken … queued`：對方忙，這一輪結束就會看到；急的話下一則用 `--interrupt`（仍然照軟規則，隊員不中斷 PM／PMO），`queued` 不要重送。完整樣子是 `wake: <agent> woken local queued record=local/<id>`（跨機是 `woken peer:<port> queued`）。
+  - `not-woken`：信仍在 Angareion，對方之後 `inbox` 讀得到；若需要對方動作，另外告知 PM／PMO（例如對方沒開席位）。
+  - `unknown`：不要重送。
+- `interrupt` 與 `queued` 互斥：帶 `--interrupt` 的戳不會排隊，同時回報時以 ` interrupt` 為準。`queued` **不是原因碼**。對方在提問框裡（409 `awaiting-answer`）sidecar **不送、不排隊**，所以是 `not-woken awaiting-answer`，不是 `queued`。
+- `record=` 是那一戳在 sidecar 的紀錄：本機 `local/<id>`、跨機 `peer:<port>/<id>`；多台依 port 由小到大。只在至少拿到一個合格 id 時才寫，沒有 id 的行和舊版一字不差。對照紀錄：本機 `curl -s 127.0.0.1:8471/pokes/<id>`，跨機 `pool-peer call <port> GET /pokes/<id>`。查回 404 `poke_not_found` 是紀錄已過期或沒留下，**不代表沒叫醒**。`woken` 只代表 sidecar 收下了，**不代表對方已讀**。
 - 叫醒是盡力而為：收件人在本機 sidecar 上是 `idle` 或 `running` 才戳；不在本機時經 `pool-peer` 找 pool 裡的其他機器（先問本機，回 404、連不上或查詢逾時才找別台；本機戳過之後不論成敗都不再找）。pool 裡每一台都確定沒有是 `not-woken not-found`；查不完整是 `not-woken lookup-incomplete`；`pool-peer` 不可用是 `not-woken peer-unavailable`；`starting`、`waiting-quota`、`exited` 都不戳（訊息還是在 Angareion，對方之後 `inbox` 一定讀得到）。
 - 跨機叫醒成功時 stderr 是 `wake: <agent> woken peer:<port>`；`<port>` 是那一台 sidecar 的埠號（pool 內，不是機器位址）。能戳的每一台都戳，合併成一行；看到 `unknown` 不要重送。
 - 戳的內容固定（請對方執行 `aicomm inbox`），不含你的訊息。對方在 `running` 時，戳會排到它這一輪之後，不打斷。
 - 連送兩則會戳兩次，沒有去重；一件事一則講完。
 - 自己不會戳自己（用環境變數 `ANGAREION_IDENTITY` 認自己）。
-- `--require-wake`：任何一位是 `not-woken` 或 `unknown` 就回 **4**（訊息已送達，**不要重送**）；全部叫醒、或沒有人要叫醒（廣播、只寄給自己）回 0。與 `--no-wake` 不能同時給（exit 1，訊息不送出）。
+- `--require-wake`：任何一位是 `not-woken` 或 `unknown` 就回 **4**（訊息已送達，**不要重送**）；全部叫醒（`woken`，含 `woken … queued`）、或沒有人要叫醒（廣播、只寄給自己）回 0。與 `--no-wake` 不能同時給（exit 1，訊息不送出）。
 - 原因碼（與 `src/aicomm/cli.py` 的常數一致；新增要改設計文件並同步這裡）：
   - `not-woken` 的原因碼：`not-found`、`peer-unavailable`、`lookup-incomplete`、`peer-port-out-of-range`、`peer-bad-answer`、`bad-answer`、`bad-name`、`agent-not-running`、`awaiting-answer`、`state-<state>`、`http-<碼>`
   - `unknown` 的原因碼：`poke-timeout`、`poke-error`、`peer-bad-answer`、`internal-error`
-  - 其中 `not-found`、`lookup-incomplete`、`peer-port-out-of-range` 與 `peer-bad-answer` 是跨機後援（`pool-peer`）才有的；`peer-unavailable` 是 `pool-peer` 用不了：沒裝或起不來、`find` 回 2（查不了），或找到的那一台 `call` 回 2（連不到）。`state` 不是一個 token 時，本機是 `bad-answer`、別台是 `peer-bad-answer`。
+  - 其中 `not-found`、`lookup-incomplete`、`peer-port-out-of-range` 與 `peer-bad-answer` 是跨機後援（`pool-peer`）才有的；`peer-unavailable` 是 `pool-peer` 用不了：沒裝或起不來、`find` 回 2（查不了），或找到的那一台 `call` 回 2（連不到）。`state` 不是一個 token 時，本機是 `bad-answer`、別台是 `peer-bad-answer`。`queued` 不是原因碼。
 
 ## 結束碼
 
-- `send`：exit 0 訊息已寫進 Angareion——**exit 0 只代表已送達**，叫醒的結果看 stderr 的 `wake:` 行，叫醒失敗不改變結束碼；exit 4 只在使用 `--require-wake` 且有人沒叫醒（`not-woken`／`unknown`）時出現，訊息已送達，**不要重送**；exit 1 用法錯（沒有送出，含 `--require-wake` 與 `--no-wake` 同時給）；exit 2 Angareion 後端或設定錯；其他非 0 是 Angareion 的原結束碼（沒有叫醒任何人）。
+- `send`：exit 0 訊息已寫進 Angareion——**exit 0 只代表已送達**，叫醒的結果看 stderr 的 `wake:` 行，叫醒失敗不改變結束碼；`woken … queued` 算叫醒（`--require-wake` 下也是 0）；exit 4 只在使用 `--require-wake` 且有人沒叫醒（`not-woken`／`unknown`）時出現，訊息已送達，**不要重送**；exit 1 用法錯（沒有送出，含 `--require-wake` 與 `--no-wake` 同時給）；exit 2 Angareion 後端或設定錯；其他非 0 是 Angareion 的原結束碼（沒有叫醒任何人）。
 - `inbox`：exit 0 讀完（可能是空的，空的時候 stderr 有一行提示）；`--wait` 逾時 exit 3（沒有讀、游標不動）；exit 2 後端或設定錯，**不是「沒有新訊息」**，稍等再試；exit 1 用法錯。
 - `log`：照 `angareion log` 的結束碼（0 成功含空結果、1 用法錯、2 後端或設定錯）；aicomm 不叫醒任何人。
 

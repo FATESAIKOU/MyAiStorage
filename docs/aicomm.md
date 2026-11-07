@@ -27,23 +27,36 @@ aicomm 對外只有三個指令：send、inbox、log。
 ## 送達與叫醒
 
 - **送達＝訊息寫進 Angareion**。寫入成功，叫醒的結果就只寫在 stderr，不改變結束碼（`--require-wake` 除外，見下）：**exit 0 只代表已送達**。stdout 第一行還是訊息 id。
-- 叫醒的結果每個收件人剛好一行，本機與跨機共用同一個格式（`<說明>` 只有一行）：
+- 叫醒的結果每個收件人剛好一行，本機與跨機共用同一個格式；每一行之後沒有其他文字：
 
   ```
-  wake: <agent> woken local[ interrupt]
-  wake: <agent> woken peer:<port>[,<port>…][ interrupt]
-  wake: <agent> not-woken <原因碼>[ <說明>]
-  wake: <agent> unknown <原因碼>[ <說明>]
+  wake: <agent> woken local[ interrupt| queued][ record=<records>]
+  wake: <agent> woken peer:<port>[,<port>…][ interrupt| queued][ record=<records>]
+  wake: <agent> not-woken <原因碼>[ record=<records>]
+  wake: <agent> unknown <原因碼>[ record=<records>]
+
+  <records> := <rec>[,<rec>…]
+  <rec>     := local/<id> | peer:<port>/<id>
+  <id>      := [A-Za-z0-9_-]{1,64}
   ```
 
   `woken` 是叫醒了；`not-woken` 是確定沒戳到、或對方明確拒絕；`unknown` 是**可能已經戳到**（例如戳逾時）——看到 `unknown` 不要重送。跨機叫醒成功時是 `woken peer:<port>`，`<port>` 是那一台 sidecar 的埠號（見「對 `pool-peer` 的依賴面」）。
+- `woken … queued`：對方忙（對方正在跑），這一則排在它這一輪之後才會被處理；文字已經交出去，`queued` 不要重送。完整樣子是 `wake: <agent> woken local queued record=local/<id>`（跨機是 `woken peer:<port> queued`）。`interrupt` 與 `queued` 互斥：帶 `--interrupt` 的戳不會排隊，同時回報時以 ` interrupt` 為準。`queued` **不是原因碼**。
+- 對方在提問框裡（409 `awaiting-answer`）也是「忙」，但 sidecar 對這種**不送、不排隊**，所以維持 `not-woken awaiting-answer`，不是 `queued`。
+- `record=` 是那一戳在 sidecar 的紀錄：本機是 `local/<id>`，跨機是 `peer:<port>/<id>`；多台依 port 由小到大以逗號串接，失敗的那幾台也會列。只在至少拿到一個合格 id 時才寫，所以沒有 id 的行和舊版一字不差。`woken` 只代表 sidecar 收下了，**不代表對方已讀**（那要用紀錄的 `confirmed_at` 查）。
 - 叫醒是盡力而為：收件人在本機 sidecar 上是 `idle` 或 `running` 才戳；不在本機時經 `pool-peer` 找 pool 裡的其他機器，找到的那幾台也照同一個條件戳（訊息還是在 Angareion，對方之後 `inbox` 一定讀得到）。`starting`、`waiting-quota`、`exited` 都不戳。查不到人（本機 404、連不上或查詢逾時）時的行為見「叫醒的順序」。
-- `--require-wake`：任何一位是 `not-woken` 或 `unknown` 就回 **exit 4**——訊息已送達，**不要重送**；全部叫醒、或沒有人要叫醒（廣播、只寄給自己）回 0。與 `--no-wake` 不能同時給（exit 1，而且在寫進 Angareion 之前就拒絕）。
+- `--require-wake`：任何一位是 `not-woken` 或 `unknown` 就回 **exit 4**——訊息已送達，**不要重送**；全部叫醒（含 `woken … queued`）、或沒有人要叫醒（廣播、只寄給自己）回 0。與 `--no-wake` 不能同時給（exit 1，而且在寫進 Angareion 之前就拒絕）。
 - 原因碼（與 `src/aicomm/cli.py` 的常數一致；新增要改設計文件並同步這裡）：
   - `not-woken` 的原因碼：`not-found`、`peer-unavailable`、`lookup-incomplete`、`peer-port-out-of-range`、`peer-bad-answer`、`bad-answer`、`bad-name`、`agent-not-running`、`awaiting-answer`、`state-<state>`、`http-<碼>`
   - `unknown` 的原因碼：`poke-timeout`、`poke-error`、`peer-bad-answer`、`internal-error`
   - 其中 `not-found`、`lookup-incomplete`、`peer-port-out-of-range` 與 `peer-bad-answer` 是跨機後援（`pool-peer`）才有的；`peer-unavailable` 是 `pool-peer` 用不了：沒裝或起不來、`find` 回 2（查不了），或找到的那一台 `call` 回 2（連不到）。`state` 不是一個 token 時，本機是 `bad-answer`、別台是 `peer-bad-answer`。
 - 連送兩則會戳兩次，沒有去重；自己不會戳自己（見「自己是誰」）。
+- **回報一律帶 `--to`，送完看 stderr 的 `wake:` 行**：廣播不叫醒任何人；要對方動作的回報（完成、提問）必須帶 `--to`。看到什麼就怎麼做：
+  - `woken`：不用再做。
+  - `woken … queued`：對方忙，這一輪結束就會看到；急的話下一則用 `--interrupt`（仍然照軟規則，隊員不中斷 PM／PMO），`queued` 不要重送。
+  - `not-woken`：信仍在 Angareion，對方之後 `inbox` 讀得到；若需要對方動作，另外告知 PM／PMO（例如對方沒開席位）。
+  - `unknown`：不要重送。
+- 對照 sidecar 的紀錄：用 `record=` 的位置和 id 直接查——本機 `curl -s 127.0.0.1:8471/pokes/<id>`，跨機 `pool-peer call <port> GET /pokes/<id>`。查回 404 `poke_not_found` 是紀錄已過期或沒有留下（沒查到 agent 的 404／400／413 只放在 1000 筆的小緩衝，很快就查不到），**不代表沒叫醒**。
 
 ## 叫醒的順序（本機優先，查不到才跨機）
 
@@ -87,7 +100,9 @@ aicomm 只對 sidecar 發兩種請求，位址固定為 sidecar 文件的預設 
 | 請求 | 用途 | 讀什麼 |
 |---|---|---|
 | `GET /agents/{id}`（逾時 3 秒） | 這個 AI 在不在這台、狀態是什麼 | 200 的 `state`；404 ＝不在這台 |
-| `POST /agents/{id}/poke`（逾時 5 秒） | 叫醒 | body `{"text": <固定短句>, "interrupt": <bool>}` |
+| `POST /agents/{id}/poke`（逾時 5 秒） | 叫醒 | body `{"text": <固定短句>, "interrupt": <bool>}`；回應（任何 HTTP 碼）可選讀頂層 `poke_id`，200 另讀 `poke_outcome`（都沒有＝舊版 sidecar） |
+
+- 戳的回應會讀兩個選用欄位（MyLinuxPool#786，poke-records-v1）：`poke_id` 只在是字串且完全符合 `[A-Za-z0-9_-]{1,64}` 時採用，否則當沒有；200 的 `poke_outcome` 只有值是 `"queued"` 才算「對方忙（排隊）」。這兩個欄位**不改**上面判讀的種類與原因碼，也**不加發**任何請求。409 的錯誤碼先讀巢狀的 `error.code`，再讀頂層的 `code`、頂層字串的 `error`（第一個是字串的定案；都不認得是 `http-409`）。
 
 - `state` 是 `idle` 或 `running` 才戳；`starting`、`waiting-quota`、`exited` 不戳。不看 tui 或 headless，不讀 `attach`。
 - `interrupt` 預設 false；給了 `--interrupt` 且對方 `running` 才是 true（對 `idle` 的戳本來就不打斷）。
@@ -102,12 +117,12 @@ aicomm 只對 sidecar 發兩種請求，位址固定為 sidecar 文件的預設 
 | 用法 | 用途 | 讀什麼 |
 |---|---|---|
 | `pool-peer find <id> --json --timeout 10` | 這個 AI 在 pool 裡哪幾台 sidecar 上 | 結束碼與 JSON 陣列；每一筆只讀 `port`（整數，不是 bool）與 `agent.state`（字串） |
-| `pool-peer call <port> POST /agents/<id>/poke --timeout 5` | 叫醒那一台 | 結束碼；rc 0 時 stdout 第一行是 HTTP 狀態碼，之後是 body（與本機戳同一張判讀表） |
+| `pool-peer call <port> POST /agents/<id>/poke --timeout 5` | 叫醒那一台 | 結束碼；rc 0 時 stdout 第一行是 HTTP 狀態碼，之後是 body（與本機戳同一張判讀表，含選用的 `poke_id`／`poke_outcome`） |
 
 - 埠段 **5200–5399**（含）。aicomm 先在這一側擋掉其他埠（`not-woken peer-port-out-of-range`），不會把它和「連不到」（`call` rc 2）混在一起。
 - 結束碼：`find` 0＝至少找到一台、1＝每一台都確定沒有、2＝查不了（設定或 Gateway）、3＝找到 0 台但有的台查不到；`call` 0＝有回應（不論 HTTP 碼）、2＝連不到、3＝逾時（結果未知）。約定外的結束碼都是 `peer-bad-answer`。
 - aicomm 對子行程另外多等 2 秒（`--timeout` 加 2）當上限，超過就自己收掉子行程：`find` 是 `not-woken lookup-incomplete`、`call` 是 `unknown poke-timeout`。
-- `peer:<port>` 是 pool 內 sidecar 的**埠號，不是機器位址**；`wake:` 行的 `<說明>` 只放原因碼（而且只有一行），`pool-peer` 的 stdout／stderr 不會被轉印進去。
+- `peer:<port>` 是 pool 內 sidecar 的**埠號，不是機器位址**；`wake:` 行只放種類、原因碼、` interrupt`／` queued` 與 `record=`（而且只有一行），`pool-peer` 的 stdout／stderr 不會被轉印進去。
 - 執行檔：環境變數 `AICOMM_POOL_PEER`（只給測試與手動用）優先，沒設就從 PATH 找 `pool-peer`，再沒有才找 `~/.mylinuxpool/bin/pool-peer`（要存在且可執行）；都找不到或不能執行是 `not-woken peer-unavailable`。這個變數不是 sidecar 位址，也不是使用者可設定的叫醒位址；能打哪些 port 由 `pool-peer` 與上面的埠段決定。
 
 ## 位址覆寫（只給測試與手動）
@@ -123,7 +138,7 @@ aicomm 只對 sidecar 發兩種請求，位址固定為 sidecar 文件的預設 
 
 ## 結束碼
 
-見 `skills/aicomm/SKILL.md`。`send` 的 **exit 0 只代表已送達**：訊息已寫進 Angareion，叫醒失敗不改變結束碼；叫醒結果看 stderr 的 `wake:` 行。帶 `--require-wake` 時，有人沒叫醒或結果未知最多回 exit 4，也仍代表訊息已送達（**不要重送**）。
+見 `skills/aicomm/SKILL.md`。`send` 的 **exit 0 只代表已送達**：訊息已寫進 Angareion，叫醒失敗不改變結束碼；叫醒結果看 stderr 的 `wake:` 行。`woken … queued` 算叫醒（`--require-wake` 下也是 0）。帶 `--require-wake` 時，有人沒叫醒或結果未知最多回 exit 4，也仍代表訊息已送達（**不要重送**）。
 
 ## 版本
 
