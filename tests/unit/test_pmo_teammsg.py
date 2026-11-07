@@ -206,6 +206,93 @@ def test_inbox_read_prints_full_team_message(pmo_env):
 
 
 # --------------------------------------------------------------------------- #
+# ack 比對：#407 短寫法與 `【…】` 開頭標籤
+# --------------------------------------------------------------------------- #
+
+#: 含 owner 的工單（`pmo send` 寫進 state 的形狀）。
+FULL_TICKET = "FATESAIKOU/LLMGateway#183"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        f"收到 {FULL_TICKET}",  # 長寫法
+        "收到 LLMGateway#183",  # 短寫法
+        "收到 LLMGateway#183，立即開工",
+        f"收到 {FULL_TICKET}，開始處理",  # 工單緊接「收到」之後
+        "收到: LLMGateway#183 開始",  # 半形冒號
+        "收到：LLMGateway#183",  # 全形冒號
+        "收到　LLMGateway#183",  # 全形空白（`\s` 涵蓋）
+        "【LLMGateway PM】收到 LLMGateway#183",  # 標籤＋短寫法
+        f"【LLMGateway PM】收到 {FULL_TICKET}",  # 標籤＋長寫法
+        "【LLMGateway PM】   收到 LLMGateway#183",  # 標籤後有空白
+        "【LLMGateway PM】\n收到 LLMGateway#183",  # 標籤後換行
+        "  收到 LLMGateway#183",  # 前導空白（原有行為）
+    ],
+)
+def test_is_ticket_ack_accepts_long_short_and_label(content):
+    """#407：長寫法、短寫法、`【…】` 前綴（含其後空白）都算 ack。"""
+    assert teammsg.is_ticket_ack(content, FULL_TICKET)
+
+
+@pytest.mark.parametrize(
+    "content,ticket",
+    [
+        ("收到 demo#230，立即開工", "demo#23"),  # 數字邊界（前綴碰撞）
+        ("收到 LLMGateway#1830", FULL_TICKET),  # 短寫法的數字邊界
+        ("已收到 STOP 指示，LLMGateway#183 還沒動", FULL_TICKET),  # 順帶提及
+        ("【LLMGateway PM】已收到 STOP 指示，LLMGateway#183 還沒動", FULL_TICKET),
+        ("收到 STOP，LLMGateway#183 還沒動", FULL_TICKET),  # 工單沒緊接「收到」
+        ("收到 STOP 指示 LLMGateway#183", FULL_TICKET),  # 同上（無標點）
+        ("收到 OtherRepo#183", FULL_TICKET),  # 不同 repo 同號
+        ("收到 xLLMGateway#183", FULL_TICKET),  # 短寫法左邊界（字母）
+        ("收到 xLLMGateway#183", "LLMGateway#183"),  # ticket 沒 `/` 也要左邊界
+        ("收到 -LLMGateway#183", "LLMGateway#183"),  # 左邊界（連字號）
+        ("收到 _LLMGateway#183", "LLMGateway#183"),  # 左邊界（底線）
+        ("【LLMGateway PM】【另標】收到 LLMGateway#183", FULL_TICKET),  # 只吃一個標籤
+        ("", FULL_TICKET),  # 空內文
+        ("收到 LLMGateway#183", ""),  # 空工單號
+    ],
+)
+def test_is_ticket_ack_rejects_lookalikes(content, ticket):
+    """#407：前綴碰撞、順帶提及、不同 repo、左邊界以外都不算 ack。"""
+    assert not teammsg.is_ticket_ack(content, ticket)
+
+
+def test_is_ticket_ack_old_state_ticket_without_owner():
+    """`ticket` 沒有 `/`（舊狀態檔的 `repo#n`）仍照舊比對。"""
+    assert teammsg.is_ticket_ack("收到 demo#45", "demo#45")
+    assert teammsg.is_ticket_ack("【demo PM】收到 demo#45", "demo#45")
+    assert not teammsg.is_ticket_ack("收到 demo#450", "demo#45")
+
+
+def test_short_form_ack_sets_ack_at(pmo_env):
+    """#407：帶 `【…】` 的短寫法 ack 真的寫進 `ack_at`（看門狗會安靜）。"""
+    seed_team_state(pmo_env, ticket=FULL_TICKET)
+
+    msg = _msg("01JSHORTACK00000000000001", "【LLMGateway PM】收到 LLMGateway#183")
+    events = teammsg.process_team_messages(_ctx(pmo_env), [msg])
+
+    assert f"[ack] {AGENT} 回了「收到 {FULL_TICKET}」" in events
+    state = _team_state(pmo_env)
+    assert state["ack_at"]
+    assert state["updated_at"] == state["ack_at"]
+
+
+def test_short_form_lookalike_keeps_watchdog(pmo_env):
+    """#407：`xLLMGateway#183`、`OtherRepo#183` 不寫 `ack_at`。"""
+    seed_team_state(pmo_env, ticket=FULL_TICKET)
+
+    for mid, content in (
+        ("01JNOTACK000000000000001", "收到 xLLMGateway#183"),
+        ("01JNOTACK000000000000002", "收到 OtherRepo#183"),
+    ):
+        events = teammsg.process_team_messages(_ctx(pmo_env), [_msg(mid, content)])
+        assert not any(e.startswith("[ack]") for e in events), content
+    assert not _team_state(pmo_env).get("ack_at")
+
+
+# --------------------------------------------------------------------------- #
 # 兩個寫入者交錯（arch review 中-1）：`send` 記派工與這裡的 ack 不互相蓋掉
 # --------------------------------------------------------------------------- #
 
