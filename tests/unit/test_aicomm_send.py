@@ -213,7 +213,7 @@ def test_a_ref_is_attached_and_the_recipient_is_still_woken(world, monkeypatch, 
     assert r.code == 0
     (call,) = world.calls()
     assert refs(call["argv"]) == ["pr=https://example.invalid/pull/278"]
-    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm", "ref": FAKE_ID}]
 
 
 def test_two_refs_keep_their_order_and_follow_the_ticket(world, monkeypatch, capsys):
@@ -270,14 +270,14 @@ def test_an_idle_agent_is_poked_once_without_interrupt_whatever_its_kind(world, 
     agent(world, state="idle", **extra)
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
-    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm", "ref": FAKE_ID}]
     assert [q["path"] for q in world.sidecar.requests] == ["/agents/demo-pm-t1", "/agents/demo-pm-t1/poke"]
 
 
 def test_a_running_agent_is_poked_too_without_interrupt(world, monkeypatch, capsys):
     agent(world, state="running")
     send(world, monkeypatch, capsys)
-    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm", "ref": FAKE_ID}]
 
 
 def test_two_sends_to_a_running_agent_are_two_pokes(world, monkeypatch, capsys):
@@ -290,13 +290,13 @@ def test_two_sends_to_a_running_agent_are_two_pokes(world, monkeypatch, capsys):
 def test_interrupt_on_a_running_agent_pokes_with_interrupt(world, monkeypatch, capsys):
     agent(world, state="running")
     send(world, monkeypatch, capsys, "--interrupt")
-    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": True}]
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": True, "via": "aicomm", "ref": FAKE_ID}]
 
 
 def test_interrupt_on_an_idle_agent_stays_a_plain_poke(world, monkeypatch, capsys):
     agent(world, state="idle")
     send(world, monkeypatch, capsys, "--interrupt")
-    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm", "ref": FAKE_ID}]
 
 
 def test_interrupt_and_no_wake_exclude_each_other_before_anything_is_sent(world, monkeypatch, capsys):
@@ -335,7 +335,7 @@ def test_a_mentioned_agent_is_woken_like_the_recipient(world, monkeypatch, capsy
     agent(world, "demo-arch-t1", state="idle")
     r = send(world, monkeypatch, capsys, "--mention", "demo-arch-t1", to=None)
     assert r.code == 0
-    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm", "ref": FAKE_ID}]
     assert world.sidecar.requests[1]["path"] == "/agents/demo-arch-t1/poke"
 
 
@@ -384,7 +384,7 @@ def test_the_poke_text_is_fixed_and_carries_nothing_from_the_message(world, monk
     assert poke["text"] == WAKE_TEXT
     for leaked in (world.sender, FAKE_ID, "SECRET-BODY-TEXT", "212", "team-demo"):
         assert leaked not in poke["text"]
-    assert set(poke) == {"text", "interrupt"}
+    assert set(poke) == {"text", "interrupt", "via", "ref"}
 
 
 def test_a_poke_timeout_is_not_retried_and_does_not_change_the_exit_code(world, monkeypatch, capsys):
@@ -607,7 +607,7 @@ def test_an_http_proxy_in_the_environment_is_never_used_for_the_sidecar(world, m
             monkeypatch.delenv(name)
         importlib.reload(cli)
     assert r.code == 0
-    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm", "ref": FAKE_ID}]
 
 
 # --- #368 PR-1: the `wake:` lines and `--require-wake` --------------------------------------
@@ -628,7 +628,7 @@ def test_c2_a_running_agent_poked_with_interrupt_says_so(world, monkeypatch, cap
     agent(world, state="running")
     r = send(world, monkeypatch, capsys, "--interrupt")
     assert r.err == "wake: demo-pm-t1 woken local interrupt\n"
-    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": True}]
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": True, "via": "aicomm", "ref": FAKE_ID}]
 
 
 def test_c3_a_local_agent_in_another_state_is_not_woken(world, monkeypatch, capsys):
@@ -723,7 +723,7 @@ def test_c19_require_wake_is_4_when_the_first_of_two_recipients_is_not_woken(wor
         "wake: demo-pm-t1 not-woken state-exited\n"
         "wake: demo-arch-t1 woken local\n"
     )
-    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm", "ref": FAKE_ID}]
     assert r.out.splitlines()[0] == FAKE_ID and len(world.calls()) == 1
 
 
@@ -736,7 +736,7 @@ def test_c19_require_wake_is_4_when_the_second_of_two_recipients_is_not_woken(wo
         "wake: demo-pm-t1 woken local\n"
         "wake: demo-arch-t1 not-woken state-exited\n"
     )
-    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm", "ref": FAKE_ID}]
     assert r.out.splitlines()[0] == FAKE_ID and len(world.calls()) == 1
 
 
@@ -749,7 +749,7 @@ def test_c19_require_wake_is_0_when_both_recipients_are_woken(world, monkeypatch
         "wake: demo-pm-t1 woken local\n"
         "wake: demo-arch-t1 woken local\n"
     )
-    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}] * 2
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm", "ref": FAKE_ID}] * 2
     assert r.out.splitlines()[0] == FAKE_ID and len(world.calls()) == 1
 
 
@@ -1225,7 +1225,7 @@ def test_c8_one_peer_is_poked_with_the_local_pokes_body(world, monkeypatch, caps
     find_call, poke_call = world.peer_calls()
     assert find_call["argv"] == ["find", "demo-pm-t1", "--json", "--timeout", "10"]
     assert poke_call["argv"] == ["call", "5201", "POST", "/agents/demo-pm-t1/poke", "--timeout", "5"]
-    assert json.loads(poke_call["stdin"]) == {"text": WAKE_TEXT, "interrupt": False}
+    assert json.loads(poke_call["stdin"]) == {"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": FAKE_ID}
     assert world.sidecar.pokes() == []  # only the fake `pool-peer` was asked to poke
 
 
@@ -1374,8 +1374,8 @@ def test_c27_each_peer_decides_its_own_interrupt(world, monkeypatch, capsys):
     assert r.err == "wake: demo-pm-t1 woken peer:5201,5202 interrupt\n"
     bodies = {c["argv"][1]: json.loads(c["stdin"]) for c in world.peer_calls() if c["argv"][0] == "call"}
     assert bodies == {
-        "5201": {"text": WAKE_TEXT, "interrupt": True},
-        "5202": {"text": WAKE_TEXT, "interrupt": False},
+        "5201": {"text": WAKE_TEXT, "interrupt": True, "via": "aicomm-peer", "ref": FAKE_ID},
+        "5202": {"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": FAKE_ID},
     }
 
 
@@ -1636,7 +1636,7 @@ def test_406_c2_a_queued_local_poke_says_queued_and_counts_as_woken(world, monke
     r = send(world, monkeypatch, capsys, *extra)
     assert r.code == 0
     assert r.err == f"wake: demo-pm-t1 woken local queued record=local/{RECORD_A}\n"
-    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm", "ref": FAKE_ID}]
 
 
 # --- C-3: an old sidecar's 200 is the old line, unchanged ---------------------------------
@@ -1957,10 +1957,10 @@ def test_406_c13_the_new_fields_add_no_request_and_no_subcommand(world, monkeypa
     # only the two documented requests, and never a record lookup
     assert world.sidecar.foreign_requests() == []
     assert all("/pokes/" not in r["path"] for r in world.sidecar.requests)
-    # the pokes still carry exactly `text` and `interrupt` (C-16 is out of scope)
-    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+    # the pokes carry `text`, `interrupt`, `via` and `ref`
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm", "ref": FAKE_ID}]
     peer_pokes = [c for c in world.peer_calls() if c["argv"][0] == "call"]
-    assert [json.loads(c["stdin"]) for c in peer_pokes] == [{"text": WAKE_TEXT, "interrupt": False}]
+    assert [json.loads(c["stdin"]) for c in peer_pokes] == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": FAKE_ID}]
     assert [c["argv"][0] for c in world.peer_calls()] == ["find", "call"]
     # still only three subcommands
     bad = run_aicomm(["status"], monkeypatch, capsys)
@@ -2042,6 +2042,181 @@ def test_412_a_deep_poke_body_does_not_turn_a_wake_into_unknown(world, monkeypat
     assert r.code == 0
     assert r.err == "wake: demo-pm-t1 woken local\n"
 
+
+# --- #413: the poke body carries `via` and `ref` (contracts C-1..C-14 of aicomm-poke-ref) ---
+
+ULID = "01JZ413000000000000000000A"
+BAD_IDS = ["has space", "a" * 65, "", "abcé", "a.b"]
+
+
+def send_out(world, text):
+    """Make the fake angareion print exactly `text` on stdout (no newline added)."""
+    world.setenv("FAKE_ANG_SEND_RAW", json.dumps(text))
+
+
+def peer_pokes(world):
+    return [json.loads(c["stdin"]) for c in world.peer_calls() if c["argv"][0] == "call"]
+
+
+def test_413_c1_local_poke_carries_via_and_ref(world, monkeypatch, capsys):
+    agent(world)
+    send_out(world, ULID + "\n")
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert world.sidecar.pokes() == [
+        {"text": WAKE_TEXT, "interrupt": False, "via": "aicomm", "ref": ULID}]
+    assert r.err == "wake: demo-pm-t1 woken local\n"
+
+
+def test_413_c2_peer_poke_stdin_is_the_exact_body_with_peer_via(world, monkeypatch, capsys):
+    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    send_out(world, ULID + "\n")
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    find_call, poke_call = world.peer_calls()
+    assert poke_call["argv"] == ["call", "5201", "POST", "/agents/demo-pm-t1/poke", "--timeout", "5"]
+    assert poke_call["stdin"] == json.dumps(
+        {"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": ULID})
+
+
+@pytest.mark.parametrize("bad", BAD_IDS, ids=["space", "65", "empty", "non-ascii", "dot"])
+def test_413_c3_a_bad_message_id_drops_the_ref_key_but_still_pokes_once(world, monkeypatch, capsys, bad):
+    agent(world)
+    send_out(world, bad + "\n")
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm"}]
+    assert "ref" not in world.sidecar.pokes()[0]
+    assert r.err == "wake: demo-pm-t1 woken local\n"  # same line and code as with a good id
+
+
+@pytest.mark.parametrize("bad", BAD_IDS, ids=["space", "65", "empty", "non-ascii", "dot"])
+def test_413_c3_a_bad_message_id_drops_the_ref_key_on_a_peer_too(world, monkeypatch, capsys, bad):
+    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    send_out(world, bad + "\n")
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert peer_pokes(world) == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer"}]
+    assert r.err == "wake: demo-pm-t1 woken peer:5201\n"
+
+
+@pytest.mark.parametrize("out", ["  " + ULID + "  \n", ULID + "\nextra\n"], ids=["padded", "extra-line"])
+def test_413_c4_only_the_first_line_stripped_is_the_ref(world, monkeypatch, capsys, out):
+    agent(world)
+    send_out(world, out)
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert world.sidecar.pokes()[0]["ref"] == ULID
+
+
+@pytest.mark.parametrize("out", [ULID + "\r\n", "  " + ULID + "  \n", ULID + "\nextra\n", ULID])
+def test_413_c4_poke_ref_takes_the_first_line_stripped(out):
+    from aicomm import cli
+    assert cli._poke_ref(out) == ULID
+
+
+def test_413_c5_poke_ref_uses_fullmatch():
+    from aicomm import cli
+    assert cli._poke_ref("a" * 64) == "a" * 64
+    assert cli._poke_ref("a" * 65) is None
+    assert cli._poke_ref(ULID + "\x00") is None
+    assert cli._poke_ref("") is None
+    assert cli._poke_ref("\n" + ULID) is None  # the first line is empty
+
+
+def test_413_c6_every_recipient_gets_the_same_ref(world, monkeypatch, capsys):
+    for name in ("demo-a-t1", "demo-b-t1", "demo-c-t1"):
+        agent(world, name)
+    send_out(world, ULID + "\n")
+    r = send(world, monkeypatch, capsys, "--mention", "demo-b-t1", "--mention", "demo-c-t1", to="demo-a-t1")
+    assert r.code == 0
+    pokes = world.sidecar.pokes()
+    assert len(pokes) == 3
+    assert all(p["ref"] == ULID and p["via"] == "aicomm" for p in pokes)
+
+
+def test_413_c7_every_machine_gets_the_same_via_and_ref(world, monkeypatch, capsys):
+    use_peer(world, found(5201, "running", 5202, "idle"), {"5201": called(200), "5202": called(200)})
+    send_out(world, ULID + "\n")
+    r = send(world, monkeypatch, capsys, "--interrupt")
+    assert r.err == "wake: demo-pm-t1 woken peer:5201,5202 interrupt\n"
+    bodies = {c["argv"][1]: json.loads(c["stdin"]) for c in world.peer_calls() if c["argv"][0] == "call"}
+    assert bodies == {
+        "5201": {"text": WAKE_TEXT, "interrupt": True, "via": "aicomm-peer", "ref": ULID},
+        "5202": {"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": ULID},
+    }
+
+
+def test_413_c8_via_and_ref_constants_fit_the_sidecar_shape():
+    from aicomm import cli
+    for via in (cli.POKE_VIA_LOCAL, cli.POKE_VIA_PEER):
+        assert re.fullmatch(r"[a-z][a-z0-9-]{0,31}", via)
+    assert (cli.POKE_VIA_LOCAL, cli.POKE_VIA_PEER) == ("aicomm", "aicomm-peer")
+    assert cli.POKE_REF_RE.pattern == "[A-Za-z0-9_-]{1,64}"
+
+
+def test_413_c9_no_wake_no_recipient_and_only_self_send_no_request(world, monkeypatch, capsys):
+    agent(world)
+    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    assert send(world, monkeypatch, capsys, "--no-wake").code == 0
+    assert send(world, monkeypatch, capsys, to=None).code == 0
+    world.setenv("ANGAREION_IDENTITY", "demo-pm-t1")
+    assert send(world, monkeypatch, capsys).code == 0
+    assert world.sidecar.requests == []
+    assert world.peer_calls() == []
+
+
+def test_413_c10_a_failed_send_pokes_nobody(world, monkeypatch, capsys):
+    agent(world)
+    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    world.setenv("FAKE_ANG_SEND_EXIT", "1")
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 1
+    assert world.sidecar.requests == []
+    assert world.peer_calls() == []
+
+
+def test_413_c11_text_stays_fixed_and_the_keys_are_one_of_two_sets(world, monkeypatch, capsys):
+    agent(world)
+    send(world, monkeypatch, capsys, "--ticket", "MyAiStorage#212")
+    send_out(world, "a.b\n")
+    send(world, monkeypatch, capsys)
+    good, bad = world.sidecar.pokes()
+    assert set(good) == {"text", "interrupt", "via", "ref"}
+    assert set(bad) == {"text", "interrupt", "via"}
+    for poke in (good, bad):
+        assert poke["text"] == WAKE_TEXT
+        for leaked in (world.sender, FAKE_ID, "SECRET-BODY-TEXT", "212", "team-demo"):
+            assert leaked not in poke["text"]
+
+
+def test_413_c12_a_send_ref_value_never_reaches_the_poke(world, monkeypatch, capsys):
+    agent(world)
+    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    send(world, monkeypatch, capsys, "--ref", "note=REF-SENTINEL-413")
+    agent(world, "demo-other-t1")
+    send(world, monkeypatch, capsys, "--ref", "note=REF-SENTINEL-413", to="demo-other-t1")
+    raw = json.dumps(world.sidecar.pokes()) + "".join(c["stdin"] for c in world.peer_calls())
+    assert "REF-SENTINEL-413" not in raw and "note=" not in raw
+
+
+def test_413_c13_local_and_peer_bodies_differ_only_in_via():
+    from aicomm import cli
+    for interrupt in (True, False):
+        for mid in (ULID, None):
+            local = cli._poke_body(interrupt, cli.POKE_VIA_LOCAL, mid)
+            peer = cli._poke_body(interrupt, cli.POKE_VIA_PEER, mid)
+            assert local["via"] == "aicomm" and peer["via"] == "aicomm-peer"
+            assert {**local, "via": None} == {**peer, "via": None}
+            assert list(local) == (["text", "interrupt", "via", "ref"] if mid else ["text", "interrupt", "via"])
+
+
+def test_413_c14_the_record_id_is_still_read_from_a_poke_with_via_and_ref(world, monkeypatch, capsys):
+    agent(world)
+    local_poke(world, poke_id=RECORD_A)
+    r = send(world, monkeypatch, capsys)
+    assert r.err == f"wake: demo-pm-t1 woken local record=local/{RECORD_A}\n"
+    assert world.sidecar.pokes()[0]["ref"] == FAKE_ID
 
 # --- #420: the other json.loads sites read a too-deep body as unreadable, too ---------------
 
