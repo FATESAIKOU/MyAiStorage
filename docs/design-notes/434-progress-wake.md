@@ -51,7 +51,7 @@
   - `IMPL_V3_NEW_SENTENCES = (D-1,)`、`IMPL_V3_KEY_SENTENCES = IMPL_V2_KEY_SENTENCES + IMPL_V3_NEW_SENTENCES`；`REV_V3_*` 同理；`ARCH_V4_NEW_SENTENCES = (D-2,)`、`ARCH_V4_KEY_SENTENCES = ARCH_V3_KEY_SENTENCES + ARCH_V4_NEW_SENTENCES`。
   - `findings_for` 加 `impl_version_3_or_later`、`rev_version_3_or_later`、`arch_version_4_or_later`，各自只套新增的 tuple。arch 既有 `arch_version_2_or_later → ARCH_V2_KEY_SENTENCES` 不動（那是 v2 起的整份清單，本來就是既有行為）。
 - **`KEY_SENTENCE_CASES`**：加 `(PM_V5_REL, 每句, "關鍵句")`、`(IMPL_V3_REL, D-1, …)`、`(REV_V3_REL, D-1, …)`、`(ARCH_V4_REL, D-2, …)`。
-- **格式檢查的參數清單**（`tests/unit/test_atelier_harness.py:938-941`）加 `pm-v5`、`impl-v3`、`rev-v3`、`arch-v4` 四個 rel；**comm 的兩個參數化清單**（`tests/unit/test_atelier_harness.py:1390-1391` 的「comm 子節被刪」與 `1399-1400` 的「comm 句不點名工具」）也加這四個，否則新檔的 comm 子節沒有人驗。`comm_required` 本身不動（它是「該版本或更新」，新檔自動適用，不用逐一列舉）。
+- **格式檢查的參數清單**（`tests/unit/test_atelier_harness.py:938-941`）加 `pm-v5`、`impl-v3`、`rev-v3`、`arch-v4` 四個 rel；**comm 的兩個參數化清單**（`tests/unit/test_atelier_harness.py:1390-1391` 的「comm 子節被刪」與 `1399-1400` 的「comm 句不點名工具」）也加這四個，否則新檔的 comm 子節沒有人驗。`comm_required` 本身不動（它是「該版本或更新」，新檔自動適用，不用逐一列舉）；唯一例外是 PR-3：PMO 決定 pmo-pm v7 宣告 `comm`，`comm_required` 另加一個只認 pmo pm v>=7 的分支，worker-team 的條件不動（§8.2）。
 - **舊版不受約束**：照 `test_older_versions_are_not_bound_by_the_comm_rule`（`tests/unit/test_atelier_harness.py:1406-1413`）的形狀各加一條——v4／impl v2／rev v2／arch v3 不含新句、沒有新子節時，`findings_for` 仍無錯。這是「不把新規則追溯套到舊版」的守門。
 - **改壞驗證**：新句每一句都自動進 `KEY_SENTENCE_CASES`，在 tmp 副本裡刪掉該句 → 必須紅（既有 `_tmp_copy_without`／`test_a_missing_impl_or_rev_key_sentence_is_flagged` 已這樣做）。另外各 PR 至少一處**語意改壞**：例如把 PM 的「醒來查實際狀態」改成「醒來等訊息」、把「取消叫醒」改成「留著叫醒」、把 impl 的「一定發訊息」改成「只寫檔」，確認**句在、意思反了**時，靠下面的負向斷言會紅。
 - **不矛盾守門（新增，只讀 v5 實檔的測試）**：PM v5 不得再出現 v4 的舊預設句。三條都用**完整子句**比對，不用「阻塞等待」這種短詞（P-8 本身含那四個字）。比對前先把 `text` 的粗體記號 `**` 去掉（`plain = text.replace("**", "")`），下面三句也用去掉 `**` 的形式對 `plain` 比，免得只拿掉粗體、句子留著時守門照樣綠：
@@ -119,7 +119,7 @@
   - 查隊員狀態 → `team`。
   - 叫醒別人（PMO 戳 PM、隊員送訊息給 PM）→ `comm`（`COMM_SENTENCE` 已寫明 comm 包含「叫醒」，見 `tests/unit/test_atelier_harness.py:104`）。
 - 子節照舊**留空**（參數看環境說明）；若要寫，只寫中性的一行 YAML（排定時叫醒／取消／列出自己的排程），不寫指令與端點。
-- pmo-pm v7 要不要宣告 `comm`（O-1 的「戳」屬於 comm）交 PMO，見 §8.2；本單不動能力介面。
+- pmo-pm v7 宣告 `comm`（O-1 的「戳」屬於 comm），PMO 已決定，見 §8.2。
 
 ## 5. impl／rev（與 arch）條文草案
 
@@ -186,13 +186,12 @@
 7. **PMO 要不要能看到 PM 的排程**：本單採用 (a) 只靠行為與回報（O-1／O-2＋P-9）；(b) 直接看排程是觀測性功能，另開單。
 8. **P-7「做完」的定義由 PM 採用（2026-11-07）**：架構師複審核准；若實作時要改句子，只改 P-7 與 §4.1 的 102、137 兩列。
 
-### 8.2 仍待 PMO 決定（不擋 PR-1／PR-2）
+### 8.2 PMO 已決定（2026-11-07）
 
-- **pmo-pm v7 要不要宣告 `comm`**：O-1「戳那個 PM」屬於 comm，但 v6 的能力只有 github／channel／agora／team／monitor，沒有 `comm`。若 v7 宣告 comm，`comm_required` 要擴到 pmo v7；若 PMO 照舊用自己的通道機制，在 v7 的 PR 說明與本 note 補一行「v7 不宣告 comm 的理由」。本單不替 PMO 定能力介面。
+- **pmo-pm v7 宣告 `comm`**：PMO 實際用 aicomm／angareion 收發，與 worker-team 各角色一致。v7 加 `### comm` 與一句中性 know（同 pm v5），`comm_required` 擴到 pmo pm v>=7（PR-3）。
 
 ### 8.3 不採納與理由
 
-- **「pmo-pm v7 直接就宣告 comm」**：本單不採納。理由：能力宣告屬於 PMO 與架構的判定，且會改 `comm_required` 的適用範圍；本單只把 O-1 的動作寫成中性句，宣告與否交 PMO（§8.2）。
 - **「把門檻數字寫進 harness」**：不採納。理由見 §8.1 #2：跨環境、會過期，且 harness 是 append-only，改數字等於每次都要開新版本。
 - **「PR-3 與 PR-1／PR-2 綁成一次合併」**：不採納。理由：PR-3 的合併閘門是「PMO 轉本人看介面」，與前兩者不同；綁在一起會讓 PMO 的介面審查卡住 PM 與隊員的修正。
 
@@ -209,7 +208,7 @@
 | 結構 4 | 不矛盾守門補 v4:101「全部待命時可以停」整句比對 | 三句都用完整子句（含 v4:71、v4:99/101），並 assert P-8 在 | §3.1 |
 | 結構 5 | §4.1 v4 行號全部正確 | 接受，行號不動 | §4.1 |
 | 結構 6 | §6 v6 行號全部正確；補 v6:102 一列 | 加 v6:102「並確認該 PM 已取消這件事的叫醒」 | §6 表 |
-| 能力 | 不新增能力名；對應寫進 §4.2；pmo v7 的 comm 待 PMO | 已寫對應；pmo 交 PMO | §4.2、§8.2 |
+| 能力 | 不新增能力名；對應寫進 §4.2；pmo v7 的 comm 已由 PMO 決定宣告 | 已寫對應；pmo 已決定（§8.2） | §4.2、§8.2 |
 | S-1 | P-4 的「隨背景服務重啟消失」是單一環境事實 | 改成「叫醒可能隨環境重啟消失」 | §4 P-4 |
 | S-2 | P-8 在沒有叫醒的環境會變噪音 | 改成「環境說明寫明沒有叫醒時，照環境說明等待；叫醒臨時用不了時，才退回阻塞等待並回報 PMO」 | §4 P-8 |
 | S-3 | v4:71 的替換句可能在還沒排叫醒時就結束 | 換成 R-71「每件在跑的事都排好叫醒之後…」 | §4.1 |

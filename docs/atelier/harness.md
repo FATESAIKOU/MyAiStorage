@@ -4,7 +4,7 @@ harness ＝ 一個職務一個版本的 UTF-8 Markdown 檔，放 `atelier/<team>
 
 **現況**：`atelier/worker-team/pm/` 有 `v0.md`（期 1 單人暫定）、`v1.md`（有隊員的 PM）、`v2.md`（#200：c／d 由該 repo 的 PM 自己 merge、team PM 不 merge；環境不再寫死清單）與 `v3.md`（#320：b 與全部 c 的設計必經專案架構師，PM 不越過架構師定介面；未開席的專案照 v2 做）；`impl/` 與 `rev/` 各有 `v1.md`（隊員專屬的實作與審查職務，`draft`）；`arch/` 有 `v1.md`（#319：worker-team 的架構師職務，每專案一位，`draft`）、`v2.md`（#403：把「常駐」改成「按需開」——PM 需要設計或結構審時才開，用完照環境說明的關閉步驟關掉；其餘職務不變，`draft`）、`v3.md`（#432：capabilities 加 `comm`，`know` 加一句中性說明；其餘職務不變，`draft`）與 `v4.md`（#434：設計交付、審查結論或退回都一定發訊息給 PM，只回文件路徑與結論；「審查什麼算做完」補「訊息已送出」；其餘職務不變，`draft`）。**arch 的 `v1`～`v3` 已被 `v4` 取代**——`atelier show atelier:worker-team-arch` 不給版本讀到 `v4`；舊版因為 append-only 不改，不會自己標 `deprecated`。另有 `pm/v4.md`、`impl/v2.md`、`rev/v2.md`（#236：capabilities 加 `comm`，`know` 各加一句中性說明）、`pm/v5.md`（#434：每件事都在前進——每派一名隊員或觸發一次 CI 就替自己排一個叫醒，醒來查實際狀態，不是等訊息；開機查現有排程、缺的補排且不重複排；一件事結束就取消它的叫醒；brief 必寫「報告寫完（做完、卡住或要決定）一定發訊息給 PM」；「做完」改看隊員已停下且報告檔真的存在；沒有叫醒的環境照環境說明等待）、`impl/v3.md` 與 `rev/v3.md`（#434：交件（做完、卡住或要決定）一定發訊息給 PM，只回報告路徑；送不出訊息就不算交件；`do`「報告」的舊句換掉，不是並存）；**`pm` 的 `v0`～`v4` 已被 `v5` 取代、`impl`／`rev` 的 `v1`～`v2` 已被 `v3` 取代**——`atelier show` 不給版本會讀到 `pm` 的 `v5`、`impl`／`rev` 的 `v3`；舊版因為 append-only 不改，不會自己標 `deprecated`。
 
-`atelier/pmo/pm/` 有 `v1.md`（#226）、`v2.md`（#246：對齊 MyPMO handbook `44ec9dc`——合併規矩含過渡條、PR／審查第一行慣例、秘書＝PMO 的叫人與派工）、`v3.md`（#308：`secretary-pmo` 的群請求只由 `dispatch.py inbox` 腳本處理（H1）、被叫醒收到 `[group-pending]` 先 `inbox group list` 再 `run`／`reject`（H4））與 `v4.md`（#321：權限級別加上與 PM 同級的專案架構師、不越過架構師定介面、代理與過渡句）；另有未歸檔的 `v5.md`（T-7 S1：daily 工具換成本 repo 的 `pmo`，tick 印 `[group-handoff]`）與 `v6.md`（#408：等待與例行監看交給 PMO 自己的隊員或定時叫醒、收信入口寫成環境指定的單一入口、工具呼叫被 hook 改寫而無判定時把改寫後的呼叫原樣再送一次）。**`v1`～`v5` 已被 `v6` 取代**——`atelier show atelier:pmo-pm` 不給版本讀到 `v6`；舊版因為 append-only 不改，不會自己標 `deprecated`。
+`atelier/pmo/pm/` 有 `v1.md`（#226）、`v2.md`（#246：對齊 MyPMO handbook `44ec9dc`——合併規矩含過渡條、PR／審查第一行慣例、秘書＝PMO 的叫人與派工）、`v3.md`（#308：`secretary-pmo` 的群請求只由 `dispatch.py inbox` 腳本處理（H1）、被叫醒收到 `[group-pending]` 先 `inbox group list` 再 `run`／`reject`（H4））與 `v4.md`（#321：權限級別加上與 PM 同級的專案架構師、不越過架構師定介面、代理與過渡句）；另有未歸檔的 `v5.md`（T-7 S1：daily 工具換成本 repo 的 `pmo`，tick 印 `[group-handoff]`）、`v6.md`（#408：等待與例行監看交給 PMO 自己的隊員或定時叫醒、收信入口寫成環境指定的單一入口、工具呼叫被 hook 改寫而無判定時把改寫後的呼叫原樣再送一次）與 `v7.md`（#434：PMO 監看各 PM 的事項有沒有在前進——停住超過相稱的門檻就戳那個 PM，戳一次後替自己排叫醒回頭再查，仍停住才再處理；收掉團隊前也確認該事項的叫醒已取消；宣告 `comm`）。**`v1`～`v6` 已被 `v7` 取代**——`atelier show atelier:pmo-pm` 不給版本讀到 `v7`；舊版因為 append-only 不改，不會自己標 `deprecated`。
 
 ## frontmatter（檔的第一個區塊，YAML；OKF v0.2 對齊，不認得的欄位保留）
 
@@ -50,11 +50,12 @@ harness ＝ 一個職務一個版本的 UTF-8 Markdown 檔，放 `atelier/<team>
 - `pm` 的 `v>=1` MUST 還寫到四個關鍵句——`不是權限`、`照 PMO 的模型輪換表`、`不指定頻道`、`長時間的指令`——**放在哪一段由 harness 自己安排**，只要 `know`＋`do`＋`judge`＋`dont` 合起來每一句至少出現一次。
 - `impl`／`rev` 的 `v>=1` 也各有自己的關鍵句清單（#135；清單在測試一處、規則同上：`know`＋`do`＋`judge`＋`dont` 合起來每句至少一次）；`rev` 的 `judge`／`dont` MUST 另有**「不審自己的作品」**。
 - `pmo` 的 `pm` 從 `v>=2` 起另有一份關鍵句清單（#246），`v>=3` 起再加群請求的關鍵句（H1／H4；#308），`v>=4` 起再加架構師界線與過渡句（#321；都在測試同一處）。
+- `pmo` 的 `pm` 從 `v>=7` 起另有「PM 的事項有沒有在前進」的關鍵句（#434：停住超過相稱門檻就戳 PM、沒有回報或回報沒寫靠哪個叫醒就當它停住且戳一次後排叫醒回頭查、PM 自己的叫醒由 PM 排、收掉團隊前確認該事項的叫醒已取消、開機不重複排、用看得到的訊號判斷；`PMO_V7_NEW_SENTENCES`，同樣在測試同一處；更早的版本 append-only、不受約束）。
 - worker-team 的 `pm` 從 `v>=3` 起另有架構師的關鍵句（#320：`PM 不越過架構師定介面。`、兩個工單標記句、未開席的過渡句；`PM_V3_KEY_SENTENCES`，同樣在測試同一處，且只套在 `team: worker-team`）。
 - worker-team 的 `pm` 從 `v>=5` 起另有「每件事都在前進」的關鍵句（#434：排叫醒並查實際狀態、結束接下一步／卡住就處理、開機重排去重、一件事結束就取消叫醒、brief 必寫回報、做完的判準、沒有叫醒時的退路、階段回報寫出在等什麼與靠哪個叫醒；`PM_V5_NEW_SENTENCES`，同樣在測試同一處，且只套在 `team: worker-team`；更早的版本 append-only、不受約束）。
 - worker-team 的 `impl`／`rev` 從 `v>=3` 起另有交件訊息句（#434：報告寫完（做完、卡住或要決定）就一定發訊息給 PM、只回報告路徑；judge 另有一句「訊息送不出就不算交件」；`IMPL_V3_NEW_SENTENCES`／`REV_V3_NEW_SENTENCES`，同樣在測試同一處；更早的版本 append-only、不受約束）。
 - worker-team 的 `arch` 從 `v>=4` 起另有交件訊息句（#434：設計交付、審查結論或退回都一定發訊息給 PM、只回文件路徑與結論；`ARCH_V4_NEW_SENTENCES`，同樣在測試同一處；更早的版本 append-only、不受約束）。
-- `comm` 的中性說明句（`COMM_SENTENCE`）與 `### comm` 子節，從 #236 起套在 worker-team 的 `pm` `v>=4`、`impl`／`rev` `v>=2`，從 #432 起再套在 `arch` `v>=3`；更早的版本 append-only、不受約束。
+- `comm` 的中性說明句（`COMM_SENTENCE`）與 `### comm` 子節，從 #236 起套在 worker-team 的 `pm` `v>=4`、`impl`／`rev` `v>=2`，從 #432 起再套在 `arch` `v>=3`，從 #434 起再套在 `pmo` 的 `pm` `v>=7`；更早的版本 append-only、不受約束。
 
 ## 怎麼載入（`v0` 與 `v1` 不同）
 
