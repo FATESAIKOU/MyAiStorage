@@ -165,6 +165,9 @@ ARCH_V2_KEY_SENTENCES = tuple(
     ARCH_V2_SEAT_SENTENCE if sentence == ARCH_V1_SEAT_SENTENCE else sentence
     for sentence in ARCH_KEY_SENTENCES
 ) + ("照環境說明的關閉步驟關掉；下次需要時由 PM 再開。",)
+#: `arch` v3 (#432) keeps every v2 sentence (the old check is not weakened) plus
+#: the comm one - the architect talks to the PM too. `v1`／`v2` stay unbound.
+ARCH_V3_KEY_SENTENCES = ARCH_V2_KEY_SENTENCES + (COMM_SENTENCE,)
 
 #: What the PMO `v2` (#246, aligned to the handbook at 44ec9dc) and later must keep
 #: in its body: the merge rules incl. the transition clause, the first-line
@@ -385,6 +388,7 @@ PMO_V5_REL = "atelier/pmo/pm/v5.md"
 PMO_V6_REL = "atelier/pmo/pm/v6.md"
 ARCH_REL = "atelier/worker-team/arch/v1.md"
 ARCH_V2_REL = "atelier/worker-team/arch/v2.md"
+ARCH_V3_REL = "atelier/worker-team/arch/v3.md"
 
 
 @dataclass
@@ -589,10 +593,12 @@ def findings_for(path: str, text: str) -> Findings:
         and version_match is not None and int(version_match.group(1)) >= 6
     # `arch` is version-bound per file (#403): v1 keeps the「長期常駐」sentence,
     # v2 replaces it with「按需開」, so each list applies only to its own version.
-    # `comm` (#236): worker-team pm v4+, impl v2+, rev v2+ (older files unbound).
+    # `comm` (#236, #432): worker-team pm v4+, impl v2+, rev v2+, arch v3+
+    # (older files unbound).
     comm_required = team == "worker-team" and version_match is not None \
         and ((role == "pm" and int(version_match.group(1)) >= 4)
-             or (role in ("impl", "rev") and int(version_match.group(1)) >= 2))
+             or (role in ("impl", "rev") and int(version_match.group(1)) >= 2)
+             or (role == "arch" and int(version_match.group(1)) >= 3))
     arch_version_1 = role == "arch" \
         and version_match is not None and int(version_match.group(1)) == 1
     arch_version_2_or_later = role == "arch" \
@@ -607,7 +613,7 @@ def findings_for(path: str, text: str) -> Findings:
             (pmo_version_5, PMO_V5_KEY_SENTENCES, "v5 的 pmo pm"),
             (pmo_version_6_or_later, PMO_V6_KEY_SENTENCES, "v6 起的 pmo pm"),
             (role == "impl" and is_v1_or_later, IMPL_KEY_SENTENCES, "v1 起的 impl"),
-            (comm_required, (COMM_SENTENCE,), "宣告 comm 的版本（pm v4／impl v2／rev v2 起）"),
+            (comm_required, (COMM_SENTENCE,), "宣告 comm 的版本（pm v4／impl v2／rev v2／arch v3 起）"),
             (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev"),
             (arch_version_1, ARCH_KEY_SENTENCES, "v1 的 arch"),
             (arch_version_2_or_later, ARCH_V2_KEY_SENTENCES, "v2 起的 arch")):
@@ -641,7 +647,7 @@ def findings_for(path: str, text: str) -> Findings:
             found.errors.append(f"{path}: v0 職務檔的 capabilities 缺 angareion 子節")
         if comm_required and "comm" not in names:
             found.errors.append(
-                f"{path}: pm v4／impl v2／rev v2 起的 capabilities 要有 comm 子節")
+                f"{path}: pm v4／impl v2／rev v2／arch v3 起的 capabilities 要有 comm 子節")
         for name in names:
             if name not in KNOWN_CAPABILITIES:
                 found.warnings.append(f"{path}: 未知的能力名 {name}（只警告、不擋）")
@@ -894,6 +900,7 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
        for sentence in PMO_V3_TO_4_GROUP_SENTENCES]
     + [(ARCH_REL, sentence, "關鍵句") for sentence in ARCH_KEY_SENTENCES]
     + [(ARCH_V2_REL, sentence, "關鍵句") for sentence in ARCH_V2_KEY_SENTENCES]
+    + [(ARCH_V3_REL, sentence, "關鍵句") for sentence in ARCH_V3_KEY_SENTENCES]
     + [(PM_V3_REL, sentence, "關鍵句") for sentence in PM_V3_KEY_SENTENCES]
     + [(PMO_V4_REL, sentence, "關鍵句") for sentence in PMO_V4_KEY_SENTENCES]
     + [(PMO_V5_REL, sentence, "關鍵句") for sentence in PMO_V5_KEY_SENTENCES]
@@ -929,8 +936,9 @@ def test_a_missing_impl_or_rev_key_sentence_is_flagged(rel, sentence, expected, 
 
 
 @pytest.mark.parametrize("rel", (IMPL_REL, REV_REL, ARCH_REL, ARCH_V2_REL,
-                                 PM_V4_REL, IMPL_V2_REL, REV_V2_REL),
-                         ids=("impl", "rev", "arch", "arch-v2", "pm-v4", "impl-v2", "rev-v2"))
+                                 ARCH_V3_REL, PM_V4_REL, IMPL_V2_REL, REV_V2_REL),
+                         ids=("impl", "rev", "arch", "arch-v2", "arch-v3",
+                              "pm-v4", "impl-v2", "rev-v2"))
 def test_the_impl_and_rev_harnesses_pass_the_format_check(rel):
     found = findings_for(rel, (REPO / rel).read_text(encoding="utf-8"))
     assert not found.errors, "\n".join(found.errors)
@@ -1376,11 +1384,11 @@ def test_append_only_ignores_changes_outside_the_harness_tree(tmp_path):
     assert append_only_violations(repo, base) == []
 
 
-# --- comm 能力（#236） ---------------------------------------------------------
+# --- comm 能力（#236、#432） ----------------------------------------------------
 
 
-@pytest.mark.parametrize("rel", (PM_V4_REL, IMPL_V2_REL, REV_V2_REL),
-                         ids=("pm-v4", "impl-v2", "rev-v2"))
+@pytest.mark.parametrize("rel", (PM_V4_REL, IMPL_V2_REL, REV_V2_REL, ARCH_V3_REL),
+                         ids=("pm-v4", "impl-v2", "rev-v2", "arch-v3"))
 def test_a_comm_version_without_the_comm_subsection_is_flagged(rel):
     text = (REPO / rel).read_text(encoding="utf-8")
     assert "### comm\n" in text
@@ -1388,14 +1396,18 @@ def test_a_comm_version_without_the_comm_subsection_is_flagged(rel):
     assert any("comm 子節" in error for error in found.errors), found.errors
 
 
-@pytest.mark.parametrize("rel", (PM_V4_REL, IMPL_V2_REL, REV_V2_REL),
-                         ids=("pm-v4", "impl-v2", "rev-v2"))
+@pytest.mark.parametrize("rel", (PM_V4_REL, IMPL_V2_REL, REV_V2_REL, ARCH_V3_REL),
+                         ids=("pm-v4", "impl-v2", "rev-v2", "arch-v3"))
 def test_the_comm_sentence_names_no_tool(rel):
     body = (REPO / rel).read_text(encoding="utf-8")
     assert "aicomm" not in body
 
 
 def test_older_versions_are_not_bound_by_the_comm_rule():
-    for rel in (PM_V3_REL, IMPL_REL, REV_REL):
-        found = findings_for(rel, (REPO / rel).read_text(encoding="utf-8"))
+    """`arch` v1／v2 只有 github／channel，不因新規則被要求 comm（#432）。"""
+    for rel in (PM_V3_REL, IMPL_REL, REV_REL, ARCH_REL, ARCH_V2_REL):
+        text = (REPO / rel).read_text(encoding="utf-8")
+        assert "### comm\n" not in text
+        assert COMM_SENTENCE not in text
+        found = findings_for(rel, text)
         assert not found.errors, found.errors
