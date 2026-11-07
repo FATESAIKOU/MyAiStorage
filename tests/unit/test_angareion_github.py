@@ -392,6 +392,38 @@ def test_read_since_is_inclusive_and_moves_nothing():
     assert result.cursor == since  # `--since` never moves the cursor
 
 
+def test_to_me_read_asks_each_entity_once_with_the_largest_page(tmp_path):
+    """#417: 15 channels = 15 listing requests (one per entity), never extras.
+
+    This is the request-count ceiling the issue asks us to keep: a `to me`
+    read must not add a request per entity beyond its listing (no per-entity
+    probe), and the listing must ask for GitHub's maximum page size.
+    """
+    from angareion.backend import Target
+    from angareion.client import Angareion
+    from angareion.state import CursorStore
+
+    entities = [entity(channel=f"ch{i:02d}", issue=100 + i) for i in range(15)]
+    transport = FakeTransport()
+    for target in entities:
+        transport.set_route(
+            "GET",
+            f"https://api.github.com/repos/owner/repo/issues/{target.issue}/comments?per_page=100",
+            HttpResponse(200, {}, b"[]"),
+        )
+    resolver = StaticResolver(entities)
+    backend = GitHubIssuesBackend(resolver, token="fake_token", transport=transport)
+    app = Angareion(backend, CursorStore(tmp_path, ME), resolver, ME)
+
+    batch = app.read(Target(recipient=ME), since="2026-10-10T12:00:00Z")
+
+    assert batch.messages == []
+    urls = [request["url"] for request in transport.recorded_requests]
+    assert len(urls) == len(entities)  # ceiling: exactly one listing per channel
+    assert len(set(urls)) == len(entities)
+    assert all("per_page=100" in url for url in urls)
+
+
 def test_check_finds_new_messages_and_passes_the_timeout_budget():
     transport = FakeTransport()
     transport.set_route(

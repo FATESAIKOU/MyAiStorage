@@ -9,6 +9,7 @@ target uses one entry (`channel:<name>`).
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import time
 from typing import Any, Callable, NamedTuple
 
@@ -21,6 +22,13 @@ POLL_INTERVAL_SECONDS = 15.0
 # a fair try, and a half-open connection never hangs a poll much past its time.
 CHECK_TIMEOUT_FLOOR_SECONDS = 5.0
 CHECK_TIMEOUT_CAP_SECONDS = 30.0
+# "To me" and "@ me" span every channel, so a read is one independent entity
+# request per channel (#417). They run concurrently; the cap keeps a burst
+# well under GitHub's secondary-rate-limit guidance ("no more than 100
+# concurrent requests") while still collapsing 15 channels into a couple of
+# round trips. The per-entity reads are read-only and the transport opens a
+# fresh connection per request, so sharing them across threads is safe.
+READ_CONCURRENCY = 8
 
 
 class ReadBatch(NamedTuple):
@@ -157,12 +165,32 @@ class Angareion:
         first_to_me_read = (
             use_local_cursor and target.recipient is not None and not self.cursors.has_to_me_cursor()
         )
+        jobs: list[tuple[str, Entity, Cursor, dict[str, Any]]] = []
         for entity in self.store.entities():
             key, scope = self._scope(target, entity)
             cursor = self.cursors.cursor(key) if use_local_cursor else Cursor(at=since)
             if first_to_me_read:
                 scope = {**scope, "new_recipient": True}
-            result = self.backend.read(entity, cursor, **scope)
+            jobs.append((key, entity, cursor, scope))
+
+        # The entity reads do not depend on one another, so fetch them
+        # concurrently (#417). Results are consumed in submission order, which
+        # keeps the error picked out the same as a sequential read and the
+        # final sort below independent of completion order.
+        def read_job(job: tuple[str, Entity, Cursor, dict[str, Any]]) -> tuple[str, Any]:
+            key, entity, cursor, scope = job
+            return key, self.backend.read(entity, cursor, **scope)
+
+        if len(jobs) <= 1:
+            results = [read_job(job) for job in jobs]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(READ_CONCURRENCY, len(jobs)),
+                thread_name_prefix="angareion-read",
+            ) as pool:
+                results = list(pool.map(read_job, jobs))
+
+        for key, result in results:
             messages.extend(result.messages)
             if use_local_cursor:
                 updates[key] = result.cursor
