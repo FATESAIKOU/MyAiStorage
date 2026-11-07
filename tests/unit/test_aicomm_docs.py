@@ -361,3 +361,10 @@ def test_406_c14_the_two_record_queries_are_written_down(path):
 def test_406_c14_the_explanation_field_is_gone(path):
     text = path.read_text(encoding="utf-8")
     assert "<說明>" not in text
+
+
+def test_413_docs_say_the_poke_body_carries_via_and_ref():
+    text = (REPO / "docs" / "aicomm.md").read_text(encoding="utf-8")
+    assert '"via": "aicomm"' in text and "aicomm-peer" in text
+    assert "不貼進對方的輸入" in text and "[A-Za-z0-9_-]{1,64}" in text
+    assert '"interrupt": <bool>}' not in text  # no body listed with only two keys

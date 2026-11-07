@@ -42,8 +42,11 @@ with open(os.environ["FAKE_ANG_LOG"], "a", encoding="utf-8") as f:
     f.write(json.dumps({{"argv": sys.argv[1:], "stdin": stdin}}) + "\n")
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 if cmd == "send":
+    raw = os.environ.get("FAKE_ANG_SEND_RAW")  # stdout verbatim (JSON string): no added newline
     out = os.environ.get("FAKE_ANG_SEND_OUT", "{fake_id}")
-    if out:
+    if raw is not None:
+        sys.stdout.write(json.loads(raw))
+    elif out:
         print(out)
     sys.exit(int(os.environ.get("FAKE_ANG_SEND_EXIT", "0")))
 if cmd == "wait":

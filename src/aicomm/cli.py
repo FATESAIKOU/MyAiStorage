@@ -59,8 +59,16 @@ PEER_CHILD_GRACE = 2
 PEER_PORT_MIN = 5200
 PEER_PORT_MAX = 5399
 
-# The poke carries this and nothing else: never the sender, the body, a ticket or an id.
+# The poke's text is this and nothing else: never the sender, the body or a ticket. The body
+# may also carry `via` and `ref` (MyLinuxPool#786 D3): metadata for the sidecar's wake
+# record, never pasted into the recipient's input.
 WAKE_TEXT = "有新訊息：請執行 aicomm inbox。"
+# `via` is who poked (self-declared, a hint and not proof); both fit `^[a-z][a-z0-9-]{0,31}$`.
+POKE_VIA_LOCAL = "aicomm"
+POKE_VIA_PEER = "aicomm-peer"
+# `ref` is the message id; the sidecar answers 400 to any other shape, so check before sending.
+# Kept apart from RECORD_ID_RE below although the shape is the same today.
+POKE_REF_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 # The reason codes of the `wake:` line (design of MyAiStorage#368 §3.7). The docs list
 # exactly these two groups; `state-` and `http-` are prefixes (`state-<state>`,
@@ -394,6 +402,20 @@ def _poke_answer(status: int, body: bytes) -> _PokeAnswer:
     return _PokeAnswer(WAKE_NOT_WOKEN, f"{REASON_HTTP}{status}", poke_id)
 
 
+def _poke_ref(out: str) -> str | None:
+    """The message id from `angareion send`'s stdout: its first line, stripped, if it fits."""
+    first = out.split("\n", 1)[0].strip()
+    return first if POKE_REF_RE.fullmatch(first) else None
+
+
+def _poke_body(interrupt: bool, via: str, message_id: str | None) -> dict:
+    """The one poke body, local and cross-machine alike; no `ref` key without a valid id."""
+    body: dict = {"text": WAKE_TEXT, "interrupt": interrupt, "via": via}
+    if message_id is not None:
+        body["ref"] = message_id
+    return body
+
+
 def _peer_executable() -> str | None:
     """The `pool-peer` to run: the test hook, else the one on PATH (#392), else a worker
     install that left it out of PATH (`~/.mylinuxpool/bin/pool-peer`). None if none.
@@ -510,9 +532,10 @@ def _call_answer(stdout: str) -> tuple[int | None, bytes]:
     return status, rest.encode("utf-8")
 
 
-def _poke_peer(executable: str, name: str, port: int, state: str, interrupt: bool) -> _Wake:
+def _poke_peer(executable: str, name: str, port: int, state: str, interrupt: bool,
+               message_id: str | None) -> _Wake:
     """Poke one machine's sidecar through `pool-peer call`, with the local poke's body."""
-    payload = {"text": WAKE_TEXT, "interrupt": bool(interrupt and state == "running")}
+    payload = _poke_body(bool(interrupt and state == "running"), POKE_VIA_PEER, message_id)
     quoted = urllib.parse.quote(name, safe="")
     args = ["call", str(port), "POST", f"/agents/{quoted}/poke", "--timeout", str(PEER_CALL_TIMEOUT)]
     try:
@@ -561,7 +584,7 @@ def _merge_peers(name: str, answers: list[tuple[int, _Wake]]) -> _Wake:
     return _not_woken(name, ordered[0][1].code, records=records)
 
 
-def _wake_elsewhere(name: str, interrupt: bool) -> _Wake:
+def _wake_elsewhere(name: str, interrupt: bool, message_id: str | None) -> _Wake:
     """Look on the other machines through `pool-peer` and poke every sidecar that can take it.
 
     Runs only when the local sidecar said 404, could not be reached, or did not answer in
@@ -586,24 +609,24 @@ def _wake_elsewhere(name: str, interrupt: bool) -> _Wake:
         elif not PEER_PORT_MIN <= port <= PEER_PORT_MAX:
             answers.append((port, _not_woken(name, REASON_PEER_PORT_OUT_OF_RANGE)))
         else:
-            answers.append((port, _poke_peer(executable, name, port, state, interrupt)))
+            answers.append((port, _poke_peer(executable, name, port, state, interrupt, message_id)))
     return _merge_peers(name, answers)
 
 
-def _wake_one(base: str, name: str, interrupt: bool) -> _Wake:
+def _wake_one(base: str, name: str, interrupt: bool, message_id: str | None) -> _Wake:
     """Wake one recipient; returns one result and never raises.
 
     The message is already delivered when this runs, so whatever goes wrong here (a half
     answer, a reset connection, anything unforeseen) is only "delivered, not woken".
     """
     try:
-        return _wake_one_inner(base, name, interrupt)
+        return _wake_one_inner(base, name, interrupt, message_id)
     except Exception:  # noqa: BLE001 - best-effort edge: nothing may undo a delivery
         # Nobody knows whether a poke went out, so this is `unknown`, not `not-woken`.
         return _unknown(name, REASON_INTERNAL_ERROR)
 
 
-def _wake_one_inner(base: str, name: str, interrupt: bool) -> _Wake:
+def _wake_one_inner(base: str, name: str, interrupt: bool, message_id: str | None) -> _Wake:
     """Look up one agent on the local sidecar and poke it when it is idle or running."""
     quoted = urllib.parse.quote(name, safe="")
     try:
@@ -613,9 +636,9 @@ def _wake_one_inner(base: str, name: str, interrupt: bool) -> _Wake:
     except (OSError, urllib.error.URLError):
         # Not on this sidecar as far as we can tell (404 below, no sidecar, or no answer in
         # time). Only the peer fallback may look further, and it has not poked anybody.
-        return _wake_elsewhere(name, interrupt)
+        return _wake_elsewhere(name, interrupt, message_id)
     if status == 404:
-        return _wake_elsewhere(name, interrupt)
+        return _wake_elsewhere(name, interrupt, message_id)
     if status != 200:
         return _not_woken(name, f"{REASON_HTTP}{status}")
     state = _agent_state(body)
@@ -625,7 +648,7 @@ def _wake_one_inner(base: str, name: str, interrupt: bool) -> _Wake:
         if not STATE_TOKEN_RE.fullmatch(state):
             return _not_woken(name, REASON_BAD_ANSWER)
         return _not_woken(name, f"{REASON_STATE}{state}")
-    payload = {"text": WAKE_TEXT, "interrupt": bool(interrupt and state == "running")}
+    payload = _poke_body(bool(interrupt and state == "running"), POKE_VIA_LOCAL, message_id)
     try:
         status, body = _request("POST", f"{base}/agents/{quoted}/poke", payload, POKE_TIMEOUT)
     except http.client.HTTPException:  # the request may have reached the sidecar
@@ -691,8 +714,10 @@ def _cmd_send(args: argparse.Namespace) -> int:
         return code
 
     missed = False
+    # One id for every poke of this send (every recipient, every machine).
+    message_id = _poke_ref(out) if wake else None
     for name in candidates if wake else []:
-        result = _wake_one(base, name, args.interrupt)
+        result = _wake_one(base, name, args.interrupt, message_id)
         sys.stderr.write(result.line + "\n")
         missed = missed or not result.woken
     return EXIT_NOT_WOKEN if (args.require_wake and missed) else EXIT_OK

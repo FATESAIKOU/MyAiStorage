@@ -100,10 +100,11 @@ aicomm 只對 sidecar 發兩種請求，位址固定為 sidecar 文件的預設 
 | 請求 | 用途 | 讀什麼 |
 |---|---|---|
 | `GET /agents/{id}`（逾時 3 秒） | 這個 AI 在不在這台、狀態是什麼 | 200 的 `state`；404 ＝不在這台 |
-| `POST /agents/{id}/poke`（逾時 5 秒） | 叫醒 | body `{"text": <固定短句>, "interrupt": <bool>}`；回應（任何 HTTP 碼）可選讀頂層 `poke_id`，200 另讀 `poke_outcome`（都沒有＝舊版 sidecar） |
+| `POST /agents/{id}/poke`（逾時 5 秒） | 叫醒 | body `{"text": <固定短句>, "interrupt": <bool>, "via": "aicomm", "ref": <訊息 id>?}`；回應（任何 HTTP 碼）可選讀頂層 `poke_id`，200 另讀 `poke_outcome`（都沒有＝舊版 sidecar） |
 
 - 戳的回應會讀兩個選用欄位（MyLinuxPool#786，poke-records-v1）：`poke_id` 只在是字串且完全符合 `[A-Za-z0-9_-]{1,64}` 時採用，否則當沒有；200 的 `poke_outcome` 只有值是 `"queued"` 才算「對方忙（排隊）」。這兩個欄位**不改**上面判讀的種類與原因碼，也**不加發**任何請求。409 的錯誤碼先讀巢狀的 `error.code`，再讀頂層的 `code`、頂層字串的 `error`（第一個是字串的定案；都不認得是 `http-409`）。
 
+- 戳的 body 多帶兩個選用的中繼資料（MyLinuxPool#786 D3，#413），只給 sidecar 寫進叫醒紀錄，**不貼進對方的輸入**（`text` 仍是固定短句，一個字都沒變）：`via` 是誰戳的（本機 `aicomm`，跨機 `aicomm-peer`），是自己宣告的來源，只當線索、不當證據、不能拿來授權；`ref` 是這則訊息的 id（`angareion send` stdout 第一行去頭尾空白），只在完全符合 `[A-Za-z0-9_-]{1,64}` 時才帶，不合格就整個鍵不出現、照樣戳一次（不另印訊息）。同一次 `send` 的所有收件人與所有機器帶同一個 `ref`。這個 `ref` 不是 `send --ref`（那個的值不會進戳的 body）。舊的 sidecar 會忽略這兩個鍵；查叫醒紀錄時可用紀錄裡的 `ref` 對照訊息 id。
 - `state` 是 `idle` 或 `running` 才戳；`starting`、`waiting-quota`、`exited` 不戳。不看 tui 或 headless，不讀 `attach`。
 - `interrupt` 預設 false；給了 `--interrupt` 且對方 `running` 才是 true（對 `idle` 的戳本來就不打斷）。
 - 回應不符預期（非 JSON、沒有字串的 `state`、不認得的 HTTP 狀態）一律當叫醒失敗、不戳，訊息已送達的結果不變。
@@ -117,7 +118,7 @@ aicomm 只對 sidecar 發兩種請求，位址固定為 sidecar 文件的預設 
 | 用法 | 用途 | 讀什麼 |
 |---|---|---|
 | `pool-peer find <id> --json --timeout 10` | 這個 AI 在 pool 裡哪幾台 sidecar 上 | 結束碼與 JSON 陣列；每一筆只讀 `port`（整數，不是 bool）與 `agent.state`（字串） |
-| `pool-peer call <port> POST /agents/<id>/poke --timeout 5` | 叫醒那一台 | 結束碼；rc 0 時 stdout 第一行是 HTTP 狀態碼，之後是 body（與本機戳同一張判讀表，含選用的 `poke_id`／`poke_outcome`） |
+| `pool-peer call <port> POST /agents/<id>/poke --timeout 5` | 叫醒那一台 | 結束碼；rc 0 時 stdout 第一行是 HTTP 狀態碼，之後是 body（與本機戳同一張判讀表，含選用的 `poke_id`／`poke_outcome`）；stdin 是與本機同一個 body，`via` 為 `aicomm-peer` |
 
 - 埠段 **5200–5399**（含）。aicomm 先在這一側擋掉其他埠（`not-woken peer-port-out-of-range`），不會把它和「連不到」（`call` rc 2）混在一起。
 - 結束碼：`find` 0＝至少找到一台、1＝每一台都確定沒有、2＝查不了（設定或 Gateway）、3＝找到 0 台但有的台查不到；`call` 0＝有回應（不論 HTTP 碼）、2＝連不到、3＝逾時（結果未知）。約定外的結束碼都是 `peer-bad-answer`。
