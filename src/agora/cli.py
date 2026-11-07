@@ -2362,21 +2362,38 @@ def cmd_continue(args, paths: store.Paths) -> int:
     previous_term = signal.signal(signal.SIGTERM, _forward_term)
     if not headless:
         previous_hup = signal.signal(signal.SIGHUP, _forward_term)
-    # The agent must not outlive a SIGKILLed agora (#229): a tiny reaper is
-    # started right after the agent and holds the read end of a pipe whose
-    # write end only this process has; EOF without the goodbye byte means this
-    # process was killed -9 (or OOM'ed) and the agent is an orphan. Every way
-    # out of this function says goodbye in the `finally` below, so the reaper
-    # only acts when agora really could not (#229). A guard that cannot start
-    # is a warning, never a failed continue.
+    # The agent must not outlive a SIGKILLed agora (#229): a tiny reaper holds
+    # the read end of a pipe whose write end only this process has; EOF without
+    # the goodbye line means this process was killed -9 (or OOM'ed) and the
+    # agent is an orphan. The reaper is started BEFORE the agent (#422) and the
+    # agent's own child writes its pid into the pipe before exec, so a kill at
+    # any moment after the fork leaves nothing unwatched. Every way out of this
+    # function says goodbye in the `finally` below, so the reaper only acts
+    # when agora really could not. A guard that cannot start is a warning,
+    # never a failed continue.
     guard = None
     try:
         try:
+            guard = orphan_guard.arm()
+            store._fault("after-guard-armed")
+            # The test point inside the agent's child cannot go through
+            # `store._fault` (it would `_exit` the child); decide here, in agora.
+            kill_parent = os.environ.get("AGORA_TEST_FAULT") == "agent-child-before-pid"
+
+            def _agent_preexec() -> None:
+                signal.signal(signal.SIGINT, signal.SIG_DFL)
+                if kill_parent:
+                    os.kill(os.getppid(), signal.SIGKILL)
+                if guard is not None:
+                    guard.child_hook()
+
             # opencode reads PWD, not the real cwd, to pick the project (impl1).
             proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env={**_spawn_env(launch.env), "PWD": launch.cwd},
                                     pass_fds=(lock.fileno(),),
-                                    preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
-            guard = orphan_guard.start(proc.pid)
+                                    preexec_fn=_agent_preexec)
+            store._fault("after-agent-popen")
+            if guard is not None:
+                guard.started(proc.pid)
             if term_pending:
                 # The SIGTERM arrived while Popen had not returned yet; pass it on.
                 term_pending = False
