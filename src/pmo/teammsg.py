@@ -53,17 +53,65 @@ def format_msg_event(msg: Mapping) -> str:
     return "\n".join([head] + [f"  {line}" for line in lines[1:]])
 
 
-def is_ticket_ack(content: str, ticket: str) -> bool:
-    """內文是不是「收到 <ticket>」的 ack。
+#: 通道慣例的開頭標籤（`【LLMGateway PM】`）；只吃開頭一個（#407）。
+_ACK_LABEL_RE = re.compile(r"^【[^】]*】\s*")
 
-    起頭錨定＋數字邊界：工單號前綴碰撞（`repo#23` 對上 `repo#230`）
-    與順帶提及（「已收到 STOP 指示，repo#45 還沒動」）都不算 ack。
+#: 短寫法的左邊界：repo 名前面不能緊接字母／數字／底線／連字號。
+#: `owner/` 的斜線不放進來，所以 `FATESAIKOU/LLMGateway#183` 的短寫法仍算。
+_REPO_LEFT = r"(?<![A-Za-z0-9_-])"
+
+#: 「收到」與工單之間的間隔：只允許空白（含全形空白、換行）與半／全形冒號。
+#: 工單必須**緊接**在它後面，順帶提及（「收到 STOP，repo#45 還沒動」）不算（#407 審查 中-1）。
+_ACK_SEP_RE = re.compile(r"^" + re.escape(inbox.ACK_PREFIX) + r"[\s:：]*")
+
+
+def _ack_body(content: str) -> str:
+    """lstrip 後去掉開頭至多一個 `【…】` 標籤（沒有標籤就原樣）。"""
+    text = str(content or "").lstrip()
+    label = _ACK_LABEL_RE.match(text)
+    return text[label.end():] if label else text
+
+
+def _ticket_patterns(ticket: str) -> list[str]:
+    """`ticket` 可比對的寫法：長寫法，以及含 `/` 時的短寫法（`repo#n`）。
+
+    兩種寫法都要求數字邊界（`repo#23` 不吃 `repo#230`）；短寫法另加左邊界，
+    免得 `xLLMGateway#183`、`OtherRepo#183` 被當成 `LLMGateway#183`。
+    """
+    if not ticket:
+        return []
+    candidates = [ticket]
+    head = ticket.rsplit("#", 1)[0]
+    if "/" in head:
+        candidates.append(ticket.split("/", 1)[1])  # owner/repo#n → repo#n
+    patterns = []
+    for candidate in candidates:
+        body, sep, number = candidate.rpartition("#")
+        if sep and body and number:
+            patterns.append(
+                _REPO_LEFT + re.escape(body) + "#" + re.escape(number) + r"(?!\d)"
+            )
+        else:  # 形狀不尋常：照舊整串比對，只保留數字邊界
+            patterns.append(re.escape(candidate) + r"(?!\d)")
+    return patterns
+
+
+def is_ticket_ack(content: str, ticket: str) -> bool:
+    """內文是不是「收到 <ticket>」的 ack（#407）。
+
+    工單必須緊接在「收到」之後（只隔空白或半／全形冒號；可先有一個 `【…】`
+    標籤）：順帶提及（「收到 STOP，repo#45 還沒動」、「收到 STOP 指示 repo#45」）
+    不算 ack。比對另有數字邊界（前綴碰撞 `repo#23` 對上 `repo#230` 不算）。
+    `ticket` 含 `owner/` 時也接受短的 `repo#n`（但短寫法要有左邊界，
+    `xLLMGateway#183` 不算）。
     保守向：漏判只多跑一次看門狗 poke，誤判的代價是永久關掉看門狗。
     """
-    text = str(content or "").lstrip()
-    if not text.startswith(inbox.ACK_PREFIX):
+    text = _ack_body(content)
+    anchor = _ACK_SEP_RE.match(text)
+    if not anchor:
         return False
-    return re.search(re.escape(str(ticket)) + r"(?!\d)", text) is not None
+    rest = text[anchor.end():]
+    return any(re.match(pattern, rest) for pattern in _ticket_patterns(str(ticket or "")))
 
 
 def process_team_messages(
