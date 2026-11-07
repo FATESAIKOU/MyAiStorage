@@ -2,7 +2,7 @@
 
 harness ＝ 一個職務一個版本的 UTF-8 Markdown 檔，放 `atelier/<team>/<role>/v<N>.md`；識別 `atelier:<team>-<role>@v<N>`——識別、版本與路徑是同一件事的三個寫法。frontmatter 的 `team` 欄位說的是**系列**（欄位名沿用 `team`，程式與檔名都不改）。spec 全文：`openspec/specs/atelier/spec.md`（`v1` 起的變更已併進主 spec；原 delta 在 `openspec/changes/archive/2026-10-25-atelier-pm-harness-v1/specs/atelier/spec.md`）；檢查在 `tests/unit/test_atelier_harness.py`（格式＋append-only；接 CI 是已歸檔的 atelier-v0 change 的 tasks 2.6，未做）。
 
-**現況**：`atelier/worker-team/pm/` 有 `v0.md`（期 1 單人暫定）、`v1.md`（有隊員的 PM）、`v2.md`（#200：c／d 由該 repo 的 PM 自己 merge、team PM 不 merge；環境不再寫死清單）與 `v3.md`（#320：b 與全部 c 的設計必經專案架構師，PM 不越過架構師定介面；未開席的專案照 v2 做）；`impl/` 與 `rev/` 各有 `v1.md`（隊員專屬的實作與審查職務，`draft`）；`arch/` 有 `v1.md`（#319：worker-team 的架構師職務，每專案一位，`draft`）與 `v2.md`（#403：把「常駐」改成「按需開」——PM 需要設計或結構審時才開，用完照環境說明的關閉步驟關掉；其餘職務不變，`draft`）。**arch 的 `v1` 已被 `v2` 取代**——`atelier show atelier:worker-team-arch` 不給版本讀到 `v2`；`v1` 因為 append-only 不改，不會自己標 `deprecated`。**`v0` 已被 `v1`、`v1` 已被 `v2`、`v2` 已被 `v3` 取代**——`atelier show atelier:worker-team-pm` 不給版本讀到 `v3`。`v0` 檔因為 append-only 不改（`status` 也不原地改），所以它不會自己標 `deprecated`（`v1` 同理）。
+**現況**：`atelier/worker-team/pm/` 有 `v0.md`（期 1 單人暫定）、`v1.md`（有隊員的 PM）、`v2.md`（#200：c／d 由該 repo 的 PM 自己 merge、team PM 不 merge；環境不再寫死清單）與 `v3.md`（#320：b 與全部 c 的設計必經專案架構師，PM 不越過架構師定介面；未開席的專案照 v2 做）；`impl/` 與 `rev/` 各有 `v1.md`（隊員專屬的實作與審查職務，`draft`）；`arch/` 有 `v1.md`（#319：worker-team 的架構師職務，每專案一位，`draft`）與 `v2.md`（#403：把「常駐」改成「按需開」——PM 需要設計或結構審時才開，用完照環境說明的關閉步驟關掉；其餘職務不變，`draft`）。**arch 的 `v1` 已被 `v2` 取代**——`atelier show atelier:worker-team-arch` 不給版本讀到 `v2`；`v1` 因為 append-only 不改，不會自己標 `deprecated`。另有 `pm/v4.md`、`impl/v2.md`、`rev/v2.md`（#236：capabilities 加 `comm`，`know` 各加一句中性說明）；**`pm` 的 `v0`～`v3` 已被 `v4` 取代、`impl`／`rev` 的 `v1` 已被 `v2` 取代**——`atelier show` 不給版本會讀到 `pm` 的 `v4`、`impl`／`rev` 的 `v2`；舊版因為 append-only 不改，不會自己標 `deprecated`。
 
 `atelier/pmo/pm/` 有 `v1.md`（#226）、`v2.md`（#246：對齊 MyPMO handbook `44ec9dc`——合併規矩含過渡條、PR／審查第一行慣例、秘書＝PMO 的叫人與派工）、`v3.md`（#308：`secretary-pmo` 的群請求只由 `dispatch.py inbox` 腳本處理（H1）、被叫醒收到 `[group-pending]` 先 `inbox group list` 再 `run`／`reject`（H4））與 `v4.md`（#321：權限級別加上與 PM 同級的專案架構師、不越過架構師定介面、代理與過渡句）；另有未歸檔的 `v5.md`（T-7 S1：daily 工具換成本 repo 的 `pmo`，tick 印 `[group-handoff]`）與 `v6.md`（#408：等待與例行監看交給 PMO 自己的隊員或定時叫醒、收信入口寫成環境指定的單一入口、工具呼叫被 hook 改寫而無判定時把改寫後的呼叫原樣再送一次）。**`v1`～`v5` 已被 `v6` 取代**——`atelier show atelier:pmo-pm` 不給版本讀到 `v6`；舊版因為 append-only 不改，不會自己標 `deprecated`。
 
@@ -32,7 +32,7 @@ harness ＝ 一個職務一個版本的 UTF-8 Markdown 檔，放 `atelier/<team>
 | `capabilities` | 能力需求；一個能力一個 `### <能力名>` 子節 |
 
 - **能力子節**：子節內用**一行 YAML 或清單**寫參數，沒有參數就留空；**不寫散文**（用途放 `know`／`do`）。子節名不重複；未知能力名只警告、不擋（能力清單要能長）。
-- **已知能力名**（`KNOWN_CAPABILITIES`）：`github`／`angareion`／`agora`／`channel`／`team`／`monitor`。`channel`／`team`／`monitor` 是**中性名**——`v1` 起的職務由 Mac 與 worker **共用一份**，回報通道、隊員控制、監看在兩邊是不同的東西，所以只宣告「需要什麼能力」，誰用什麼提供寫在該環境的說明。`angareion` 只有單一環境有：`v>=1` 的檔案宣告它**只警告、不擋**。
+- **已知能力名**（`KNOWN_CAPABILITIES`）：`github`／`angareion`／`agora`／`channel`／`comm`／`team`／`monitor`。`channel`／`comm`／`team`／`monitor` 是**中性名**——`v1` 起的職務由 Mac 與 worker **共用一份**，回報通道、隊員控制、監看、AI 之間的溝通在兩邊是不同的東西，所以只宣告「需要什麼能力」，誰用什麼提供寫在該環境的說明。`angareion` 只有單一環境有：`v>=1` 的檔案宣告它**只警告、不擋**。
 - **v0 職務檔**（`v0.md`）MUST 有 `angareion` 子節；一般職務 SHOULD 宣告自己真正需要的能力（v0 的三個：`github`／`angareion`／`agora`）。
 - **MUST NOT 有 `angareion` 章節**（Angareion 是能力子節，不是章節）。
 - `know` MUST 明寫**「專案自己的指示檔與工單規則優先」**。

@@ -72,10 +72,10 @@ SECTIONS = ("know", "do", "judge", "dont", "capabilities")
 STATUSES = ("draft", "stable", "deprecated")
 #: Capability names an environment may already use. Unknown names only warn, so
 #: this list is a reminder to look after the new names, not a hard gate.
-KNOWN_CAPABILITIES = ("github", "angareion", "agora", "channel", "team", "monitor")
+KNOWN_CAPABILITIES = ("github", "angareion", "agora", "channel", "comm", "team", "monitor")
 #: Names one environment alone provides: a harness shared by several environments
 #: (Mac and worker) must not name them - it declares the neutral name instead
-#: (`channel`/`team`/`monitor`, design D6). Warned about, never an error.
+#: (`channel`/`team`/`monitor`/`comm`, design D6). Warned about, never an error.
 SINGLE_ENVIRONMENT_CAPABILITIES = ("angareion",)
 
 #: The sections the content limits and the key sentences read - the body. The
@@ -97,6 +97,13 @@ PM_V3_KEY_SENTENCES = PM_KEY_SENTENCES + (
     "工單寫明「架構師：免（理由）」。",
     "PMO 席位名單尚無該專案架構師時，照 v2 的方式做，在工單上註明「架構師：未開席」。",
 )
+#: `comm` (#236, comm-skill 4.1/4.2): the neutral capability for AI-to-AI messaging
+#: (send, receive, wake). `pm` v4 and `impl`/`rev` v2 are the first versions to
+#: declare it and to say the one neutral sentence below in `know`; earlier versions
+#: are append-only and not bound by it. The sentence names no tool.
+COMM_SENTENCE = "AI 之間的溝通（送訊、收訊、叫醒）需要 `comm` 能力，怎麼做看環境說明。"
+#: `pm` v4 keeps every v3 sentence (the old check is not weakened) plus the comm one.
+PM_V4_KEY_SENTENCES = PM_V3_KEY_SENTENCES + (COMM_SENTENCE,)
 #: The sentence every `pm` version must keep (judge or dont).
 REVIEW_BY_NON_AUTHOR = "審查一律非作者"
 
@@ -119,6 +126,9 @@ REV_KEY_SENTENCES = (
 #: The sentence every `rev` version must keep (judge or dont): the reviewer is
 #: never the author. `rev` writes it differently from `pm`'s「審查一律非作者」.
 REV_REVIEW_BY_NON_AUTHOR = "不審自己的作品"
+#: `impl`/`rev` v2 keep every v1 sentence plus the comm one.
+IMPL_V2_KEY_SENTENCES = IMPL_KEY_SENTENCES + (COMM_SENTENCE,)
+REV_V2_KEY_SENTENCES = REV_KEY_SENTENCES + (COMM_SENTENCE,)
 #: `arch` (worker-team 的架構師, design §9, #313/#319): the twelve sentences, each
 #: verbatim and whole (with its punctuation), read from the four body sections
 #: only. A short word such as `模組切割` would turn up in unrelated paragraphs, and
@@ -366,6 +376,9 @@ IMPL_REL = "atelier/worker-team/impl/v1.md"
 REV_REL = "atelier/worker-team/rev/v1.md"
 PMO_V2_REL = "atelier/pmo/pm/v2.md"
 PM_V3_REL = "atelier/worker-team/pm/v3.md"
+PM_V4_REL = "atelier/worker-team/pm/v4.md"
+IMPL_V2_REL = "atelier/worker-team/impl/v2.md"
+REV_V2_REL = "atelier/worker-team/rev/v2.md"
 PMO_V3_REL = "atelier/pmo/pm/v3.md"
 PMO_V4_REL = "atelier/pmo/pm/v4.md"
 PMO_V5_REL = "atelier/pmo/pm/v5.md"
@@ -576,6 +589,10 @@ def findings_for(path: str, text: str) -> Findings:
         and version_match is not None and int(version_match.group(1)) >= 6
     # `arch` is version-bound per file (#403): v1 keeps the「長期常駐」sentence,
     # v2 replaces it with「按需開」, so each list applies only to its own version.
+    # `comm` (#236): worker-team pm v4+, impl v2+, rev v2+ (older files unbound).
+    comm_required = team == "worker-team" and version_match is not None \
+        and ((role == "pm" and int(version_match.group(1)) >= 4)
+             or (role in ("impl", "rev") and int(version_match.group(1)) >= 2))
     arch_version_1 = role == "arch" \
         and version_match is not None and int(version_match.group(1)) == 1
     arch_version_2_or_later = role == "arch" \
@@ -590,6 +607,7 @@ def findings_for(path: str, text: str) -> Findings:
             (pmo_version_5, PMO_V5_KEY_SENTENCES, "v5 的 pmo pm"),
             (pmo_version_6_or_later, PMO_V6_KEY_SENTENCES, "v6 起的 pmo pm"),
             (role == "impl" and is_v1_or_later, IMPL_KEY_SENTENCES, "v1 起的 impl"),
+            (comm_required, (COMM_SENTENCE,), "宣告 comm 的版本（pm v4／impl v2／rev v2 起）"),
             (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev"),
             (arch_version_1, ARCH_KEY_SENTENCES, "v1 的 arch"),
             (arch_version_2_or_later, ARCH_V2_KEY_SENTENCES, "v2 起的 arch")):
@@ -621,6 +639,9 @@ def findings_for(path: str, text: str) -> Findings:
             found.errors.append(f"{path}: capabilities 的子節名重複：{name}")
         if parts is not None and parts[2] == 0 and "angareion" not in names:
             found.errors.append(f"{path}: v0 職務檔的 capabilities 缺 angareion 子節")
+        if comm_required and "comm" not in names:
+            found.errors.append(
+                f"{path}: pm v4／impl v2／rev v2 起的 capabilities 要有 comm 子節")
         for name in names:
             if name not in KNOWN_CAPABILITIES:
                 found.warnings.append(f"{path}: 未知的能力名 {name}（只警告、不擋）")
@@ -877,6 +898,9 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     + [(PMO_V4_REL, sentence, "關鍵句") for sentence in PMO_V4_KEY_SENTENCES]
     + [(PMO_V5_REL, sentence, "關鍵句") for sentence in PMO_V5_KEY_SENTENCES]
     + [(PMO_V6_REL, sentence, "關鍵句") for sentence in PMO_V6_KEY_SENTENCES]
+    + [(PM_V4_REL, sentence, "關鍵句") for sentence in PM_V4_KEY_SENTENCES]
+    + [(IMPL_V2_REL, sentence, "關鍵句") for sentence in IMPL_V2_KEY_SENTENCES]
+    + [(REV_V2_REL, sentence, "關鍵句") for sentence in REV_V2_KEY_SENTENCES]
 )
 
 
@@ -904,8 +928,9 @@ def test_a_missing_impl_or_rev_key_sentence_is_flagged(rel, sentence, expected, 
         f"格式檢查沒有抓到「{sentence}」被拿掉：{found.errors}"
 
 
-@pytest.mark.parametrize("rel", (IMPL_REL, REV_REL, ARCH_REL, ARCH_V2_REL),
-                         ids=("impl", "rev", "arch", "arch-v2"))
+@pytest.mark.parametrize("rel", (IMPL_REL, REV_REL, ARCH_REL, ARCH_V2_REL,
+                                 PM_V4_REL, IMPL_V2_REL, REV_V2_REL),
+                         ids=("impl", "rev", "arch", "arch-v2", "pm-v4", "impl-v2", "rev-v2"))
 def test_the_impl_and_rev_harnesses_pass_the_format_check(rel):
     found = findings_for(rel, (REPO / rel).read_text(encoding="utf-8"))
     assert not found.errors, "\n".join(found.errors)
@@ -1349,3 +1374,28 @@ def test_append_only_ignores_changes_outside_the_harness_tree(tmp_path):
     repo, base = _fake_repo(tmp_path)
     (repo / "README.md").write_text("README 改過\n", encoding="utf-8")
     assert append_only_violations(repo, base) == []
+
+
+# --- comm 能力（#236） ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("rel", (PM_V4_REL, IMPL_V2_REL, REV_V2_REL),
+                         ids=("pm-v4", "impl-v2", "rev-v2"))
+def test_a_comm_version_without_the_comm_subsection_is_flagged(rel):
+    text = (REPO / rel).read_text(encoding="utf-8")
+    assert "### comm\n" in text
+    found = findings_for(rel, text.replace("### comm\n", ""))
+    assert any("comm 子節" in error for error in found.errors), found.errors
+
+
+@pytest.mark.parametrize("rel", (PM_V4_REL, IMPL_V2_REL, REV_V2_REL),
+                         ids=("pm-v4", "impl-v2", "rev-v2"))
+def test_the_comm_sentence_names_no_tool(rel):
+    body = (REPO / rel).read_text(encoding="utf-8")
+    assert "aicomm" not in body
+
+
+def test_older_versions_are_not_bound_by_the_comm_rule():
+    for rel in (PM_V3_REL, IMPL_REL, REV_REL):
+        found = findings_for(rel, (REPO / rel).read_text(encoding="utf-8"))
+        assert not found.errors, found.errors
