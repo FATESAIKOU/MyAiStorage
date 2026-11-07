@@ -2217,3 +2217,32 @@ def test_413_c14_the_record_id_is_still_read_from_a_poke_with_via_and_ref(world,
     r = send(world, monkeypatch, capsys)
     assert r.err == f"wake: demo-pm-t1 woken local record=local/{RECORD_A}\n"
     assert world.sidecar.pokes()[0]["ref"] == FAKE_ID
+
+# --- #420: the other json.loads sites read a too-deep body as unreadable, too ---------------
+
+def test_420_a_200_agent_answer_too_deep_to_read_is_no_state():
+    from aicomm import cli
+
+    assert cli._agent_state(DEEP_BODY) is None
+
+
+def test_420_a_deep_agent_answer_is_not_woken_bad_answer(world, monkeypatch, capsys):
+    world.sidecar.raw["demo-pm-t1"] = (200, DEEP_BODY)
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 not-woken bad-answer\n"
+    assert world.sidecar.pokes() == []
+
+
+def test_420_a_find_answer_too_deep_to_read_is_no_peers():
+    from aicomm import cli
+
+    assert cli._parse_peers("[" * 200000) is None
+
+
+def test_420_a_deep_find_answer_is_peer_bad_answer(world, monkeypatch, capsys):
+    use_peer(world, found_raw("[" * 200000))
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 not-woken peer-bad-answer\n"
+    assert [c["argv"][0] for c in world.peer_calls()] == ["find"]  # nothing was poked

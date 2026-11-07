@@ -156,3 +156,18 @@ def test_read_backend_error_gives_no_hint(world, monkeypatch, capsys):
     r = run_aicomm(["inbox"], monkeypatch, capsys)
     assert r.code == 2
     assert "同一個身分" not in r.err and "沒有新信" not in r.err
+
+
+def test_420_is_empty_read_treats_a_too_deep_json_as_not_empty():
+    from aicomm import cli
+
+    assert cli._is_empty_read("[" * 200000, True) is False
+
+
+def test_420_a_too_deep_json_read_comes_back_verbatim_without_a_hint(world, monkeypatch, capsys):
+    deep = "[" * 50000 + "\n"  # env values stay under the 128 KiB limit
+    world.setenv("FAKE_ANG_READ_OUT", deep)
+    r = run_aicomm(["inbox", "--json"], monkeypatch, capsys)
+    assert r.code == 0
+    assert r.out == deep
+    assert "沒有新信" not in r.err
