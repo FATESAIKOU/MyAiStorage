@@ -104,6 +104,42 @@ PM_V3_KEY_SENTENCES = PM_KEY_SENTENCES + (
 COMM_SENTENCE = "AI 之間的溝通（送訊、收訊、叫醒）需要 `comm` 能力，怎麼做看環境說明。"
 #: `pm` v4 keeps every v3 sentence (the old check is not weakened) plus the comm one.
 PM_V4_KEY_SENTENCES = PM_V3_KEY_SENTENCES + (COMM_SENTENCE,)
+#: The P-8 fallback (#434): an environment whose note names no wake keeps waiting
+#: as the note says; blocking waiting comes back only when a wake is temporarily
+#: unusable, and then the PMO is told. Named on its own because the
+#: no-contradiction guard below asserts the old defaults are gone and this one stays.
+PM_V5_FALLBACK_SENTENCE = (
+    "環境說明寫明沒有叫醒時，照環境說明等待；叫醒臨時用不了時，才退回阻塞等待並回報 PMO。"
+)
+#: `pm` v5 (#434, design §4／§4.1): every matter keeps moving - a wake is scheduled
+#: for each dispatched teammate or CI run and the actual state is read when it fires
+#: (the old「閒著就用阻塞等待」default is gone), wakes are re-queued once at boot
+#: without duplicates, each wake is cancelled when its matter ends, the brief tells
+#: teammates to send the report path, the「做完」test is「the teammate stopped AND the
+#: report file exists」, the no-wake fallback is spelled out, and the stage report
+#: says what each matter waits on and which wake brings it back. Every entry is a
+#: whole sentence, so deleting or rewording one goes red. `v4` and earlier are
+#: append-only and not bound by these.
+PM_V5_NEW_SENTENCES = (
+    "確保手上每件事都在前進：每一件事都要有人在做、有下一步，或寫清楚在等什麼。",  # P-1
+    "每派一名隊員或觸發一次 CI，就用環境提供的叫醒替自己排一個叫醒；醒來查實際狀態"
+    "（隊員狀態、報告檔在不在、CI 結果），不是等訊息。",  # P-2
+    "結束就接下一步；卡住就處理：追上、換人、問人或停下回報，不要讓事情停在原地。",  # P-3
+    "叫醒可能隨環境重啟消失：開機（接手、重開）時先查現有排程，缺的補排，已有的不重複排。",  # P-4
+    "一件事結束就取消它的叫醒；手上的事全部結束時，不留任何叫醒。",  # P-5
+    "給隊員的 brief 必寫「報告寫完（做完、卡住或要決定）一定發訊息給 PM」，指示不寫在聊天裡。",  # P-6
+    "隊員做完的判準：隊員已停下，而且報告檔真的存在；工具顯示的狀態不算數。"
+    "回報訊息是平常的訊號；報告在、訊息沒到時照樣接下一步，並把漏發記下來。",  # P-7
+    PM_V5_FALLBACK_SENTENCE,  # P-8
+    "階段回報寫出每件事在等什麼、靠哪個叫醒回來看。",  # P-9
+    "答得出『進行中的單、在等什麼、隊員在哪、有哪些叫醒、有哪些規則』，才算接上。",  # R-37
+    "每件在跑的事都排好叫醒之後，沒有待辦就結束這一輪；不要空轉輪詢。",  # R-71
+    "關隊員（或收掉它的畫面／session）之前，先取消該事項的叫醒。",  # R-123
+)
+#: `pm` v5 keeps every v4 sentence plus the new ones; only the source for
+#: `KEY_SENTENCE_CASES` - `findings_for` applies just `PM_V5_NEW_SENTENCES`
+#: (the v1／v3／comm rows already cover the older lists for v5).
+PM_V5_KEY_SENTENCES = PM_V4_KEY_SENTENCES + PM_V5_NEW_SENTENCES
 #: The sentence every `pm` version must keep (judge or dont).
 REVIEW_BY_NON_AUTHOR = "審查一律非作者"
 
@@ -380,6 +416,7 @@ REV_REL = "atelier/worker-team/rev/v1.md"
 PMO_V2_REL = "atelier/pmo/pm/v2.md"
 PM_V3_REL = "atelier/worker-team/pm/v3.md"
 PM_V4_REL = "atelier/worker-team/pm/v4.md"
+PM_V5_REL = "atelier/worker-team/pm/v5.md"
 IMPL_V2_REL = "atelier/worker-team/impl/v2.md"
 REV_V2_REL = "atelier/worker-team/rev/v2.md"
 PMO_V3_REL = "atelier/pmo/pm/v3.md"
@@ -578,6 +615,10 @@ def findings_for(path: str, text: str) -> Findings:
     # pm, version 3) out of this list: it has its own PMO lists above.
     pm_version_3_or_later = team == "worker-team" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 3
+    # `pm` v5 (#434) adds the「每件事都在前進」sentences; v4 and earlier are
+    # append-only and not bound by them.
+    pm_version_5_or_later = team == "worker-team" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) >= 5
     pmo_version_4_or_later = team == "pmo" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 4
     # The H4 trigger sentence is version-bound (see its list above): v3 and v4
@@ -609,6 +650,7 @@ def findings_for(path: str, text: str) -> Findings:
             (pmo_version_3_or_later, PMO_V3_KEY_SENTENCES, "v3 起的 pmo pm"),
             (pmo_version_3_to_4, PMO_V3_TO_4_GROUP_SENTENCES, "v3、v4 的 pmo pm"),
             (pm_version_3_or_later, PM_V3_KEY_SENTENCES, "v3 起的 worker-team pm"),
+            (pm_version_5_or_later, PM_V5_NEW_SENTENCES, "v5 起的 worker-team pm"),
             (pmo_version_4_or_later, PMO_V4_KEY_SENTENCES, "v4 起的 pmo pm"),
             (pmo_version_5, PMO_V5_KEY_SENTENCES, "v5 的 pmo pm"),
             (pmo_version_6_or_later, PMO_V6_KEY_SENTENCES, "v6 起的 pmo pm"),
@@ -906,6 +948,7 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     + [(PMO_V5_REL, sentence, "關鍵句") for sentence in PMO_V5_KEY_SENTENCES]
     + [(PMO_V6_REL, sentence, "關鍵句") for sentence in PMO_V6_KEY_SENTENCES]
     + [(PM_V4_REL, sentence, "關鍵句") for sentence in PM_V4_KEY_SENTENCES]
+    + [(PM_V5_REL, sentence, "關鍵句") for sentence in PM_V5_KEY_SENTENCES]
     + [(IMPL_V2_REL, sentence, "關鍵句") for sentence in IMPL_V2_KEY_SENTENCES]
     + [(REV_V2_REL, sentence, "關鍵句") for sentence in REV_V2_KEY_SENTENCES]
 )
@@ -936,12 +979,42 @@ def test_a_missing_impl_or_rev_key_sentence_is_flagged(rel, sentence, expected, 
 
 
 @pytest.mark.parametrize("rel", (IMPL_REL, REV_REL, ARCH_REL, ARCH_V2_REL,
-                                 ARCH_V3_REL, PM_V4_REL, IMPL_V2_REL, REV_V2_REL),
+                                 ARCH_V3_REL, PM_V4_REL, PM_V5_REL,
+                                 IMPL_V2_REL, REV_V2_REL),
                          ids=("impl", "rev", "arch", "arch-v2", "arch-v3",
-                              "pm-v4", "impl-v2", "rev-v2"))
+                              "pm-v4", "pm-v5", "impl-v2", "rev-v2"))
 def test_the_impl_and_rev_harnesses_pass_the_format_check(rel):
     found = findings_for(rel, (REPO / rel).read_text(encoding="utf-8"))
     assert not found.errors, "\n".join(found.errors)
+
+
+# --- pm v5：舊預設與不矛盾守門（#434） -------------------------------------------
+
+
+def test_pm_v4_is_not_bound_by_the_progress_wake_sentences():
+    """#434：新句只約束 v5 起；v4 沒有這些句子時仍無錯（append-only 的舊版不動）。"""
+    text = (REPO / PM_V4_REL).read_text(encoding="utf-8")
+    for sentence in PM_V5_NEW_SENTENCES:
+        assert sentence not in text, f"v4 不該有 v5 的句子：「{sentence}」"
+    assert not findings_for(PM_V4_REL, text).errors
+
+
+def test_the_pm_v5_harness_drops_the_old_defaults():
+    """#434：v5 不得再留下 v4 的舊預設（含舊的「做完」判準與固定分鐘數）；退路句 P-8 要在（設計決定的守門）。
+
+    比對的是整句，不是「阻塞等待」這種短詞（P-8 本身含那四個字）；先把粗體記號
+    去掉，免得只拿掉 `**`、句子還留著時守門照樣綠。這是設計決定的守門，不是格式檢查。
+    """
+    text = (REPO / PM_V5_REL).read_text(encoding="utf-8")
+    plain = text.replace("**", "")
+    for old in (
+            "閒著就用阻塞等待：一次等到有訊息或逾時，逾時拉長到數分鐘級，等不到就再等一次",
+            "有在跑的就掛著監看（隊員、派工），到期就重掛",
+            "全部待命時可以停，有新工作派出去時再掛",
+            "中斷提示消失",
+            "畫面幾分鐘沒動靜就戳隊員"):
+        assert old not in plain, f"v5 還留著 v4 的舊預設：「{old}」"
+    assert PM_V5_FALLBACK_SENTENCE in text, "v5 缺了叫醒用不了時的退路句（P-8）"
 
 
 # --- 私人資訊：email、憑證樣式、憑證變數名、額度數字（#134） --------------------
@@ -1387,8 +1460,9 @@ def test_append_only_ignores_changes_outside_the_harness_tree(tmp_path):
 # --- comm 能力（#236、#432） ----------------------------------------------------
 
 
-@pytest.mark.parametrize("rel", (PM_V4_REL, IMPL_V2_REL, REV_V2_REL, ARCH_V3_REL),
-                         ids=("pm-v4", "impl-v2", "rev-v2", "arch-v3"))
+@pytest.mark.parametrize("rel", (PM_V4_REL, PM_V5_REL, IMPL_V2_REL, REV_V2_REL,
+                                 ARCH_V3_REL),
+                         ids=("pm-v4", "pm-v5", "impl-v2", "rev-v2", "arch-v3"))
 def test_a_comm_version_without_the_comm_subsection_is_flagged(rel):
     text = (REPO / rel).read_text(encoding="utf-8")
     assert "### comm\n" in text
@@ -1396,8 +1470,9 @@ def test_a_comm_version_without_the_comm_subsection_is_flagged(rel):
     assert any("comm 子節" in error for error in found.errors), found.errors
 
 
-@pytest.mark.parametrize("rel", (PM_V4_REL, IMPL_V2_REL, REV_V2_REL, ARCH_V3_REL),
-                         ids=("pm-v4", "impl-v2", "rev-v2", "arch-v3"))
+@pytest.mark.parametrize("rel", (PM_V4_REL, PM_V5_REL, IMPL_V2_REL, REV_V2_REL,
+                                 ARCH_V3_REL),
+                         ids=("pm-v4", "pm-v5", "impl-v2", "rev-v2", "arch-v3"))
 def test_the_comm_sentence_names_no_tool(rel):
     body = (REPO / rel).read_text(encoding="utf-8")
     assert "aicomm" not in body
