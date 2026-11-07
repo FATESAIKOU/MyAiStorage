@@ -108,6 +108,15 @@ WAKE_WOKEN = "woken"
 WAKE_NOT_WOKEN = "not-woken"
 WAKE_UNKNOWN = "unknown"
 WAKE_LOCAL = "local"
+# `queued` modifies `woken` (the recipient was busy, so the poke waits for its next turn).
+# It is never a reason code: `not-woken`/`unknown` keep the codes of `REASON_*`.
+WAKE_QUEUED = "queued"
+
+# The optional fields of a poke answer (MyLinuxPool#786, poke-records-v1): the sidecar's
+# record id and whether the poke was queued. A record id is used only when it is exactly
+# one token of this shape, so no answer can turn one `wake:` line into two or forge a field.
+RECORD_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+POKE_OUTCOME_QUEUED = "queued"
 
 TICKET_RE = re.compile(r"^[A-Za-z0-9._-]+#[0-9]+$")
 # One recipient gets exactly one `wake:` line, so a reason code is one token: a `state`
@@ -248,14 +257,20 @@ class _Wake(NamedTuple):
     """One recipient's result: the kind, the reason code (or the wake target), and the name.
 
     `code` is `local` or `peer:<port>[,<port>…]` when woken, and a reason code otherwise.
+    `queued` marks a `woken` result whose poke waits for the recipient's next turn, and
+    `records` is each poke's sidecar record (`local/<id>` or `peer:<port>/<id>`), already
+    carrying its location; the empty tuple means none, and then the line is unchanged.
     `line` is the only place that spells the one stderr line; the peer fallback merges
-    several machines' answers from `kind`, `code` and `interrupt`, never by parsing it.
+    several machines' answers from `kind`, `code`, `interrupt`, `queued` and `records`,
+    never by parsing it.
     """
 
     kind: str
     code: str
     name: str
     interrupt: bool = False
+    queued: bool = False
+    records: tuple[str, ...] = ()
 
     @property
     def woken(self) -> bool:
@@ -263,20 +278,28 @@ class _Wake(NamedTuple):
 
     @property
     def line(self) -> str:
-        suffix = " interrupt" if self.woken and self.interrupt else ""
-        return f"wake: {self.name} {self.kind} {self.code}{suffix}"
+        suffix = ""
+        if self.woken:
+            # ` interrupt` wins: a poke that interrupts never queues.
+            if self.interrupt:
+                suffix = " interrupt"
+            elif self.queued:
+                suffix = f" {WAKE_QUEUED}"
+        record = f" record={','.join(self.records)}" if self.records else ""
+        return f"wake: {self.name} {self.kind} {self.code}{suffix}{record}"
 
 
-def _woken(name: str, interrupt: bool, code: str = WAKE_LOCAL) -> _Wake:
-    return _Wake(WAKE_WOKEN, code, name, interrupt)
+def _woken(name: str, interrupt: bool, code: str = WAKE_LOCAL, *,
+           queued: bool = False, records: tuple[str, ...] = ()) -> _Wake:
+    return _Wake(WAKE_WOKEN, code, name, interrupt, queued, records)
 
 
-def _not_woken(name: str, code: str) -> _Wake:
-    return _Wake(WAKE_NOT_WOKEN, code, name)
+def _not_woken(name: str, code: str, *, records: tuple[str, ...] = ()) -> _Wake:
+    return _Wake(WAKE_NOT_WOKEN, code, name, records=records)
 
 
-def _unknown(name: str, code: str) -> _Wake:
-    return _Wake(WAKE_UNKNOWN, code, name)
+def _unknown(name: str, code: str, *, records: tuple[str, ...] = ()) -> _Wake:
+    return _Wake(WAKE_UNKNOWN, code, name, records=records)
 
 
 def _agent_state(body: bytes) -> str | None:
@@ -289,39 +312,84 @@ def _agent_state(body: bytes) -> str | None:
     return state if isinstance(state, str) else None
 
 
-def _refusal_code(body: bytes) -> str:
-    """Why a poke got 409: `agent-not-running`, `awaiting-answer`, or plain `http-409`.
-
-    The error code is the body's `code`, else its `error`; anything else (unreadable body,
-    neither field a string, a code we do not know) is just the HTTP status.
-    """
+def _answer_fields(body: bytes) -> dict | None:
+    """The top-level JSON object of a poke answer, or None when the body cannot be read."""
     try:
         answer = json.loads(body)
     except ValueError:
-        answer = None
-    for field in ("code", "error"):
-        value = answer.get(field) if isinstance(answer, dict) else None
+        return None
+    return answer if isinstance(answer, dict) else None
+
+
+def _record_id(answer: dict | None) -> str | None:
+    """The answer's `poke_id` when it is one `[A-Za-z0-9_-]{1,64}` token, else None."""
+    value = answer.get("poke_id") if answer is not None else None
+    if isinstance(value, str) and RECORD_ID_RE.fullmatch(value):
+        return value
+    return None
+
+
+def _error_code(answer: dict | None) -> str | None:
+    """The first error code an answer spells: nested `error.code`, `code`, string `error`.
+
+    One body is one error, so the first of those that is a string settles it - a code we do
+    not know does not fall through to a second shape (design D-7 / L-4).
+    """
+    if answer is None:
+        return None
+    nested = answer.get("error")
+    if isinstance(nested, dict):
+        value = nested.get("code")
         if isinstance(value, str):
-            if value == "agent_not_running":
-                return REASON_AGENT_NOT_RUNNING
-            if value == "agent_awaiting_answer":
-                return REASON_AWAITING_ANSWER
-            break
+            return value
+    for field in ("code", "error"):
+        value = answer.get(field)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _refusal_code(answer: dict | None) -> str:
+    """Why a poke got 409: `agent-not-running`, `awaiting-answer`, or plain `http-409`.
+
+    The sidecar's error body is nested (`{"error": {"code": …}}`); the flat shapes
+    (`{"code": …}`, `{"error": "<string>"}`) stay readable. Anything else - unreadable
+    body, no string code, a code we do not know - is just the HTTP status.
+    """
+    value = _error_code(answer)
+    if value == "agent_not_running":
+        return REASON_AGENT_NOT_RUNNING
+    if value == "agent_awaiting_answer":
+        return REASON_AWAITING_ANSWER
     return f"{REASON_HTTP}409"
 
 
-def _poke_answer(status: int, body: bytes) -> tuple[str, str]:
-    """Read a poke answer as `(kind, code)` - the table the local poke and `pool-peer call` share.
+class _PokeAnswer(NamedTuple):
+    """The shared table's reading: kind, reason code (or `local`), record id, queued."""
+
+    kind: str
+    code: str
+    poke_id: str | None = None
+    queued: bool = False
+
+
+def _poke_answer(status: int, body: bytes) -> _PokeAnswer:
+    """Read a poke answer - the table the local poke and `pool-peer call` share.
 
     200 is `woken local`; 409 carries its reason in the body (`_refusal_code`); anything
-    else is `http-<status>`. Only this table is shared: the transport-level outcomes (a
+    else is `http-<status>`. Any answer may carry a usable `poke_id`; only a 200 may say
+    the poke was queued (`poke_outcome`, and only the exact value `queued`). Neither
+    changes kind or reason. Only this table is shared: the transport-level outcomes (a
     timeout, a broken connection, `call`'s rc) stay with each side's caller.
     """
+    answer = _answer_fields(body)
+    poke_id = _record_id(answer)
     if status == 200:
-        return WAKE_WOKEN, WAKE_LOCAL
+        outcome = answer.get("poke_outcome") if answer is not None else None
+        return _PokeAnswer(WAKE_WOKEN, WAKE_LOCAL, poke_id, outcome == POKE_OUTCOME_QUEUED)
     if status == 409:
-        return WAKE_NOT_WOKEN, _refusal_code(body)
-    return WAKE_NOT_WOKEN, f"{REASON_HTTP}{status}"
+        return _PokeAnswer(WAKE_NOT_WOKEN, _refusal_code(answer), poke_id)
+    return _PokeAnswer(WAKE_NOT_WOKEN, f"{REASON_HTTP}{status}", poke_id)
 
 
 def _peer_executable() -> str | None:
@@ -460,29 +528,35 @@ def _poke_peer(executable: str, name: str, port: int, state: str, interrupt: boo
     status, body = _call_answer(proc.stdout)
     if status is None:
         return _unknown(name, REASON_PEER_BAD_ANSWER)
-    kind, code = _poke_answer(status, body)  # the same table as the local poke
-    if kind == WAKE_WOKEN:
-        return _woken(name, payload["interrupt"], f"peer:{port}")
-    return _Wake(kind, code, name)
+    answer = _poke_answer(status, body)  # the same table as the local poke
+    records = (f"peer:{port}/{answer.poke_id}",) if answer.poke_id else ()
+    if answer.kind == WAKE_WOKEN:
+        return _woken(name, payload["interrupt"], f"peer:{port}",
+                      queued=answer.queued, records=records)
+    return _Wake(answer.kind, answer.code, name, records=records)
 
 
 def _merge_peers(name: str, answers: list[tuple[int, _Wake]]) -> _Wake:
-    """One recipient on several machines becomes one result (design of #368 §3.7).
+    """One recipient on several machines becomes one result (design of #368 §3.7, #406 D-3).
 
     Any 200 is `woken` (the successful ports, in order); otherwise any `unknown` wins;
     otherwise `not-woken`. A reason code comes from the lowest port that has one.
+    `records` lists every poke that carried a usable id (failed machines too), lowest port
+    first; `queued` needs every successful poke to say so.
     """
     ordered = sorted(answers, key=lambda pair: pair[0])
     if not ordered:  # cannot happen with a parsed answer; keep one line per recipient anyway
         return _not_woken(name, REASON_PEER_BAD_ANSWER)
+    records = tuple(record for _, answer in ordered for record in answer.records)
     woken = [(port, answer) for port, answer in ordered if answer.woken]
     if woken:
         ports = ",".join(str(port) for port, _ in woken)
-        return _woken(name, any(answer.interrupt for _, answer in woken), f"peer:{ports}")
+        return _woken(name, any(answer.interrupt for _, answer in woken), f"peer:{ports}",
+                      queued=all(answer.queued for _, answer in woken), records=records)
     for _, answer in ordered:
         if answer.kind == WAKE_UNKNOWN:
-            return _unknown(name, answer.code)
-    return _not_woken(name, ordered[0][1].code)
+            return _unknown(name, answer.code, records=records)
+    return _not_woken(name, ordered[0][1].code, records=records)
 
 
 def _wake_elsewhere(name: str, interrupt: bool) -> _Wake:
@@ -557,10 +631,12 @@ def _wake_one_inner(base: str, name: str, interrupt: bool) -> _Wake:
     except (OSError, urllib.error.URLError) as e:
         # The request may have been sent and then lost: `unknown`, never "not woken".
         return _unknown(name, REASON_POKE_TIMEOUT if _is_timeout(e) else REASON_POKE_ERROR)
-    kind, code = _poke_answer(status, body)
-    if kind == WAKE_WOKEN:
-        return _woken(name, payload["interrupt"], code)
-    return _Wake(kind, code, name)
+    answer = _poke_answer(status, body)
+    records = (f"local/{answer.poke_id}",) if answer.poke_id else ()
+    if answer.kind == WAKE_WOKEN:
+        return _woken(name, payload["interrupt"], answer.code,
+                      queued=answer.queued, records=records)
+    return _Wake(answer.kind, answer.code, name, records=records)
 
 
 def _cmd_send(args: argparse.Namespace) -> int:

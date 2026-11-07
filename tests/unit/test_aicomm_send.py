@@ -1586,3 +1586,427 @@ def test_a3_log_never_asks_pool_peer(world, monkeypatch, capsys):
     r = run_aicomm(["log"], monkeypatch, capsys)
     assert r.code == 0
     assert world.peer_calls() == []
+
+
+# --- #406: the wake outcome (`queued`) and the sidecar record id ---------------------------
+# C-n below refers to the contract list in the `aicomm-wake-outcome` change (design.md §3).
+# The local lines come from the fake sidecar; the cross-machine ones from the fake
+# `pool-peer`. The fake sidecar answers a plain `{}` by default, so every test above keeps
+# its exact old line (no `record=`, no ` queued`).
+
+RECORD_A = "01JX000000000000000000000A"
+RECORD_B = "pk-01JX00000000000000000000B"
+RECORD_C = "01JX000000000000000000000C"
+
+# D-1's closed grammar (M-1), for `re.fullmatch` (a `$` would eat a trailing newline).
+WAKE_406_RE = re.compile(
+    r"^wake: \S+ (woken (local|peer:\d+(,\d+)*)( interrupt| queued)?|"
+    r"(not-woken|unknown) [A-Za-z0-9_-]+)"
+    r"( record=(local|peer:\d+)/[A-Za-z0-9_-]{1,64}"
+    r"(,(local|peer:\d+)/[A-Za-z0-9_-]{1,64})*)?$"
+)
+
+
+def poke_answer(**fields) -> bytes:
+    """A fake poke body with these top-level fields."""
+    return json.dumps(fields).encode("utf-8")
+
+
+def local_poke(world, status=200, **fields) -> None:
+    world.sidecar.poke_status = status
+    world.sidecar.poke_body = poke_answer(**fields)
+
+
+# --- C-1: a local 200 with `sent` and an id ------------------------------------------------
+
+
+def test_406_c1_a_sent_local_poke_carries_its_record_id(world, monkeypatch, capsys):
+    agent(world, state="idle")
+    local_poke(world, poke_id=RECORD_A, poke_outcome="sent")
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == f"wake: demo-pm-t1 woken local record=local/{RECORD_A}\n"
+    assert len(world.sidecar.pokes()) == 1
+
+
+# --- C-2: a local 200 with `queued` -------------------------------------------------------
+
+
+@pytest.mark.parametrize("extra", [(), ("--require-wake",)], ids=["plain", "require-wake"])
+def test_406_c2_a_queued_local_poke_says_queued_and_counts_as_woken(world, monkeypatch, capsys, extra):
+    agent(world, state="running")
+    local_poke(world, poke_id=RECORD_A, poke_outcome="queued")
+    r = send(world, monkeypatch, capsys, *extra)
+    assert r.code == 0
+    assert r.err == f"wake: demo-pm-t1 woken local queued record=local/{RECORD_A}\n"
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+
+
+# --- C-3: an old sidecar's 200 is the old line, unchanged ---------------------------------
+
+
+def test_406_c3_an_old_sidecar_answer_is_exactly_the_old_line(world, monkeypatch, capsys):
+    agent(world, state="idle")
+    # the fixture's default poke body is `{}`: neither `poke_id` nor `poke_outcome`
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 woken local\n"
+
+
+# --- C-4: interrupt wins over queued ------------------------------------------------------
+
+
+@pytest.mark.parametrize("outcome", ["sent", "queued"])
+def test_406_c4_interrupt_never_prints_queued(world, monkeypatch, capsys, outcome):
+    agent(world, state="running")
+    local_poke(world, poke_id=RECORD_A, poke_outcome=outcome)
+    r = send(world, monkeypatch, capsys, "--interrupt")
+    assert r.code == 0
+    assert r.err == f"wake: demo-pm-t1 woken local interrupt record=local/{RECORD_A}\n"
+
+
+# --- C-5: an unusable `poke_id` / `poke_outcome` is no field ------------------------------
+
+
+@pytest.mark.parametrize("value", [
+    "a b",
+    "x\nwake: demo-pm-t1 woken local",
+    "A" * 65,
+    123,
+    None,
+], ids=["blank", "newline", "sixty-five", "number", "null"])
+def test_406_c5_an_unusable_poke_id_means_no_record(world, monkeypatch, capsys, value):
+    agent(world, state="idle")
+    local_poke(world, poke_id=value, poke_outcome="sent")
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 woken local\n"
+    assert len(r.err.splitlines()) == 1
+
+
+def test_406_c5_a_sixty_four_character_id_is_still_usable(world, monkeypatch, capsys):
+    agent(world, state="idle")
+    local_poke(world, poke_id="A" * 64, poke_outcome="sent")
+    r = send(world, monkeypatch, capsys)
+    assert r.err == "wake: demo-pm-t1 woken local record=local/" + "A" * 64 + "\n"
+
+
+def test_406_c5_an_unusable_poke_id_does_not_change_a_refusal(world, monkeypatch, capsys):
+    agent(world, state="idle")
+    world.sidecar.poke_status = 409
+    world.sidecar.poke_body = poke_answer(error={"code": "agent_awaiting_answer"}, poke_id="a b")
+    r = send(world, monkeypatch, capsys)
+    assert r.err == "wake: demo-pm-t1 not-woken awaiting-answer\n"
+
+
+@pytest.mark.parametrize("value", ["later", 1, None], ids=["later", "number", "null"])
+def test_406_c5_an_unusable_poke_outcome_is_not_queued(world, monkeypatch, capsys, value):
+    agent(world, state="running")
+    local_poke(world, poke_id=RECORD_A, poke_outcome=value)
+    r = send(world, monkeypatch, capsys)
+    assert r.err == f"wake: demo-pm-t1 woken local record=local/{RECORD_A}\n"
+
+
+# --- C-6: a refusal still carries the id --------------------------------------------------
+
+
+@pytest.mark.parametrize("status,body,code", [
+    (409, {"code": "agent_awaiting_answer", "poke_id": RECORD_A}, "awaiting-answer"),
+    (409, {"error": {"code": "agent_not_running"}, "poke_id": RECORD_A}, "agent-not-running"),
+    (503, {"error": {"code": "unavailable"}, "poke_id": RECORD_A}, "http-503"),
+], ids=["awaiting-answer", "agent-not-running", "503"])
+def test_406_c6_a_refused_poke_still_reports_its_record_id(world, monkeypatch, capsys, status, body, code):
+    agent(world, state="idle")
+    local_poke(world, status=status, **body)
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == f"wake: demo-pm-t1 not-woken {code} record=local/{RECORD_A}\n"
+    assert len(world.sidecar.pokes()) == 1
+
+
+# --- C-7: a cross-machine 200 with `queued` -----------------------------------------------
+
+
+@pytest.mark.parametrize("extra", [(), ("--require-wake",)], ids=["plain", "require-wake"])
+def test_406_c7_a_queued_peer_poke_carries_a_peer_record(world, monkeypatch, capsys, extra):
+    use_peer(world, found(5201, "running"), {
+        "5201": called(200, json.dumps({"poke_id": RECORD_A, "poke_outcome": "queued"})),
+    })
+    r = send(world, monkeypatch, capsys, *extra)
+    assert r.code == 0
+    assert r.err == f"wake: demo-pm-t1 woken peer:5201 queued record=peer:5201/{RECORD_A}\n"
+
+
+# --- C-8: merging several machines -------------------------------------------------------
+
+
+def test_406_c8_one_sent_and_one_queued_is_not_queued(world, monkeypatch, capsys):
+    use_peer(world, found(5201, "idle", 5202, "running"), {
+        "5201": called(200, json.dumps({"poke_id": RECORD_A, "poke_outcome": "sent"})),
+        "5202": called(200, json.dumps({"poke_id": RECORD_B, "poke_outcome": "queued"})),
+    })
+    r = send(world, monkeypatch, capsys)
+    assert r.err == (f"wake: demo-pm-t1 woken peer:5201,5202 "
+                     f"record=peer:5201/{RECORD_A},peer:5202/{RECORD_B}\n")
+
+
+def test_406_c8_every_woken_peer_queued_is_queued(world, monkeypatch, capsys):
+    use_peer(world, found(5201, "running", 5202, "running"), {
+        "5201": called(200, json.dumps({"poke_id": RECORD_A, "poke_outcome": "queued"})),
+        "5202": called(200, json.dumps({"poke_id": RECORD_B, "poke_outcome": "queued"})),
+    })
+    r = send(world, monkeypatch, capsys)
+    assert r.err == (f"wake: demo-pm-t1 woken peer:5201,5202 queued "
+                     f"record=peer:5201/{RECORD_A},peer:5202/{RECORD_B}\n")
+
+
+def test_406_c8_a_failed_peer_still_lists_its_record(world, monkeypatch, capsys):
+    use_peer(world, found(5201, "idle", 5202, "running"), {
+        "5201": called(409, json.dumps({"code": "agent_awaiting_answer", "poke_id": RECORD_A})),
+        "5202": called(200, json.dumps({"poke_id": RECORD_B, "poke_outcome": "queued"})),
+    })
+    r = send(world, monkeypatch, capsys)
+    assert r.err == (f"wake: demo-pm-t1 woken peer:5202 queued "
+                     f"record=peer:5201/{RECORD_A},peer:5202/{RECORD_B}\n")
+
+
+# --- C-9: no poke, no record --------------------------------------------------------------
+
+
+def _local_exited(world):
+    agent(world, state="exited")
+
+
+def _not_found(world):
+    use_peer(world, {"rc": 1, "stdout": "[]\n"})
+
+
+def _peer_unavailable(world):
+    pass  # the fixture's hook points at a path that does not exist
+
+
+def _lookup_incomplete(world):
+    use_peer(world, {"rc": 3, "stdout": ""})
+
+
+def _port_out_of_range(world):
+    use_peer(world, found(5199, "idle"), {"5199": called(200)})
+
+
+@pytest.mark.parametrize("setup,code", [
+    (_local_exited, "state-exited"),
+    (_not_found, "not-found"),
+    (_peer_unavailable, "peer-unavailable"),
+    (_lookup_incomplete, "lookup-incomplete"),
+    (_port_out_of_range, "peer-port-out-of-range"),
+], ids=["state-exited", "not-found", "peer-unavailable", "lookup-incomplete",
+        "peer-port-out-of-range"])
+def test_406_c9_nobody_poked_means_no_record(world, monkeypatch, capsys, setup, code):
+    setup(world)
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == f"wake: demo-pm-t1 not-woken {code}\n"
+
+
+def test_406_c9_bad_name_means_no_record(world, monkeypatch, capsys):
+    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    # `--to=-name` so argparse takes it as the value, not as an option
+    r = run_aicomm(["send", "--channel", "team-demo", "--to=-demo-pm-t1", "--body", BODY],
+                   monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: -demo-pm-t1 not-woken bad-name\n"
+    assert world.peer_calls() == []
+
+
+# --- C-10: the answer never arrived, so there is no record --------------------------------
+
+
+def test_406_c10_a_local_poke_timeout_has_no_record(world, monkeypatch, capsys):
+    from aicomm import cli
+
+    agent(world, state="idle")
+    monkeypatch.setattr(cli, "POKE_TIMEOUT", 0.3)
+    world.sidecar.poke_delay = 2.0
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 unknown poke-timeout\n"
+    assert len(world.sidecar.pokes()) == 1
+
+
+def test_406_c10_a_local_poke_error_has_no_record(world, monkeypatch, capsys):
+    agent(world, state="idle")
+    monkeypatch.setattr("aicomm.cli._request", _broken_poke(ConnectionResetError("reset by peer")))
+    r = send(world, monkeypatch, capsys)
+    assert r.err == "wake: demo-pm-t1 unknown poke-error\n"
+
+
+@pytest.mark.parametrize("rc,kind,code", [
+    (3, "unknown", "poke-timeout"),
+    (2, "not-woken", "peer-unavailable"),
+    (1, "unknown", "peer-bad-answer"),
+    (4, "unknown", "peer-bad-answer"),
+], ids=["rc-3", "rc-2", "rc-1", "rc-4"])
+def test_406_c10_a_call_without_a_usable_body_has_no_record(world, monkeypatch, capsys, rc, kind, code):
+    use_peer(world, found(5201, "idle"), {"5201": called(rc=rc)})
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == f"wake: demo-pm-t1 {kind} {code}\n"
+
+
+# --- C-11: the closed grammar -------------------------------------------------------------
+
+
+def test_406_c11_every_line_matches_the_closed_grammar(world, monkeypatch, capsys):
+    agent(world, "demo-pm-t1", state="running")
+    world.sidecar.poke_bodies["demo-pm-t1"] = (
+        200, poke_answer(poke_id=RECORD_A, poke_outcome="queued"))
+    agent(world, "demo-arch-t1", state="exited")
+    agent(world, "demo-gone-t1", state="idle")
+    world.sidecar.poke_bodies["demo-gone-t1"] = (
+        500, poke_answer(poke_id=RECORD_B, poke_outcome="failed"))
+    world.use_fake_peer()
+    world.peers({
+        "find": {"by_id": {"demo-peer-t1": found(5201, "running")}},
+        "call": {"5201": called(200, json.dumps(
+            {"poke_id": RECORD_C, "poke_outcome": "queued"}))},
+    })
+    r = send(world, monkeypatch, capsys, "--mention", "demo-arch-t1",
+             "--mention", "demo-gone-t1", "--mention", "demo-peer-t1")
+    assert r.code == 0
+    lines = r.err.splitlines()
+    assert lines == [
+        f"wake: demo-pm-t1 woken local queued record=local/{RECORD_A}",
+        "wake: demo-arch-t1 not-woken state-exited",
+        f"wake: demo-gone-t1 not-woken http-500 record=local/{RECORD_B}",
+        f"wake: demo-peer-t1 woken peer:5201 queued record=peer:5201/{RECORD_C}",
+    ]
+    for line in lines:
+        assert WAKE_406_RE.fullmatch(line), line
+
+
+@pytest.mark.parametrize("line", [
+    "wake: a woken local",
+    "wake: a woken local interrupt",
+    "wake: a woken local queued",
+    f"wake: a woken local queued record=local/{RECORD_A}",
+    f"wake: a woken peer:5201,5202 interrupt record=peer:5201/{RECORD_A},peer:5202/{RECORD_B}",
+    f"wake: a not-woken awaiting-answer record=local/{RECORD_A}",
+    f"wake: a unknown poke-timeout record=local/{RECORD_A}",
+], ids=["local", "interrupt", "queued", "queued-record", "two-peers-record",
+        "not-woken-record", "unknown-record"])
+def test_406_c11_the_grammar_accepts_the_expected_lines(line):
+    assert WAKE_406_RE.fullmatch(line), line
+
+
+@pytest.mark.parametrize("line", [
+    "wake: a woken local interrupt queued",
+    "wake: a woken local queued interrupt record=local/x",
+    "wake: a woken local bogus",
+    "wake: a woken local record=x/y",
+    "wake: a woken local record=local/a b",
+    "wake: a woken local record=local/" + "A" * 65,
+    "wake: a woken local record=",
+    "wake: a woken local record=local/A,",
+    "wake: a not-woken http-409 record=local/a b",
+    "wake: a queued local",
+    "wake: a woken",
+    "wake: a woken peer:5201,",
+    "wake: a woken local record=local/A extra",
+], ids=["both-modifiers", "both-modifiers-reversed", "bogus", "bad-location", "blank-id",
+        "sixty-five", "empty-record", "trailing-comma", "not-woken-blank-id", "queued-kind",
+        "no-code", "peer-trailing-comma", "trailing-text"])
+def test_406_c11_the_grammar_rejects_broken_lines(line):
+    assert WAKE_406_RE.fullmatch(line) is None, line
+
+
+# --- C-12: `--require-wake` with queued ---------------------------------------------------
+
+
+def test_406_c12_require_wake_counts_queued_as_woken(world, monkeypatch, capsys):
+    agent(world, state="running")
+    local_poke(world, poke_id=RECORD_A, poke_outcome="queued")
+    r = send(world, monkeypatch, capsys, "--require-wake")
+    assert r.code == 0
+
+
+def test_406_c12_require_wake_is_4_for_one_not_woken_with_a_record(world, monkeypatch, capsys):
+    agent(world, state="idle")
+    world.sidecar.poke_status = 503
+    world.sidecar.poke_body = poke_answer(poke_id=RECORD_A, poke_outcome="failed")
+    r = send(world, monkeypatch, capsys, "--require-wake")
+    assert r.code == 4
+    assert r.err == f"wake: demo-pm-t1 not-woken http-503 record=local/{RECORD_A}\n"
+
+
+def test_406_c12_require_wake_and_no_wake_is_still_refused_before_anything(world, monkeypatch, capsys):
+    agent(world, state="idle")
+    r = send(world, monkeypatch, capsys, "--require-wake", "--no-wake")
+    assert r.code == 1
+    assert world.calls() == [] and world.sidecar.requests == []
+
+
+# --- C-13: no extra request and no extra subcommand ---------------------------------------
+
+
+def test_406_c13_the_new_fields_add_no_request_and_no_subcommand(world, monkeypatch, capsys):
+    agent(world, "demo-pm-t1", state="idle")
+    local_poke(world, poke_id=RECORD_A, poke_outcome="sent")
+    first = send(world, monkeypatch, capsys)
+    assert first.code == 0
+    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    second = send(world, monkeypatch, capsys, to="demo-elsewhere-t1")
+    assert second.code == 0
+    assert second.err == "wake: demo-elsewhere-t1 woken peer:5201\n"
+    # only the two documented requests, and never a record lookup
+    assert world.sidecar.foreign_requests() == []
+    assert all("/pokes/" not in r["path"] for r in world.sidecar.requests)
+    # the pokes still carry exactly `text` and `interrupt` (C-16 is out of scope)
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+    peer_pokes = [c for c in world.peer_calls() if c["argv"][0] == "call"]
+    assert [json.loads(c["stdin"]) for c in peer_pokes] == [{"text": WAKE_TEXT, "interrupt": False}]
+    assert [c["argv"][0] for c in world.peer_calls()] == ["find", "call"]
+    # still only three subcommands
+    bad = run_aicomm(["status"], monkeypatch, capsys)
+    assert bad.code == 1
+    assert "send" in bad.err and "inbox" in bad.err and "log" in bad.err
+
+
+# --- C-15: the nested 409 error code (D-7) ------------------------------------------------
+
+
+@pytest.mark.parametrize("transport", ["local", "call"], ids=["local", "call"])
+@pytest.mark.parametrize("body,code", [
+    ({"error": {"code": "agent_awaiting_answer", "message": "x"}}, "awaiting-answer"),
+    ({"error": {"code": "agent_not_running"}}, "agent-not-running"),
+    ({"error": {"code": "poke_timeout"}}, "http-409"),
+    ({"code": "agent_awaiting_answer"}, "awaiting-answer"),
+    ({"error": "agent_not_running"}, "agent-not-running"),
+    ({"error": {"code": "weird"}, "code": "agent_not_running"}, "http-409"),
+    ({"error": {"code": 5}, "code": "agent_not_running"}, "agent-not-running"),
+    ({"error": {"message": "x"}}, "http-409"),
+], ids=["nested-awaiting", "nested-not-running", "nested-unknown", "flat-code",
+        "flat-error", "nested-wins", "nested-not-string", "message-only"])
+def test_406_c15_the_409_error_code_is_read_from_both_shapes(world, monkeypatch, capsys,
+                                                             transport, body, code):
+    if transport == "local":
+        agent(world, state="idle")
+        world.sidecar.poke_status = 409
+        world.sidecar.poke_body = poke_answer(**body)
+    else:
+        use_peer(world, found(5201, "idle"), {"5201": called(409, json.dumps(body))})
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == f"wake: demo-pm-t1 not-woken {code}\n"
+
+
+# --- C-17: 404 / 500 still carry the id ---------------------------------------------------
+
+
+@pytest.mark.parametrize("status", [404, 500])
+def test_406_c17_an_error_answer_still_reports_its_record_id(world, monkeypatch, capsys, status):
+    agent(world, state="idle")
+    local_poke(world, status=status, poke_id=RECORD_A, poke_outcome="failed")
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == f"wake: demo-pm-t1 not-woken http-{status} record=local/{RECORD_A}\n"
+    assert len(world.sidecar.pokes()) == 1
