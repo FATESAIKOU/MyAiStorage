@@ -9,15 +9,22 @@ agent - and its own children - would keep running with nothing waiting for
 them.
 
 So agora starts this module (`python -m agora.orphan_guard`) as a second,
-minimal process right after the agent:
+minimal process *before* the agent (#422), and the agent reports its own pid:
 
-* agora holds the write end of a pipe that the agent never inherits (the pipe
-  is made after the agent starts, and its fds are not inheritable);
-* every normal way out of `cmd_continue` writes `NORMAL` (``b"D"``) into the
-  pipe and closes it - the reaper reads that byte and leaves 0, killing nothing;
-* if the pipe reaches EOF without that byte, agora was killed without saying
-  goodbye: the reaper sends SIGTERM to the agent (and its direct children) and,
-  after a grace period, SIGKILL to whatever is still there.
+* agora holds the write end of a pipe that the agent never inherits (the
+  fds are not inheritable; the agent's `Popen` closes them before exec);
+* the pipe speaks one record per line: ``P<pid>`` (written by the agent's own
+  child process, between fork and exec, so a kill at any moment after the fork
+  still leaves the reaper knowing who the agent is), ``S<lstart>`` (agora's
+  reading of the agent's start time, taken right after `Popen` returns, before
+  any `wait`) and ``D`` (goodbye);
+* every normal way out of `cmd_continue` writes ``D`` into the pipe and closes
+  it - the reaper sees a line that is exactly ``D`` and leaves 0, killing
+  nothing;
+* if the pipe reaches EOF without that line, agora was killed without saying
+  goodbye: when a ``P`` was seen, the reaper sends SIGTERM to the agent (and
+  its direct children) and, after a grace period, SIGKILL to whatever is
+  still there; with no ``P`` the agent was never born and nothing is killed.
 
 Limits, on purpose:
 
@@ -55,7 +62,7 @@ import time
 # that wraps `subprocess.Popen` elsewhere does not wrap the reaper).
 from subprocess import Popen as _spawn
 
-NORMAL = b"D"                 # written by agora on every normal leave
+NORMAL = b"D"                 # the goodbye line (``D\n``) agora writes on every normal leave
 GRACE_ENV = "AGORA_ORPHAN_GRACE"
 DEFAULT_GRACE = 10.0
 POLL_SECONDS = 0.1
@@ -155,19 +162,25 @@ def stop_orphan(pid: int, recorded: str | None, grace: float) -> str:
     return "kill"
 
 
-def _read_to_eof(fd: int) -> bytes:
-    """Everything agora wrote before it closed its end (or died)."""
-    chunks = []
+def _lines(fd: int):
+    """Each complete line agora wrote, as it arrives; a trailing partial line is dropped."""
+    pending = b""
     while True:
         try:
             chunk = os.read(fd, 64)
         except InterruptedError:
             continue
         except OSError:
-            return b"".join(chunks)
+            return
         if not chunk:
-            return b"".join(chunks)
-        chunks.append(chunk)
+            return
+        pending += chunk
+        while True:
+            line, sep, rest = pending.partition(b"\n")
+            if not sep:
+                break
+            pending = rest
+            yield line
 
 
 def grace() -> float:
@@ -195,35 +208,79 @@ def _grace(value: float | None) -> float:
 def main(argv: list[str] | None = None) -> int:
     """The reaper: wait for agora's goodbye, or clean up after a dead agora."""
     parser = argparse.ArgumentParser(prog="agora.orphan_guard", add_help=True)
-    parser.add_argument("--pid", type=int, required=True, help="the agent's pid")
     parser.add_argument("--fd", type=int, required=True, help="the pipe's read end")
-    parser.add_argument("--start", default=None,
-                        help="the agent's `ps -o lstart=` (recorded here when omitted)")
     parser.add_argument("--grace", type=float, default=None, help="seconds between TERM and KILL")
     args = parser.parse_args(argv)
-    # Recorded as early as possible: from here on, a pid that starts answering
-    # with another time is not ours.
-    recorded = args.start or start_time(args.pid)
-    data = _read_to_eof(args.fd)
+    pid: int | None = None
+    recorded: str | None = None
+    said_start = False
+    goodbye = False
+    # Record by line, as they come: from the moment `P` arrives, a pid that
+    # starts answering with another time is not ours.
+    for line in _lines(args.fd):
+        if line == NORMAL:
+            goodbye = True
+        elif line[:1] == b"P":
+            try:
+                pid = int(line[1:])
+            except ValueError:
+                continue
+            if not said_start:
+                recorded = start_time(pid)
+        elif line[:1] == b"S":
+            recorded = os.fsdecode(line[1:])
+            said_start = True
     try:
         os.close(args.fd)
     except OSError:
         pass
-    if NORMAL in data:
+    if goodbye:
         return 0
+    if pid is None:
+        return 0                  # the agent was never born
     if recorded is None:
         return 0                  # cannot identify it: never signal a stranger
-    stop_orphan(args.pid, recorded, _grace(args.grace))
+    stop_orphan(pid, recorded, _grace(args.grace))
     return 0
 
 
 class Guard:
-    """Agora's handle on the reaper: one goodbye, once."""
+    """Agora's handle on the reaper: the agent's pid, its start time, one goodbye."""
 
     def __init__(self, proc: subprocess.Popen, fd: int):
         self.proc = proc
         self.fd = fd
         self._done = False
+
+    def child_hook(self) -> None:
+        """Run in the agent's own child (`preexec_fn`): tell the reaper who it is.
+
+        Only C-level calls, nothing imported or allocated at length: this runs
+        between fork and exec. SIGPIPE is ignored around the write because
+        `Popen` has put it back to the default already; a reaper that is gone
+        must not kill the agent before it starts.
+        """
+        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+        try:
+            os.write(self.fd, b"P%d\n" % os.getpid())
+        except OSError:
+            pass
+        finally:
+            signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+    def started(self, pid: int) -> None:
+        """Right after `Popen` returns: agora's own reading of the agent's start time.
+
+        Taken before any `wait`, so it is the agent and not a later owner of
+        the pid; it overrides what the reaper read for itself. Best effort.
+        """
+        recorded = start_time(pid)
+        if recorded is None:
+            return
+        try:
+            os.write(self.fd, b"S" + os.fsencode(recorded) + b"\n")
+        except OSError:
+            pass
 
     def done(self) -> None:
         """The normal leave: say goodbye, close, and let the reaper go."""
@@ -231,7 +288,7 @@ class Guard:
             return
         self._done = True
         try:
-            os.write(self.fd, NORMAL)
+            os.write(self.fd, NORMAL + b"\n")
         except OSError:
             pass
         try:
@@ -246,29 +303,21 @@ class Guard:
             pass
 
 
-def start(agent_pid: int) -> Guard | None:
-    """Start the reaper for `agent_pid`; None (after a warning) when it cannot.
+def arm() -> Guard | None:
+    """Start the reaper, before the agent; None (after a warning) when it cannot.
 
-    The read end travels through `pass_fds` only: the agent (already running,
-    so it never saw either end), rclone, the round child and the background
-    uploader never hold it - the write end is not inheritable at all, so EOF
-    really does mean this process died.
+    The read end travels through `pass_fds` only: the agent (not yet started),
+    rclone, the round child and the background uploader never hold it - the
+    write end is not inheritable at all, so EOF really does mean this process
+    died. The agent learns the write end through `Guard.child_hook`, which runs
+    in its own child before the fds are closed.
     """
     try:
         read_fd, write_fd = os.pipe()
     except OSError as exc:
         _warn(exc)
         return None
-    argv = [sys.executable, "-m", "agora.orphan_guard",
-            "--pid", str(agent_pid), "--fd", str(read_fd)]
-    # Read the agent's start time here, not in the reaper (review L2): the
-    # reaper's interpreter takes tens of milliseconds to boot, and an agent
-    # that ends in that window could have its pid reused before the reaper
-    # recorded who it was. Unreadable means "do not pass it": the reaper then
-    # records it itself, as before.
-    recorded = start_time(agent_pid)
-    if recorded is not None:
-        argv += ["--start", recorded]
+    argv = [sys.executable, "-m", "agora.orphan_guard", "--fd", str(read_fd)]
     try:
         proc = _spawn(argv,
                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
