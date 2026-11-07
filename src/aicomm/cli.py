@@ -316,7 +316,9 @@ def _answer_fields(body: bytes) -> dict | None:
     """The top-level JSON object of a poke answer, or None when the body cannot be read."""
     try:
         answer = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # A body nested too deeply is as unreadable as one that is not JSON: the decoder
+        # gives up with RecursionError instead of ValueError (#412).
         return None
     return answer if isinstance(answer, dict) else None
 
@@ -365,7 +367,7 @@ def _refusal_code(answer: dict | None) -> str:
 
 
 class _PokeAnswer(NamedTuple):
-    """The shared table's reading: kind, reason code (or `local`), record id, queued."""
+    """The shared table's reading: the fields `_Wake` describes, before the one line is spelled."""
 
     kind: str
     code: str

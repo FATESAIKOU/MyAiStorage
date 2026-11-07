@@ -613,10 +613,7 @@ def test_an_http_proxy_in_the_environment_is_never_used_for_the_sidecar(world, m
 # --- #368 PR-1: the `wake:` lines and `--require-wake` --------------------------------------
 # C-n refers to the contract list in the `aicomm-cross-machine-wake` change (tasks.md §1).
 # PR-1 implemented the local path; PR-2 adds the peer fallback below (`pool-peer`).
-
-WAKE_LINE_RE = re.compile(
-    r"^wake: \S+ (woken (local|peer:\d+(,\d+)*)( interrupt)?|not-woken \S+( .*)?|unknown \S+( .*)?)$"
-)
+# The one grammar every `wake:` line is checked against is `WAKE_406_RE` (#406 D-1, M-1).
 
 
 def test_c1_an_idle_local_agent_is_woken_locally_and_nobody_else_is_asked(world, monkeypatch, capsys):
@@ -686,7 +683,7 @@ def test_c18_exactly_one_wake_line_per_recipient_in_the_wake_grammar(world, monk
         "demo-pm-t1", "demo-arch-t1", "demo-rev-t1-1", "demo-gone-t1",
     ]
     for line in lines:
-        assert WAKE_LINE_RE.match(line), line
+        assert WAKE_406_RE.fullmatch(line), line
 
 
 def test_c19_require_wake_is_0_when_everybody_is_woken(world, monkeypatch, capsys):
@@ -1512,7 +1509,7 @@ def test_c18_a_peer_result_is_still_one_line_per_recipient(world, monkeypatch, c
         "wake: demo-arch-t1 not-woken state-exited",
     ]
     for line in lines:
-        assert WAKE_LINE_RE.match(line), line
+        assert WAKE_406_RE.fullmatch(line), line
 
 
 @pytest.mark.parametrize("scenario,code", [
@@ -2010,3 +2007,37 @@ def test_406_c17_an_error_answer_still_reports_its_record_id(world, monkeypatch,
     assert r.code == 0
     assert r.err == f"wake: demo-pm-t1 not-woken http-{status} record=local/{RECORD_A}\n"
     assert len(world.sidecar.pokes()) == 1
+
+
+# --- #412: a body too deep to decode is an unreadable body, not an internal error ----------
+# `json.loads` gives up on a deeply nested body with RecursionError, not ValueError. Reading
+# the poke answer must treat the two the same: a 200 is still `woken`, a 409 still `http-409`.
+# Otherwise `_wake_one`'s catch-all turns an already-successful wake into `unknown`.
+
+DEEP_BODY = b"[" * 200000
+DEEP_NESTED_BODY = b'{"poke_id":' + b"[" * 200000 + b"]" * 200000 + b"}"
+
+
+@pytest.mark.parametrize("body", [DEEP_BODY, DEEP_NESTED_BODY], ids=["array", "nested-id"])
+def test_412_a_200_with_a_body_too_deep_to_read_is_woken_without_a_record(body):
+    from aicomm import cli
+
+    answer = cli._poke_answer(200, body)
+    assert (answer.kind, answer.code, answer.poke_id, answer.queued) == ("woken", "local", None, False)
+
+
+@pytest.mark.parametrize("body", [DEEP_BODY, DEEP_NESTED_BODY], ids=["array", "nested-id"])
+def test_412_a_409_with_a_body_too_deep_to_read_is_http_409(body):
+    from aicomm import cli
+
+    answer = cli._poke_answer(409, body)
+    assert (answer.kind, answer.code, answer.poke_id) == ("not-woken", "http-409", None)
+
+
+@pytest.mark.parametrize("body", [DEEP_BODY, DEEP_NESTED_BODY], ids=["array", "nested-id"])
+def test_412_a_deep_poke_body_does_not_turn_a_wake_into_unknown(world, monkeypatch, capsys, body):
+    agent(world, state="idle")
+    world.sidecar.poke_body = body
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 woken local\n"
