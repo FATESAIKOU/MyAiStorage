@@ -306,7 +306,7 @@ def _agent_state(body: bytes) -> str | None:
     """The `state` of a `GET /agents/<id>` answer; None when the answer cannot be read."""
     try:
         answer = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):  # too deep is unreadable too (#420)
         return None
     state = answer.get("state") if isinstance(answer, dict) else None
     return state if isinstance(state, str) else None
@@ -447,7 +447,7 @@ def _parse_peers(stdout: str) -> list[tuple[int, str]] | None:
     """
     try:
         answer = json.loads(stdout)
-    except ValueError:
+    except (ValueError, RecursionError):  # too deep is unreadable too (#420)
         return None
     if not isinstance(answer, list):
         return None
@@ -711,7 +711,7 @@ def _is_empty_read(out: str, as_json: bool) -> bool:
     if as_json:
         try:
             return json.loads(out) == []
-        except ValueError:
+        except (ValueError, RecursionError):  # too deep is unreadable too (#420)
             return False
     return False
 
