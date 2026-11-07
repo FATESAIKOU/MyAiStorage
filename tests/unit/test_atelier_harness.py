@@ -349,6 +349,42 @@ PMO_V6_KEY_SENTENCES = PMO_V5_SHARED_SENTENCES + (
     "不當成拒絕：把改寫後的呼叫原樣再送一次；不改回原來的、不另外改",
 )
 
+#: What the PMO `v7` (#434, design §6) adds on top of the v6 list: the PMO watches
+#: whether each PM's matters are still moving - a matter that sits past a
+#: proportionate threshold is poked, a PM with no report (or a report that does not
+#: say which wake brings it back) is treated as stopped, the poke is made once and
+#: followed by the PMO's own wake, a matter is only escalated when it is still
+#: stuck after that, the PM keeps its own wakes, teardown also confirms the matter's
+#: wake is cancelled, boot does not duplicate an existing wake and judges PM
+#: activity by the signals it can see. Every entry is a whole sentence, so
+#: deleting or rewording one goes red. `v6` and earlier are append-only and not
+#: bound by these.
+PMO_V7_NEW_SENTENCES = (
+    "PM 的事項停住超過相稱的門檻（等 CI、等隊員比平常久），就戳那個 PM：問它在等什麼、叫醒還在不在。",  # O-1
+    "該有事在跑，PM 卻沒有回報、回報也沒寫靠哪個叫醒回來看，就當它停住；戳一次就好，"
+    "戳完替自己排一個叫醒回頭再查。回頭仍停住才再處理（再戳、改派或回報本人）。",  # O-2
+    "PM 自己的叫醒由 PM 排；你的等待與例行監看仍交給你的隊員或叫醒，不自己扛。",  # O-3
+    "已有的不重複排。",  # v6:100／145 的補句
+    "並確認該 PM 已取消這件事的叫醒。",  # v6:102 的補句
+    "用看得到的訊號（回報、狀態）判斷 PM 有沒有在動。",  # v6:142–147 的補句
+)
+#: `pmo` v7 keeps every v6 sentence plus the new ones; only the source for
+#: `KEY_SENTENCE_CASES` - `findings_for` applies just `PMO_V7_NEW_SENTENCES`
+#: (the v2／v3／v4／v5／v6 rows already cover the older lists for v7).
+PMO_V7_KEY_SENTENCES = PMO_V6_KEY_SENTENCES + PMO_V7_NEW_SENTENCES
+#: The v6:101 line the v7 rewrite must not keep whole (design §6): its「停太久」
+#: and「必要時」are replaced by the O-1／O-2 threshold and action. Compared after the
+#: bold markers are stripped, like the `pm` v5 guard.
+PMO_V6_101_SENTENCE = (
+    "只在狀態變化時處理（停太久、被擋、額度用完），必要時戳 PM 或專案架構師推進；"
+    "架構師的設計細節交給它自己管（PMO 不替它定介面）；PM 隊員的細節交給 PM 管。"
+)
+#: The v6:99 sentence O-3 must not overwrite (design §6 table: 原樣保留).
+PMO_V6_99_SENTENCE = (
+    "等待與例行監看交給你自己的 PMO 隊員（照環境說明開，不是各 PM 的隊員），"
+    "或交給環境的定時叫醒；PMO 只做判斷、merge、停損、問本人，不自己扛背景等待。"
+)
+
 #: Content limits for `v>=1` (B-15/B-16): the body names capabilities, never the
 #: concrete tool, model, address or path of one environment. Deliberately NOT in
 #: the lists below - 一般詞 the rules themselves need (`session`, `輪換表`,
@@ -453,6 +489,7 @@ V1_REL = "atelier/worker-team/pm/v1.md"
 IMPL_REL = "atelier/worker-team/impl/v1.md"
 REV_REL = "atelier/worker-team/rev/v1.md"
 PMO_V2_REL = "atelier/pmo/pm/v2.md"
+PMO_REL = "atelier/pmo/pm/v1.md"
 PM_V3_REL = "atelier/worker-team/pm/v3.md"
 PM_V4_REL = "atelier/worker-team/pm/v4.md"
 PM_V5_REL = "atelier/worker-team/pm/v5.md"
@@ -464,6 +501,7 @@ PMO_V3_REL = "atelier/pmo/pm/v3.md"
 PMO_V4_REL = "atelier/pmo/pm/v4.md"
 PMO_V5_REL = "atelier/pmo/pm/v5.md"
 PMO_V6_REL = "atelier/pmo/pm/v6.md"
+PMO_V7_REL = "atelier/pmo/pm/v7.md"
 ARCH_REL = "atelier/worker-team/arch/v1.md"
 ARCH_V2_REL = "atelier/worker-team/arch/v2.md"
 ARCH_V3_REL = "atelier/worker-team/arch/v3.md"
@@ -674,14 +712,21 @@ def findings_for(path: str, text: str) -> Findings:
         and version_match is not None and int(version_match.group(1)) == 5
     pmo_version_6_or_later = team == "pmo" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 6
+    # `pmo` v7 (#434) adds the progress-watch sentences; v6 and earlier are
+    # append-only and not bound by them.
+    pmo_version_7_or_later = team == "pmo" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) >= 7
     # `arch` is version-bound per file (#403): v1 keeps the「長期常駐」sentence,
     # v2 replaces it with「按需開」, so each list applies only to its own version.
     # `comm` (#236, #432): worker-team pm v4+, impl v2+, rev v2+, arch v3+
-    # (older files unbound).
-    comm_required = team == "worker-team" and version_match is not None \
-        and ((role == "pm" and int(version_match.group(1)) >= 4)
-             or (role in ("impl", "rev") and int(version_match.group(1)) >= 2)
-             or (role == "arch" and int(version_match.group(1)) >= 3))
+    # (older files unbound). #434 adds pmo pm v7+ (PMO's poke is a `comm`
+    # action); pmo v1-v6 stay unbound.
+    comm_required = version_match is not None and (
+        (team == "worker-team"
+         and ((role == "pm" and int(version_match.group(1)) >= 4)
+              or (role in ("impl", "rev") and int(version_match.group(1)) >= 2)
+              or (role == "arch" and int(version_match.group(1)) >= 3)))
+        or (team == "pmo" and role == "pm" and int(version_match.group(1)) >= 7))
     arch_version_1 = role == "arch" \
         and version_match is not None and int(version_match.group(1)) == 1
     arch_version_2_or_later = role == "arch" \
@@ -704,8 +749,9 @@ def findings_for(path: str, text: str) -> Findings:
             (pmo_version_4_or_later, PMO_V4_KEY_SENTENCES, "v4 起的 pmo pm"),
             (pmo_version_5, PMO_V5_KEY_SENTENCES, "v5 的 pmo pm"),
             (pmo_version_6_or_later, PMO_V6_KEY_SENTENCES, "v6 起的 pmo pm"),
+            (pmo_version_7_or_later, PMO_V7_NEW_SENTENCES, "v7 起的 pmo pm"),
             (role == "impl" and is_v1_or_later, IMPL_KEY_SENTENCES, "v1 起的 impl"),
-            (comm_required, (COMM_SENTENCE,), "宣告 comm 的版本（pm v4／impl v2／rev v2／arch v3 起）"),
+            (comm_required, (COMM_SENTENCE,), "宣告 comm 的版本（pm v4／impl v2／rev v2／arch v3／pmo v7 起）"),
             (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev"),
             (arch_version_1, ARCH_KEY_SENTENCES, "v1 的 arch"),
             (arch_version_2_or_later, ARCH_V2_KEY_SENTENCES, "v2 起的 arch"),
@@ -742,7 +788,7 @@ def findings_for(path: str, text: str) -> Findings:
             found.errors.append(f"{path}: v0 職務檔的 capabilities 缺 angareion 子節")
         if comm_required and "comm" not in names:
             found.errors.append(
-                f"{path}: pm v4／impl v2／rev v2／arch v3 起的 capabilities 要有 comm 子節")
+                f"{path}: pm v4／impl v2／rev v2／arch v3／pmo v7 起的 capabilities 要有 comm 子節")
         for name in names:
             if name not in KNOWN_CAPABILITIES:
                 found.warnings.append(f"{path}: 未知的能力名 {name}（只警告、不擋）")
@@ -1000,6 +1046,7 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     + [(PMO_V4_REL, sentence, "關鍵句") for sentence in PMO_V4_KEY_SENTENCES]
     + [(PMO_V5_REL, sentence, "關鍵句") for sentence in PMO_V5_KEY_SENTENCES]
     + [(PMO_V6_REL, sentence, "關鍵句") for sentence in PMO_V6_KEY_SENTENCES]
+    + [(PMO_V7_REL, sentence, "關鍵句") for sentence in PMO_V7_KEY_SENTENCES]
     + [(PM_V4_REL, sentence, "關鍵句") for sentence in PM_V4_KEY_SENTENCES]
     + [(PM_V5_REL, sentence, "關鍵句") for sentence in PM_V5_KEY_SENTENCES]
     + [(IMPL_V2_REL, sentence, "關鍵句") for sentence in IMPL_V2_KEY_SENTENCES]
@@ -1036,10 +1083,11 @@ def test_a_missing_impl_or_rev_key_sentence_is_flagged(rel, sentence, expected, 
 
 @pytest.mark.parametrize("rel", (IMPL_REL, REV_REL, ARCH_REL, ARCH_V2_REL,
                                  ARCH_V3_REL, ARCH_V4_REL, PM_V4_REL, PM_V5_REL,
+                                 PMO_V7_REL,
                                  IMPL_V2_REL, REV_V2_REL, IMPL_V3_REL, REV_V3_REL),
                          ids=("impl", "rev", "arch", "arch-v2", "arch-v3",
-                              "arch-v4", "pm-v4", "pm-v5", "impl-v2", "rev-v2",
-                              "impl-v3", "rev-v3"))
+                              "arch-v4", "pm-v4", "pm-v5", "pmo-v7", "impl-v2",
+                              "rev-v2", "impl-v3", "rev-v3"))
 def test_the_impl_and_rev_harnesses_pass_the_format_check(rel):
     found = findings_for(rel, (REPO / rel).read_text(encoding="utf-8"))
     assert not found.errors, "\n".join(found.errors)
@@ -1116,6 +1164,33 @@ def test_the_pm_v5_harness_drops_the_old_defaults():
             "畫面幾分鐘沒動靜就戳隊員"):
         assert old not in plain, f"v5 還留著 v4 的舊預設：「{old}」"
     assert PM_V5_FALLBACK_SENTENCE in text, "v5 缺了叫醒用不了時的退路句（P-8）"
+
+
+# --- pmo v7：舊版不受約束與不矛盾守門（#434） ------------------------------------
+
+
+def test_older_pmo_versions_are_not_bound_by_the_progress_watch():
+    """#434：新句只約束 pmo v7 起；v1～v6 沒有這些句子時仍無錯（append-only 的舊版不動）。"""
+    for rel in (PMO_REL, PMO_V2_REL, PMO_V3_REL, PMO_V4_REL, PMO_V5_REL,
+                PMO_V6_REL):
+        text = (REPO / rel).read_text(encoding="utf-8")
+        for sentence in PMO_V7_NEW_SENTENCES:
+            assert sentence not in text, f"{rel} 不該有 v7 的句子：「{sentence}」"
+        assert not findings_for(rel, text).errors, rel
+
+
+def test_the_pmo_v7_harness_rewrites_the_v6_status_sentence():
+    """#434 design §6：v6:101 的舊句整句不在（「必要時」改成 O-1／O-2 的門檻與動作），
+    v6:99 原句則原樣保留（O-3 只補「PM 自己的叫醒由 PM 排」，不改寫 99）。
+
+    比對的是整句，不是「停太久」「必要時」這種短詞；先去掉粗體記號，免得只拿掉
+    `**`、句子還留著時守門照樣綠。這是設計決定的守門，不是格式檢查。
+    """
+    plain = (REPO / PMO_V7_REL).read_text(encoding="utf-8").replace("**", "")
+    assert PMO_V6_101_SENTENCE not in plain, \
+        f"v7 還留著 v6:101 的舊句：「{PMO_V6_101_SENTENCE}」"
+    assert PMO_V6_99_SENTENCE in plain, \
+        f"v7 沒有原樣保留 v6:99：「{PMO_V6_99_SENTENCE}」"
 
 
 # --- 私人資訊：email、憑證樣式、憑證變數名、額度數字（#134） --------------------
@@ -1562,9 +1637,10 @@ def test_append_only_ignores_changes_outside_the_harness_tree(tmp_path):
 
 
 @pytest.mark.parametrize("rel", (PM_V4_REL, PM_V5_REL, IMPL_V2_REL, REV_V2_REL,
-                                 ARCH_V3_REL, IMPL_V3_REL, REV_V3_REL, ARCH_V4_REL),
+                                 ARCH_V3_REL, IMPL_V3_REL, REV_V3_REL, ARCH_V4_REL,
+                                 PMO_V7_REL),
                          ids=("pm-v4", "pm-v5", "impl-v2", "rev-v2", "arch-v3",
-                              "impl-v3", "rev-v3", "arch-v4"))
+                              "impl-v3", "rev-v3", "arch-v4", "pmo-v7"))
 def test_a_comm_version_without_the_comm_subsection_is_flagged(rel):
     text = (REPO / rel).read_text(encoding="utf-8")
     assert "### comm\n" in text
@@ -1573,9 +1649,10 @@ def test_a_comm_version_without_the_comm_subsection_is_flagged(rel):
 
 
 @pytest.mark.parametrize("rel", (PM_V4_REL, PM_V5_REL, IMPL_V2_REL, REV_V2_REL,
-                                 ARCH_V3_REL, IMPL_V3_REL, REV_V3_REL, ARCH_V4_REL),
+                                 ARCH_V3_REL, IMPL_V3_REL, REV_V3_REL, ARCH_V4_REL,
+                                 PMO_V7_REL),
                          ids=("pm-v4", "pm-v5", "impl-v2", "rev-v2", "arch-v3",
-                              "impl-v3", "rev-v3", "arch-v4"))
+                              "impl-v3", "rev-v3", "arch-v4", "pmo-v7"))
 def test_the_comm_sentence_names_no_tool(rel):
     body = (REPO / rel).read_text(encoding="utf-8")
     assert "aicomm" not in body
