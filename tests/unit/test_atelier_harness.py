@@ -165,6 +165,28 @@ REV_REVIEW_BY_NON_AUTHOR = "不審自己的作品"
 #: `impl`/`rev` v2 keep every v1 sentence plus the comm one.
 IMPL_V2_KEY_SENTENCES = IMPL_KEY_SENTENCES + (COMM_SENTENCE,)
 REV_V2_KEY_SENTENCES = REV_KEY_SENTENCES + (COMM_SENTENCE,)
+#: D-1 (#434, design §5): a report is written whenever the work is done, stuck or
+#: needs a decision, and the PM is always told - only the report path is sent, the
+#: whole report is not repeated. It **replaces** impl v2:81／rev v2:100 (replaced,
+#: not kept alongside); the v2 rules「寫到 PM 指定的報告路徑」「第一行寫模型與結論」
+#: all stay. Whole sentence, so deleting or rewording it goes red.
+IMPL_V3_NEW_SENTENCES = (
+    "報告寫完（做完、卡住或要決定）就一定發訊息給 PM；只回報告路徑，不重貼整份報告。",
+)
+#: D-1 is the same sentence for `rev` (design §5: impl、rev 共用).
+REV_V3_NEW_SENTENCES = IMPL_V3_NEW_SENTENCES
+#: `impl`/`rev` v3 keep every v2 sentence plus D-1; only the source for
+#: `KEY_SENTENCE_CASES` - `findings_for` applies just the new tuples (the v1／comm
+#: rows already cover the older lists for v3).
+IMPL_V3_KEY_SENTENCES = IMPL_V2_KEY_SENTENCES + IMPL_V3_NEW_SENTENCES
+REV_V3_KEY_SENTENCES = REV_V2_KEY_SENTENCES + REV_V3_NEW_SENTENCES
+#: The judge-side hard sentence (#434, design §5／§8.1 #4): a message that cannot
+#: be sent is not a delivery. Not a `findings_for` key sentence - design §3.1 pins
+#: only D-1 - but asserted directly on the two v3 files below, so deleting it goes
+#: red all the same.
+UNDELIVERABLE_SENTENCE = (
+    "訊息送不出就不算交件：在報告第一行寫明送不出，停下等 PM 來查。"
+)
 #: `arch` (worker-team 的架構師, design §9, #313/#319): the twelve sentences, each
 #: verbatim and whole (with its punctuation), read from the four body sections
 #: only. A short word such as `模組切割` would turn up in unrelated paragraphs, and
@@ -204,6 +226,23 @@ ARCH_V2_KEY_SENTENCES = tuple(
 #: `arch` v3 (#432) keeps every v2 sentence (the old check is not weakened) plus
 #: the comm one - the architect talks to the PM too. `v1`／`v2` stay unbound.
 ARCH_V3_KEY_SENTENCES = ARCH_V2_KEY_SENTENCES + (COMM_SENTENCE,)
+#: D-2 (#434, design §5): design deliveries, review verdicts and returns all tell
+#: the PM, with only the document path and the verdict. Placed in `do`「收尾」.
+#: Whole sentence, so deleting or rewording it goes red.
+ARCH_V4_NEW_SENTENCES = (
+    "設計交付、審查結論或退回，都一定發訊息給 PM；只回文件路徑與結論。",
+)
+#: The rewritten「審查什麼算做完」sentence (design §5): the v3 sentence plus
+#: 「訊息已送出」. Not a `findings_for` key sentence (design §3.1 pins only D-2); it
+#: is asserted on the v4 file below so dropping the clause goes red.
+ARCH_V4_REVIEW_DONE_SENTENCE = (
+    "每條發現有位置與證據；結論明確；沒驗到的寫「沒驗到」；訊息已送出。"
+)
+#: `arch` v4 keeps every v3 sentence plus D-2; only the source for
+#: `KEY_SENTENCE_CASES` - `findings_for` applies just `ARCH_V4_NEW_SENTENCES` (the
+#: existing「v2 起的 arch」row already covers `ARCH_V2_KEY_SENTENCES` for v4, and
+#: the comm row covers the comm sentence).
+ARCH_V4_KEY_SENTENCES = ARCH_V3_KEY_SENTENCES + ARCH_V4_NEW_SENTENCES
 
 #: What the PMO `v2` (#246, aligned to the handbook at 44ec9dc) and later must keep
 #: in its body: the merge rules incl. the transition clause, the first-line
@@ -419,6 +458,8 @@ PM_V4_REL = "atelier/worker-team/pm/v4.md"
 PM_V5_REL = "atelier/worker-team/pm/v5.md"
 IMPL_V2_REL = "atelier/worker-team/impl/v2.md"
 REV_V2_REL = "atelier/worker-team/rev/v2.md"
+IMPL_V3_REL = "atelier/worker-team/impl/v3.md"
+REV_V3_REL = "atelier/worker-team/rev/v3.md"
 PMO_V3_REL = "atelier/pmo/pm/v3.md"
 PMO_V4_REL = "atelier/pmo/pm/v4.md"
 PMO_V5_REL = "atelier/pmo/pm/v5.md"
@@ -426,6 +467,7 @@ PMO_V6_REL = "atelier/pmo/pm/v6.md"
 ARCH_REL = "atelier/worker-team/arch/v1.md"
 ARCH_V2_REL = "atelier/worker-team/arch/v2.md"
 ARCH_V3_REL = "atelier/worker-team/arch/v3.md"
+ARCH_V4_REL = "atelier/worker-team/arch/v4.md"
 
 
 @dataclass
@@ -644,6 +686,14 @@ def findings_for(path: str, text: str) -> Findings:
         and version_match is not None and int(version_match.group(1)) == 1
     arch_version_2_or_later = role == "arch" \
         and version_match is not None and int(version_match.group(1)) >= 2
+    # `impl`/`rev` v3 (#434) add the delivery-message sentence and `arch` v4 its
+    # counterpart; older versions are append-only and not bound by them.
+    impl_version_3_or_later = role == "impl" \
+        and version_match is not None and int(version_match.group(1)) >= 3
+    rev_version_3_or_later = role == "rev" \
+        and version_match is not None and int(version_match.group(1)) >= 3
+    arch_version_4_or_later = role == "arch" \
+        and version_match is not None and int(version_match.group(1)) >= 4
     for applies, sentences, label in (
             (role == "pm" and is_v1_or_later, PM_KEY_SENTENCES, "v1 起的 pm"),
             (pmo_version_2_or_later, PMO_V2_KEY_SENTENCES, "v2 起的 pmo pm"),
@@ -658,7 +708,10 @@ def findings_for(path: str, text: str) -> Findings:
             (comm_required, (COMM_SENTENCE,), "宣告 comm 的版本（pm v4／impl v2／rev v2／arch v3 起）"),
             (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev"),
             (arch_version_1, ARCH_KEY_SENTENCES, "v1 的 arch"),
-            (arch_version_2_or_later, ARCH_V2_KEY_SENTENCES, "v2 起的 arch")):
+            (arch_version_2_or_later, ARCH_V2_KEY_SENTENCES, "v2 起的 arch"),
+            (impl_version_3_or_later, IMPL_V3_NEW_SENTENCES, "v3 起的 impl"),
+            (rev_version_3_or_later, REV_V3_NEW_SENTENCES, "v3 起的 rev"),
+            (arch_version_4_or_later, ARCH_V4_NEW_SENTENCES, "v4 起的 arch")):
         if not applies:
             continue
         for sentence in sentences:
@@ -951,6 +1004,9 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     + [(PM_V5_REL, sentence, "關鍵句") for sentence in PM_V5_KEY_SENTENCES]
     + [(IMPL_V2_REL, sentence, "關鍵句") for sentence in IMPL_V2_KEY_SENTENCES]
     + [(REV_V2_REL, sentence, "關鍵句") for sentence in REV_V2_KEY_SENTENCES]
+    + [(IMPL_V3_REL, sentence, "關鍵句") for sentence in IMPL_V3_KEY_SENTENCES]
+    + [(REV_V3_REL, sentence, "關鍵句") for sentence in REV_V3_KEY_SENTENCES]
+    + [(ARCH_V4_REL, sentence, "關鍵句") for sentence in ARCH_V4_KEY_SENTENCES]
 )
 
 
@@ -979,13 +1035,58 @@ def test_a_missing_impl_or_rev_key_sentence_is_flagged(rel, sentence, expected, 
 
 
 @pytest.mark.parametrize("rel", (IMPL_REL, REV_REL, ARCH_REL, ARCH_V2_REL,
-                                 ARCH_V3_REL, PM_V4_REL, PM_V5_REL,
-                                 IMPL_V2_REL, REV_V2_REL),
+                                 ARCH_V3_REL, ARCH_V4_REL, PM_V4_REL, PM_V5_REL,
+                                 IMPL_V2_REL, REV_V2_REL, IMPL_V3_REL, REV_V3_REL),
                          ids=("impl", "rev", "arch", "arch-v2", "arch-v3",
-                              "pm-v4", "pm-v5", "impl-v2", "rev-v2"))
+                              "arch-v4", "pm-v4", "pm-v5", "impl-v2", "rev-v2",
+                              "impl-v3", "rev-v3"))
 def test_the_impl_and_rev_harnesses_pass_the_format_check(rel):
     found = findings_for(rel, (REPO / rel).read_text(encoding="utf-8"))
     assert not found.errors, "\n".join(found.errors)
+
+
+# --- impl／rev v3、arch v4：交件一定發訊息（#434） --------------------------------
+
+
+def test_older_impl_rev_arch_versions_are_not_bound_by_the_delivery_message():
+    """#434：新句只約束 impl／rev v3 起、arch v4 起；舊版沒有這些句子時仍無錯。
+
+    append-only 的舊版不動，也不把新規則追溯套上去。
+    """
+    for rel, sentences in ((IMPL_V2_REL, IMPL_V3_NEW_SENTENCES),
+                           (REV_V2_REL, REV_V3_NEW_SENTENCES),
+                           (ARCH_V3_REL, ARCH_V4_NEW_SENTENCES)):
+        text = (REPO / rel).read_text(encoding="utf-8")
+        for sentence in sentences:
+            assert sentence not in text, f"{rel} 不該有下一版的句子：「{sentence}」"
+        assert not findings_for(rel, text).errors, rel
+
+
+def test_the_impl_and_rev_v3_replace_the_v2_report_sentence():
+    """#434 D-1：v3 用新句**取代** v2 的「寫完只回覆報告路徑」，不是並存。
+
+    比對的是整句（先去掉粗體記號），不是「回覆報告路徑」這種短詞——新句本身
+    含「報告路徑」四個字。這是設計決定的守門，不是格式檢查。
+    """
+    for rel, old in (
+            (IMPL_V3_REL, "寫完只回覆報告路徑給 PM；不在訊息裡重貼整份報告。"),
+            (REV_V3_REL, "寫完只回覆報告路徑給 PM。")):
+        text = (REPO / rel).read_text(encoding="utf-8")
+        plain = text.replace("**", "")
+        assert old not in plain, f"{rel} 還留著 v2 的舊句：「{old}」"
+
+
+def test_the_impl_and_rev_v3_keep_the_undeliverable_message_rule():
+    """#434：送不出訊息就不算交件（judge 的硬句）；兩個 v3 檔都要有。"""
+    for rel in (IMPL_V3_REL, REV_V3_REL):
+        text = (REPO / rel).read_text(encoding="utf-8")
+        assert UNDELIVERABLE_SENTENCE in text, f"{rel} 缺了送不出訊息的硬句"
+
+
+def test_the_arch_v4_review_done_sentence_includes_the_message():
+    """#434：arch v4 的「審查什麼算做完」要補「訊息已送出」。"""
+    text = (REPO / ARCH_V4_REL).read_text(encoding="utf-8")
+    assert ARCH_V4_REVIEW_DONE_SENTENCE in text
 
 
 # --- pm v5：舊預設與不矛盾守門（#434） -------------------------------------------
@@ -1461,8 +1562,9 @@ def test_append_only_ignores_changes_outside_the_harness_tree(tmp_path):
 
 
 @pytest.mark.parametrize("rel", (PM_V4_REL, PM_V5_REL, IMPL_V2_REL, REV_V2_REL,
-                                 ARCH_V3_REL),
-                         ids=("pm-v4", "pm-v5", "impl-v2", "rev-v2", "arch-v3"))
+                                 ARCH_V3_REL, IMPL_V3_REL, REV_V3_REL, ARCH_V4_REL),
+                         ids=("pm-v4", "pm-v5", "impl-v2", "rev-v2", "arch-v3",
+                              "impl-v3", "rev-v3", "arch-v4"))
 def test_a_comm_version_without_the_comm_subsection_is_flagged(rel):
     text = (REPO / rel).read_text(encoding="utf-8")
     assert "### comm\n" in text
@@ -1471,8 +1573,9 @@ def test_a_comm_version_without_the_comm_subsection_is_flagged(rel):
 
 
 @pytest.mark.parametrize("rel", (PM_V4_REL, PM_V5_REL, IMPL_V2_REL, REV_V2_REL,
-                                 ARCH_V3_REL),
-                         ids=("pm-v4", "pm-v5", "impl-v2", "rev-v2", "arch-v3"))
+                                 ARCH_V3_REL, IMPL_V3_REL, REV_V3_REL, ARCH_V4_REL),
+                         ids=("pm-v4", "pm-v5", "impl-v2", "rev-v2", "arch-v3",
+                              "impl-v3", "rev-v3", "arch-v4"))
 def test_the_comm_sentence_names_no_tool(rel):
     body = (REPO / rel).read_text(encoding="utf-8")
     assert "aicomm" not in body
