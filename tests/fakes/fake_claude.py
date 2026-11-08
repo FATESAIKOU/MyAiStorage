@@ -62,7 +62,7 @@ if "-p" in args and "--resume" not in args and "--session-id" not in args:
         print("not json at all")
         sys.exit(0)
     sid = str(uuid.uuid4())
-    print(json.dumps({"result": "ZZSUM 這是自編的要約", "session_id": sid,
+    print(json.dumps({"result": os.environ.get("FAKE_CLAUDE_REPLY", "ZZSUM 這是自編的要約"), "session_id": sid,
                       "modelUsage": {"zz-model": {"inputTokens": 1}}}))
     sys.exit(0)
 
