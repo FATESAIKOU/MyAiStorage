@@ -198,7 +198,7 @@ agora pull session codex:<uuid>
   codex 第一版只支援 import／讀取（#443）；接續 codex 匯入的 Session 請用 claude 或 opencode（跨 agent，會寫回同一個 Session）
   ```
 
-- `agora continue <claude|opencode 的 Session> --agent codex`：**拒絕**（同一句）。這條要落在 **`_refuse_cross_agent_source`**（`src/agora/cli.py:403-424`，呼叫點 `:2250`／`:2252` 不變）：現在的條件只看 agy（`:421-424`），所以這個方向**今天不會被擋**；要加一條 `target_agent == "codex"` → `raise InputError(CODEX_CONTINUE_LATER)`。這也是 M-2 那句話在程式裡的落點（「codex 目標接不了任何來源」）。邊界（上一條）會先擋同一個情形，兩層並存和 agy 的四層拒絕同型（§1.1），不是新機制。
+- `agora continue <claude|opencode 的 Session> --agent codex`：**拒絕**（同一句），由上一條的邊界擋（不看來源）。`_refuse_cross_agent_source`（`src/agora/cli.py:403-424`）**不改**：它的呼叫點 `:2250`／`:2252` 都在邊界之後，加規則會是死碼、測試驗不到。這也是 M-2 那句話在程式裡的落點（「codex 目標接不了任何來源」→ 邊界不看來源一律拒絕）。
 - `agora continue <codex 匯入的 Session> --agent claude|opencode`：**允許**。這是 #439 的召回路徑，現有程式就會走 `_converted_turns`（`src/agora/cli.py:2544-2553`）；測試要釘住。**helper 那條規則不能誤擋這個方向**（來源是 codex、目標不是 codex → 放行）。
 - `agora merge --agent codex`：**exit 1**，在讀任何東西之前（照 agy，`src/agora/cli.py:813-820`）：`codex 第一版不寫要約；請用 opencode 或 claude`。
 - merge 的**來源**是 codex Session：**允許**（只讀 `turns()`，與 claude／opencode 當來源一樣）。
@@ -212,7 +212,7 @@ agora pull session codex:<uuid>
 ### 4.5 要改的檔案（實作清單，供日後開單）
 
 1. 新檔 `src/agora/agents/codex.py`：adapter（`export`／`turns`／`list_sessions`／`last_message`／`search_text`）＋五個拒絕 stub＋集中常數（`CODEX_CONTINUE_LATER`、`CODEX_MERGE_LATER`、`SEARCH_SCOPE` 若需要），根目錄解析只在這裡（§4.1 的契約）。
-2. `src/agora/cli.py`：`:52`（`AGENTS`）、`:67`（`ACTOR`）、`:813-820`（merge 拒絕，含 `:815` 的提示文字）、`:2211-2223`（continue 的 codex 目標拒絕，S-3 的位置；含 `:2208-2209` 的提示文字）、`:403-424`（`_refuse_cross_agent_source` 加 codex 目標規則；呼叫點 `:2250`／`:2252` 不變）、`:2974-2977`（`--agent` 的 help 文字）。
+2. `src/agora/cli.py`：`:52`（`AGENTS`）、`:67`（`ACTOR`）、`:813-820`（merge 拒絕，含 `:815` 的提示文字）、`:2211-2223`（continue 的 codex 目標拒絕，S-3 的位置；含 `:2208-2209` 的提示文字）、`:2974-2977`（`--agent` 的 help 文字）。
 3. `src/agora/tui.py`：`:51`（顏色；可選）、`:1117`（agent 清單）、`:184`（搜尋範圍說明，若 `search_text` 第一版不做）。
 4. 測試：`tests/unit/test_agent_codex.py`（新）、`tests/fixtures/codex/`（假 rollout，格式取自 U-10 樣本）；跨 agent 的案例加在 `tests/unit/test_continue_*` 或新檔。
 5. **測試隔離（M-1a，必須和 adapter 同一個 PR 或更早）**：
@@ -293,7 +293,7 @@ agora pull session codex:<uuid>
 4. **C-4 變少不覆蓋**：fixture 改成比較少內容再匯 → exit 1，訊息是既有的「內容比原本少」（`src/agora/cli.py:681-688`）。
 5. **C-5 被跨 agent 接**：`agora continue <codex 匯入的 Session> --agent claude`（用 `tests/fakes/fake_claude.py`）→ exit 0，寫回同一個 agora id、`source.agent` 變成 claude、`previous_sources` 有 codex（照 `docs/design.md` 5.4 第 6 點）；`--agent opencode` 同理。**這條是 #439 的關鍵驗收。**
 6. **C-6 拒絕**：`continue … --agent codex`（含 `--fork`／`--headless`／`--harness-file`／`--agent-arg`）與 `merge … --agent codex` → exit 1、固定訊息，且**沒有**同步／開 agent／寫 pending。**這三件事要新增斷言，不能照抄既有測試**：`tests/unit/test_agent_agy.py:706-718` 原樣只斷言 `code == EXIT_INPUT`、`not out`、訊息在 err 三件（`assert code == cli.EXIT_INPUT`／`assert not out`／`assert message in err`），**沒有**斷言「沒同步／沒開 agent／沒寫 pending」。要另外加：fake rclone（`tests/fakes/fake_rclone.py`）的呼叫紀錄為空、假 agent 的呼叫紀錄為空、`<state>` 底下沒有 `pending/*.json`。
-7. **C-7 反方向拒絕**：`continue <claude 的 Session> --agent codex` → exit 1 同訊息。走 `_refuse_cross_agent_source`（`src/agora/cli.py:403-424`，呼叫點 `:2250`／`:2252`）新增的 codex 目標規則；現況該函式只看 agy（`:421-424`），所以這條現在會紅，是新增行為。
+7. **C-7 反方向拒絕**：`continue <claude 的 Session> --agent codex` → exit 1 同訊息；由邊界擋（同 C-6 的位置），同樣斷言沒有同步、沒有開 agent、沒有寫 pending；`_refuse_cross_agent_source` 不改。現況是 argparse exit 2（不是 exit 1），所以這條現在會紅，是新增行為。
 8. **C-8 merge 來源是 codex**：`merge session <codex 的> <claude 的> --agent claude`（用假 claude 寫要約）→ exit 0；來源清單有 codex。
 9. **C-9 TUI／cache 三個表面**（照 `tests/unit/test_agent_agy.py:867-905`）：未匯入頁列出 fixture 的 codex session；內文搜尋找得到 rollout 裡的 body 字串；`cache.pull` 的 `codex:<id>` 產生本機閱讀版 `.md`，第二次是 skip。**另加 S-1**：根目錄不存在、或根目錄在但 `sessions/` 不存在 → `list_sessions()` 回 `[]`（不是 `AgentError`），TUI 的未匯入頁不因此印 stderr 行；`sessions/` 存在但某個 rollout 讀不到 → 丟 `AgentError`。
 10. **C-10 統一隔離（不碰真家目錄）**：驗的是 **conftest 的統一隔離**，不再靠每個測試自己設——斷言 `os.environ["AGORA_CODEX_HOME"]` 在 `tmp_path` 底下、`CODEX_HOME` 不在環境裡；另開一個 hook 記錄所有被打開的路徑，斷言沒有 `<真實 HOME>/.codex`、沒有 `auth.json`（照 agy 的 `tests/unit/test_agent_agy.py:855-859`）。再加一條：把外面的 `CODEX_HOME` 設成一個不存在也碰不到的路徑（`monkeypatch.setenv`），斷言 adapter 仍只看 `AGORA_CODEX_HOME`。
