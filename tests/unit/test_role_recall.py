@@ -1,12 +1,16 @@
 import _guard  # noqa: F401
+# §7(a)③: test_search_strict.py:163 test_S5_without_strict_a_listing_failure_still_exits_0.
+# locked: test_cli_sync.py:1667 _locked + test_the_locked_refusal_says_who_is_continuing
+# (definition at :1688): exit 4 + agora-locked.
 import json
 import shutil
+import time
 import pytest
 from agora import cli, store
 from test_cli import FakeAgent, env, run  # noqa: F401
 from test_search_json import _staged, remote  # noqa: F401
 from test_search_sort_limit import _staged_as, LOW, HIGH
-from test_search_strict import _fixture, _on_drive
+from test_search_strict import _fixture, _on_drive, _calls
 
 
 def search(capsys, *extra):
@@ -76,7 +80,7 @@ def test_plain_listing_failure_preserves_stamp(remote, capsys, monkeypatch, kind
     stamp = paths.state / "last-sync"
     stamp.parent.mkdir(parents=True, exist_ok=True)
     if stamp_kind == "expired":
-        stamp.write_text("1")
+        stamp.write_text("123.456")
     else:
         stamp.unlink(missing_ok=True)
     before = stamp.read_bytes() if stamp.exists() else None
@@ -112,7 +116,15 @@ def test_plain_download_failure_or_bulk_recovery(remote, capsys, monkeypatch, ki
     assert other in ids
     if old:
         assert old in ids
-    assert stamp.exists() and float(stamp.read_text()) > 1
+    assert stamp.exists() and time.time() - float(stamp.read_text()) < 60
+    if failure == "download":
+        # §7(a)⑤: recovery within 300s still uses the incomplete local index.
+        before = _calls(remote)
+        monkeypatch.delenv("FAKE_RCLONE_FAIL")
+        code, out, err = run(capsys, "search", "session", "--json")
+        assert code == 0, err
+        assert _calls(remote) == before
+        assert {r["id"] for r in json.loads(out)} == ids
 
 
 def test_role_deleted_during_continue_is_rescued_with_tags(env, capsys, monkeypatch, tmp_path):
@@ -133,3 +145,41 @@ def test_role_deleted_during_continue_is_rescued_with_tags(env, capsys, monkeypa
     hdr = store.Index(store.Paths.from_env()).header(rescued.split(":")[1])
     assert hdr["tags"] == ["keep", "role:R"]
     assert [p["id"] for p in hdr["agora"]["parents"]] == [sid]
+
+
+@pytest.mark.parametrize("kind", ["empty", "old"])
+def test_plain_unfinished_raw_unchanged_after_stamp_expiry(remote, capsys, kind):
+    # §7(a)⑤′ / U-13: unchanged unfinished raw remains absent without warning.
+    paths, old = clean_sync_fixture(kind)
+    newest = _staged(session_id="unfinished", tags=["role:R"],
+                     updated_at="2026-11-08T00:00:00Z")
+    store.upload_batch(store.Drive(paths), paths)
+    ulid = newest.split(":")[1]
+    folder = remote / "agora" / "sessions" / ulid
+    raw = [p for p in folder.iterdir() if p.name != "session.md"]
+    assert raw
+    for p in raw:
+        if p.is_dir():
+            shutil.rmtree(p)
+        else:
+            p.unlink()
+    shutil.rmtree(paths.mirror / ulid)
+    store.Index(paths).drop(ulid)
+    stamp = paths.state / "last-sync"
+    stamp.unlink(missing_ok=True)
+    code, out, err = run(capsys, "search", "session", "--json")
+    assert code == 0
+    expected = [old] if old else []
+    assert [r["id"] for r in json.loads(out)] == expected
+    assert ulid in err and "還沒寫完" in err
+    assert stamp.exists()
+    fingerprint = store.Drive(paths).list_sessions()[ulid]
+    before = _calls(remote)
+    stamp.write_text("123.456")
+    code, out, err = run(capsys, "search", "session", "--json")
+    assert code == 0
+    assert _calls(remote) > before
+    assert [r["id"] for r in json.loads(out)] == expected
+    assert "還沒寫完" not in err
+    assert store.Drive(paths).list_sessions()[ulid] == fingerprint
+    assert time.time() - float(stamp.read_text()) < 60
