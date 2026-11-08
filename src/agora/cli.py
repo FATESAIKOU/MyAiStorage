@@ -2208,6 +2208,7 @@ def _load_for_launch(paths: store.Paths, state: dict) -> dict:
 
 def cmd_continue(args, paths: store.Paths) -> int:
     if not args.agent:
+        private_tmp.sweep(paths.state)   # preserve cleanup for a refused, missing target
         raise InputError("continue 要給 --agent opencode|claude|agy（codex 第一版只支援 import／讀取）")
     agent = load_agent(args.agent)
     if agent.name == "codex":
