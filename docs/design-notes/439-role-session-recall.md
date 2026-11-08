@@ -1,6 +1,6 @@
 # #439 設計筆記：角色式 session 召回（M6）
 
-- 單：#439（MAS）；承接 #205（c，狀態:構想）。作者：設計作者（隊員，claude-sonnet-5-5）。2026-11-08。架構師第 1、2 次退回（`ARCH-439-review.md`、`review2`），已處理（見 §9、§10）。§11 為本人新要求的專家視角四問。
+- 單：#439（MAS）；承接 #205（c，狀態:構想）。作者：設計作者（隊員，claude-sonnet-5-5）。2026-11-08。架構師第 1、2 次退回（`ARCH-439-review.md`、`review2`），已處理（見 §9、§10）。本人 2026-11-08 已裁定 U-1＝(a)、U-2＝(B)、失敗時走 (b)、U-13 隨 U-2（見 §6）。§11 為本人新要求的專家視角四問。
 - 範圍：只設計，不寫程式、不改 openspec。sidecar 在別的 repo（MyLinuxPool），本 note 只寫「對 sidecar 的要求」，不碰它的程式。
 - 本人原則：介面簡單、不加多餘機制。
 
@@ -32,27 +32,27 @@
 - 鍵＝角色名：`role:<ANGAREION_IDENTITY>` 原字串，例如 `role:mylinuxpool-pm-w2`、`role:myaistorage-arch-w1-1`。召回只給長期角色（§6 U-6），它們的名字本來就固定，不必另定「去序號」的推導，sidecar 也不必解析身分格式；代理接手時沿用同一個名字。
 - 值是字串全等比對（`--filter tags=role:mylinuxpool-pm-w2`），不需要新的比對方式。
 - 存放：Session 自己的 header（隨 Session 上 Drive，換機器也在）。**不**另建「角色→session」對照表——對照表是第二份真相，會和 Session 不同步。
-- 「最近的一個」就是時序：同一個 `role:` tag 下，`search … --sort updated --json`（不加 `--limit`），依 JSON 的 `missing_in_cloud`／`agent` 取最新的合格者（§3 第 1、2 步）。時序不另存。
+- 「最近的一個」就是時序：同一個 `role:` tag 下，`search … --strict --sort updated --json`（不加 `--limit`），依 JSON 的 `missing_in_cloud`／`agent` 取最新的合格者（§3 第 1、2 步）。時序不另存。
 - 為什麼不用 header 的其他欄位：`case`／`refs` 是指向實體的 ref，語意不合；`agora` 區塊是系統欄位，使用者不能改（`header.py:SYSTEM_KEYS`）；`--header key=…` 加新頂層欄位（例如 `role: …`）也行，但 `--filter` 要靠 `tags` 才有「清單逐項比」的現成語意與 `--add-tag` 的附加語意，用 tag 零改動。
 
 ### 主要擔當／協作（#205 的兩種關聯）
 
-#205 提了兩種。**本期只做「主要擔當」**（`role:<角色>`）。協作（旁人）要有的話，同樣用 tag，另一個前綴（`with:<角色>`）即可，不需要機制改動，但「召回時要不要把協作 session 也接上」是產品決定，見 §6 U-1。這樣介面只有一個前綴，需要時再加第二個。
+#205 提了兩種。**本期只做「主要擔當」**（`role:<角色>`）。協作（旁人）本期不做（本人 2026-11-08 裁定，§6 U-1）；日後要有，同樣用 tag、另一個前綴（`with:<角色>`）即可，不需要機制改動。這樣介面只有一個前綴，需要時再加第二個。
 
 ## 3. 重開時的查找順序
 
 由啟動方（sidecar）在 `open` 帶 `role`（沒帶 `session`）時，在開 agent 之前跑；輸入是這個 agent 的 `role:<身分>`，記為 `R`：
 
-1. **找**：`agora search session --filter tags=role:R --sort updated --json`（不加 `--no-sync`）。判斷成敗只看 **exit code**；要不要加 `--strict` 見 U-2（待本人二選一）。
+1. **找**：`agora search session --filter tags=role:R --strict --sort updated --json`（不加 `--no-sync`、不加 `--limit`）。判斷成敗只看 **exit code**（`--strict` 見 §4、U-2＝(B)，本人 2026-11-08 裁定）。
 2. **挑**：取**最新的合格者**。JSON 上的初篩只有兩條：`missing_in_cloud` 不是 true，且 agent 接得了（同 agent，或 claude↔opencode；agy 只能接 agy，`cli.py:403`）。不做「同 agent 優先」，也**不過濾 `locked`**。初篩過了不等於真能接（見 §6 U-11）：**本期適用範圍限定 sidecar 用 claude／opencode 開的角色**（agy 的 headless 被擋，`cli.py:2213-2214`）。
 3. **接**：把挑到的 id 當成 `open` 的 `session`，走 sidecar 現有帶 `session` 的 continue 呼叫（含它現在帶的 `--headless`、`--headless-port`、`--harness-file`、`--agent-arg` 等），**再加 `--add-tag role:R`**。對已有的 tag 是 no-op（去重）；跨 agent 接續也是寫回原 Session、`source.agent` 換成新 agent、tag 保留，帶一次只是保險。
 4. **最新的被鎖**：`agora continue` 回 exit 4＋`agora-locked <id>`，sidecar 現有就把它當 409（`docs/design.md:382`、`:394`）。**沿用，不往下挑舊的**：鎖住代表這台機器上同一個角色已經在跑，再開一個會讓同一身分同時有兩個 agent（違反「同一個身分只留一個讀者」），記憶也分成兩條線。
 5. **沒找到**（第一次、列表為空、全部被刪）→ 開全新的 agent。agent 結束後 `agora import … --add-tag role:R` 記下，之後找得到。
-6. **查找本身失敗**（agora 非 0；選 (B) 時含 Drive 列舉失敗或 `sessions/` 找不到的 exit 2）→ 見 §6 U-2（建議回錯誤給 PM，不靜默開全新的）。**不比對 stderr 文字。**
+6. **查找本身失敗**（agora 非 0，含 `--strict` 下 Drive 列舉失敗或 `sessions/` 找不到的 exit 2）→ sidecar 回錯誤給 PM，由 PM 決定；**不自動開全新的、不接舊的**（U-2 失敗時 (b)，本人 2026-11-08 裁定）。**不比對 stderr 文字。**
 
 ## 4. 與 agora continue／sidecar open 的分工與最小介面
 
-**agora 側（本 repo）：** 依 U-2 待裁定：(A) 不新增指令、旗標或 header 欄位，只把「`role:` tag 的約定」寫進 `docs/design.md`（header 一節）與 `session-continue` spec 的一條 Scenario（§7）；(B) 另加 `search --strict` 一個旗標（另開 d 單，見 U-2），header 欄位與指令仍不新增。
+**agora 側（本 repo）：** 兩件事，header 欄位與新指令都不新增：①把「`role:` tag 的約定」寫進 `docs/design.md`（header 一節）與 `session-continue` spec 的一條 Scenario（§7）；②**另開一張 d 單**實作 `search --strict`（U-2＝B）：沿用 `store.sync(strict=True)`；`cmd_search` 在 `--strict` 時用 `throttle=False`（現為 `throttle=True`，`cli.py:437`）；Drive 列舉失敗 exit 2；`sessions/` 找不到也 exit 2（現只印訊息，`store.py:3101`，d 單要補）；**逐筆讀不到不算失敗**。本設計只寫契約，不實作。
 
 **sidecar 側（MyLinuxPool，別的 repo，只提要求、不實作）：**
 
@@ -63,17 +63,17 @@
 **最小介面（約定，只有一條新指令用法）：**
 
 ```
-找：agora search session --filter tags=role:<R> --sort updated --json [--strict]  # 新用法，不是新功能；--strict 只在 U-2 選 (B) 時有（d 單新增）
+找：agora search session --filter tags=role:<R> --strict --sort updated --json  # 新用法；--strict 由另開的 d 單新增（U-2＝B）
 接：（sidecar 現有帶 session 的 continue 呼叫）… --add-tag role:<R>        # 多一個既有旗標
 記：agora import --agent <a> --external-session-id <sid> --add-tag role:<R> # 同上
 ```
 
 ## 5. 不做什麼
 
-- 不新增 `agora recall`／`agora role` 之類的指令；不新增 `--role` 旗標。除非 U-2 選 (B)，才新增 `search --strict` 這唯一一個旗標（另開 d 單）。
+- 不新增 `agora recall`／`agora role` 之類的指令；不新增 `--role` 旗標。唯一新增的旗標是 `search --strict`（U-2＝B，另開 d 單）。
 - 不新增 header 頂層欄位、不碰 `agora` 系統區塊。
 - 不建角色→session 的對照檔或資料庫；sidecar 不存對照。
-- 不做 #205 的「協作」關聯與跨角色的脈絡共享（§6 U-1）。
+- 不做 #205 的「協作」關聯（`with:`）與跨角色的脈絡共享（U-1＝(a)，本人 2026-11-08 裁定）。
 - 不自動摘要、不自動合併多個舊 Session 當記憶（`agora merge` 另一條路，不在這張單）。
 - 不改 `agora continue` 的原地寫回／fork 規則、不改同機互斥。
 - 不做權限控制：tag 是自由欄位，誰都能寫 `role:別人`。這是約定，不是授權（私人 Drive 的信任範圍同現況）。
@@ -83,8 +83,8 @@
 
 | # | 問題 | 選項 | 建議 |
 |---|---|---|---|
-| U-1 | 協作（旁人）關聯要不要做 | (a) 本期不做，只 `role:`；(b) 加 `with:<角色>` 前綴，召回時只當唯讀參考列出，不接續 | (a)。#205 本人說「先設計」，且最小介面原則；(b) 需要「怎麼把協作 session 餵給 agent」的產品決定，不是 tag 的問題 |
-| U-2 | 查找失敗時（含如何辨識） | 先定**怎麼辨識**（待本人二選一）：**(A) 只看 exit code**，不加介面；**(B) `search --strict`**，另開 d 單加一個旗標。再定**失敗時怎麼辦**：(a) 開全新 agent＋警告；(b) sidecar 回錯誤，由 PM 決定（PM 真要開就不帶 `role` 重開） | **失敗時：(b)**（前提是辨識得出來）。**辨識：建議 (B)**（架構師也建議 B）。**事實**：`search` 在 Drive 連不上時退回本機索引仍 **exit 0**（`store.py:3015-3019` 回 `return index`，`cli.py:482` `return 0`）；`store.sync(strict=True)`（`store.py:2985`、`3017`，`cli.py:1329` 已在用）才會往上拋，但 CLI 的 `search` 沒有這個旗標。**不把 stderr 文字（`連不上 Drive`、`讀不到，先跳過`、`Drive 上找不到 sessions/`）寫成 sidecar 的契約**：那是人讀、會改的文字；且 `讀不到，先跳過` 無法限定角色——Drive 上任何一筆無關的壞 Session 永遠不進索引、每次真同步都會再印（`store.py:3037-3058`、`3072-3080`），會讓所有角色的召回一起失敗。**(A) 只看 exit code**：Drive 連不上時照本機索引召回。同機角色自己的寫入已進本機索引（`_index_outbox`，`store.py:3118`），多數情況仍接得到；**殘餘風險**只剩「容器重建後本機索引為空、又剛好連不上 Drive」→ 開全新、換線；throttle 期間（300 秒，`store.py:3008-3009`）也沿用上次同步的結果。agora 與 sidecar 都沒有新東西。**(B) `search --strict`**：沿用 `store.sync(strict=True)`；不走 throttle；Drive 列舉失敗 exit 2（`EXIT_ERROR`，`cli.py:55`；`strict=True` 拋出的 `StoreError` 由 `main` 對成 exit 2，`cli.py:3111-3113`，`cmd_search` 本身不必另接）；`sessions/` 找不到也要 exit 2（現有 strict 只在列舉拋錯時 raise，`sessions/` 找不到只印訊息，`store.py:3101`，d 單要補這一處）；**逐筆讀不到不算失敗**（避免一筆壞資料擋住全部角色）。契約是 exit code，和 exit 4 的慣例一致。**(B) 的限制**：最新那一筆剛好讀不到、或對方 raw 還沒寫完（U-13），仍可能取到舊列，明寫接受。`--no-sync` 完全不驗新鮮，sidecar 不應對召回使用。**失敗時 (a) 的長期後果**：退出時的「記」會把這個沒有脈絡的新 Session 標成 `role:R`，它是最新的，之後每次召回都拿它，舊脈絡永久換線，不只失憶一次。(b) 的代價是延後開，不丟資料（席位跨 session 記憶本以交接檔為準）。屬行為取捨，交 PM／本人 |
+| U-1 | 協作（旁人）關聯要不要做 | (a) 本期不做，只 `role:`；(b) 加 `with:<角色>` 前綴，召回時只當唯讀參考列出，不接續 | **已裁定（本人 2026-11-08）：(a) 本期不做。**理由：#205 本人說「先設計」，且最小介面原則；(b) 需要「怎麼把協作 session 餵給 agent」的產品決定，不是 tag 的問題 |
+| U-2 | 查找失敗時（含如何辨識） | **怎麼辨識**：(A) 只看 exit code，不加介面（**被否決，備查**）；**(B) `search --strict`**，另開 d 單加一個旗標。**失敗時怎麼辦**：(a) 開全新 agent＋警告；(b) sidecar 回錯誤，由 PM 決定（PM 真要開就不帶 `role` 重開） | **已裁定（本人 2026-11-08）：辨識＝(B)；失敗時＝(b)**（sidecar 回錯誤，由 PM 決定，不自動開新）。**事實**：`search` 在 Drive 連不上時退回本機索引仍 **exit 0**（`store.py:3015-3019` 回 `return index`，`cli.py:482` `return 0`）；`store.sync(strict=True)`（`store.py:2985`、`3017`，`cli.py:1329` 已在用）才會往上拋，但 CLI 的 `search` 沒有這個旗標。**不把 stderr 文字（`連不上 Drive`、`讀不到，先跳過`、`Drive 上找不到 sessions/`）寫成 sidecar 的契約**：那是人讀、會改的文字；且 `讀不到，先跳過` 無法限定角色——Drive 上任何一筆無關的壞 Session 永遠不進索引、每次真同步都會再印（`store.py:3037-3058`、`3072-3080`），會讓所有角色的召回一起失敗。**(A) 只看 exit code（被否決，備查一句）**：Drive 連不上時照本機索引召回。同機角色自己的寫入已進本機索引（`_index_outbox`，`store.py:3118`），多數情況仍接得到；**殘餘風險**只剩「容器重建後本機索引為空、又剛好連不上 Drive」→ 開全新、換線；throttle 期間（300 秒，`store.py:3008-3009`）也沿用上次同步的結果。agora 與 sidecar 都沒有新東西。**(B) `search --strict`（定案）**：沿用 `store.sync(strict=True)`；不走 throttle；Drive 列舉失敗 exit 2（`EXIT_ERROR`，`cli.py:55`；`strict=True` 拋出的 `StoreError` 由 `main` 對成 exit 2，`cli.py:3111-3113`，`cmd_search` 本身不必另接）；`sessions/` 找不到也要 exit 2（現有 strict 只在列舉拋錯時 raise，`sessions/` 找不到只印訊息，`store.py:3101`，d 單要補這一處）；**逐筆讀不到不算失敗**（避免一筆壞資料擋住全部角色）；`cmd_search` 在 `--strict` 時用 `throttle=False`。契約是 exit code，和 exit 4 的慣例一致。**(B) 的限制**：最新那一筆剛好讀不到、或對方 raw 還沒寫完（U-13），仍可能取到舊列，明寫接受（殘餘風險）。`--no-sync` 完全不驗新鮮，sidecar 不應對召回使用。**失敗時 (a) 的長期後果**：退出時的「記」會把這個沒有脈絡的新 Session 標成 `role:R`，它是最新的，之後每次召回都拿它，舊脈絡永久換線，不只失憶一次。(b) 的代價是延後開，不丟資料（席位跨 session 記憶本以交接檔為準）。 |
 | U-3 | 最新的被鎖時 | (a) 往下挑舊的／開新的；(b) 拒絕＝沿用現有 exit 4→409 | **(b)**（見 §3 第 4 步）：不是新機制，少一個分支；(a) 會讓同身分兩個 agent、記憶分線 |
 | U-4 | 「記」（import）誰做 | (a) sidecar 在 agent 退出時做；(b) agent 自己在收尾做；(c) 啟動時就預先 import 一個空殼 | (a)。(b) 依賴 agent 守規矩，被打斷就漏；(c) 增加空殼 Session。**只有「第一次全新開」那一段靠退出時 import**；接續以後由 `agora continue` 執行中自己寫回。**MLP 側前提（請 MLP 架構師確認）**：①容器重建會清家目錄（worker 環境說明 §4），agent 的本機 session 檔隨之消失，第一段若未在重建前 import 就丟；②sidecar 是否知道 agent 的 session id，未驗；③**容器重建前要等 outbox 清空**（營運處理，不需機制）：否則上一次沒上傳完的 raw 在另一台或重建後的容器開時還沒寫完（U-13 第②層） |
 | U-5 | 角色名 | (a) 完整身分原字串；(b) 去序號；(c) 只用 `<專案>-<角色>` | (a)。長期角色名本來就固定（pm、secretary 不帶序號，架構師固定 `-1`），不必另定推導規則；不同 team 不混。隊員（impl／rev）不召回，見 U-6 |
@@ -94,7 +94,7 @@
 | U-9 | 跨 agent（claude↔opencode）接續是否合格 | 同 agent 優先，或取最新的合格者 | **取最新的合格者**（§3 第 2 步），不做同 agent 優先，否則會捨棄較新的 Session。跨 agent 接續不產生新 Session：仍寫回同一個 agora id，`source.agent` 換成新 agent（`cli.py:1548`）；另存只發生在被刪救援（`cli.py:1503-1527`），不是跨 agent 的判斷 |
 | U-10 | tag 前綴名 `role:` 是否和既有慣例衝突 | 現有範例 `ai:claude-work`、`workdir:/…`（`docs/design.md:264`）是使用者自訂 | 沿用「`前綴:值`」格式；`role:` 本 repo 內未見使用（`grep`），可用。要不要改成 `ai:<角色>` 讓人以為是同一類——不建議，語意不同 |
 | U-14 | 召回結果日誌與換線掃描要不要做 | (a) 不做；(b) sidecar 每次召回記一行（角色、挑到的 id 或「無」、exit code）並定期掃「`role:R` 下 Session 多於一筆」 | 屬 sidecar 側，由 MLP 決定；**本設計不做**（符合「不加多餘機制」），agora 不動；§11 ①③ 只是建議 |
-| U-13 | 同步部分失敗的殘餘風險（可能取舊列／誤開全新） | 隨 U-2：(A) 只看 exit code，下列風險全部接受；(B) `--strict`，只消除「Drive 列舉失敗／`sessions/` 找不到／throttle 內沿用」，下列第②層仍在 | **隨 U-2 的 (B)＋殘餘風險明寫**。風險有兩層：①throttle 讓不完整結果沿用約 300 秒（`last-sync` 照寫，`store.py:3124-3125`）——(B) 不走 throttle，可消除；②session 的 raw 還沒寫完（`raw_state` 為 False）時，該列被 `index.drop`（`store.py:3083-3086`）排除，首次會印「還沒寫完」，之後只要 session.md 的 md5 與遠端 raw 指紋不變，就走 `store.py:3045-3057` 的略過路徑（同樣 `index.drop`、**不再提示**），缺列可跨多次同步持續存在而沒有任何訊息——(A)(B) 都不消除，原因是對方 raw 沒寫完，不是本機同步失敗；前提只有「上一次上傳沒完成，這次在另一台／重建後容器開」，營運上用 U-4③處理。後果是接到舊脈絡或多開一次全新（換線，見 U-2 (a) 的後果）。**待本人裁定**（與 U-2 一起） |
+| U-13 | 同步部分失敗的殘餘風險（可能取舊列／誤開全新） | 隨 U-2：(A) 只看 exit code，下列風險全部接受（被否決）；(B) `--strict`，只消除「Drive 列舉失敗／`sessions/` 找不到／throttle 內沿用」，下列第②層仍在 | **已裁定（本人 2026-11-08）：隨 U-2＝(B)，殘餘風險明寫、接受。**風險有兩層：①throttle 讓不完整結果沿用約 300 秒（`last-sync` 照寫，`store.py:3124-3125`）——(B) 不走 throttle，可消除；②session 的 raw 還沒寫完（`raw_state` 為 False）時，該列被 `index.drop`（`store.py:3083-3086`）排除，首次會印「還沒寫完」，之後只要 session.md 的 md5 與遠端 raw 指紋不變，就走 `store.py:3045-3057` 的略過路徑（同樣 `index.drop`、**不再提示**），缺列可跨多次同步持續存在而沒有任何訊息——(B) 也不消除，原因是對方 raw 沒寫完，不是本機同步失敗；前提只有「上一次上傳沒完成，這次在另一台／重建後容器開」，營運上用 U-4③處理。後果是接到舊脈絡或多開一次全新（換線，見 U-2 (a) 的後果）。 |
 | U-11 | 初篩合格但真的接不了 | 選到後 continue 失敗：(a) 回錯誤；(b) 跳過往下挑 | **(a)**，與 U-2 同理（跳過會讓記憶換線）。已知情況：opencode 1.x 的 v1 格式 Session 不能用 opencode 接（`opencode.py:1600-1609`）；agy headless 被擋（`cli.py:2213-2214`，故本期限定 claude／opencode）。continue 非 0（且不是 exit 4 的鎖）→ sidecar 回錯誤＋agora 的訊息給 PM；PM 可不帶 `role` 重開。不在 JSON 上猜版本 |
 | U-12 | 傳了 `session` 又傳 `role` | (a) `session` 優先、不查找；(b) 以 role 為準 | **(a)**（§4 已寫 `role`＋沒帶 `session` 才查找）；有 `role` 時接續仍帶 `--add-tag role:R`，讓顯式指定的 Session 也被記到該角色下 |
 
@@ -102,14 +102,14 @@
 
 日後實作若只是 §4 的文件約定＋sidecar 側呼叫，agora 側驗收如下（測試放 `tests/`，用 `uv run pytest`，不連真 Drive、不碰真家目錄，照 `AGENTS.md` 的測試隔離）：
 
-1. **找得到、依序**：建三個**來源不同**（不同 `source.agent`／`session_id`，`cli.py:446-456` 會依此去重）的 Session 帶 `role:R`，`updated_at` 各異；另補一組 `updated_at` 相同、以 ULID 新到舊排序的判準；`search --filter tags=role:R --sort updated --json` 回的第一筆是最新的；`--limit 1` 只回一筆。（現有行為；補一個以 `role:` 為例的測試或 spec Scenario，說明約定。）
+1. **找得到、依序**：建三個**來源不同**（不同 `source.agent`／`session_id`，`cli.py:446-456` 會依此去重）的 Session 帶 `role:R`，`updated_at` 各異；另補一組 `updated_at` 相同、以 ULID 新到舊排序的判準；`search --filter tags=role:R --sort updated --json`（召回用法再加 `--strict`）回的第一筆是最新的；`--limit 1` 只回一筆。（現有行為；補一個以 `role:` 為例的測試或 spec Scenario，說明約定。）
 2. **不同角色不串**：`role:A` 與 `role:B` 各有 Session；`--filter tags=role:A` 看不到 B 的；`tags=role:mylinuxpool-pm` 不會比到 `role:mylinuxpool-pm-w2`（全等，不是包含）。
 3. **接續後 tag 保留且不重複**：`continue --add-tag role:R` 對已有 `role:R` 的 Session，tags 裡只有一個 `role:R`（現有的 `_add_tags` 去重行為）。
 4. **接續仍是原 Session**（本 repo 測試）：用假 agent 做一般（非 fork）continue，含 claude↔opencode 跨 agent：agora id 不變、`source.agent` 更新為目標 agent、原有 tag 保留、`--add-tag role:R` 後 tags 恰有一個 `role:R`；另列被刪救援另存的情況（新 id，tag 仍帶上）。
 5. **locked 沿用 exit 4；missing 被排除**（歸屬：locked 的拒絕是 agora 側既有行為，測 `continue` 對被鎖 Session 回 exit 4＋`agora-locked`；「挑 missing_in_cloud 以外的最新者」是 **sidecar 側**測試，不在本 repo）。
 6. **找不到→全新→記下→下次找得到**：第一次 `search` 為空；走「記」之後，同一個 `role:R` 下一次 `search` 回那一個。
-7. **查找失敗的現況與驗收**：(a) **agora 側，記錄現況的測試**（假 rclone；各情況在「本機索引為空」與「有舊索引」兩種夾具各驗一次；夾具前提：明設沒有 pending／outbox 訊息，stamp 狀態逐項指定；現況 `search --json` 都 exit 0）：①列舉失敗 → 結果退回本機索引、exit 0，起始設「無 stamp」與「過期 stamp」各一次，驗失敗後**不建立、不更新** `last-sync`；②列舉成功但最新列 session.md 下載失敗 → 結果缺最新列、**`last-sync` 仍被寫**（把 U-13 殘餘風險釘成可見的測試）；③sessions/ 找不到 → exit 0、索引照舊；④批次下載失敗但逐筆補救成功 → 最新列在結果中；⑤②之後 300 秒內再 `search`（throttle）→ 假 rclone 列舉呼叫數不增加、仍缺最新列（記錄限制）；⑤′raw 不完整 → 缺該列；stamp 調成過期後再 `search`、遠端指紋不變 → 仍缺列且無首次提示（`store.py:3045-3057`），標為**接受的殘餘風險**（U-13）。這些測試只記錄現況，**不凍結 stderr 字句、也不是給 sidecar 比對用**。(b) **sidecar 側驗收**（不在本 repo，依 U-2 裁定寫一版）：**若 (A)**：sidecar 只看 `search` 的 exit code，非 0 → 回錯誤給 PM，不開全新；exit 0 → 照結果召回；驗收不要求辨識 Drive 連不上，並明記「容器重建＋離線會換線」為已接受風險。**若 (B)**：sidecar 召回一律帶 `--strict`；agora 側由該 d 單驗：Drive 列舉失敗 → exit 2、`sessions/` 找不到 → exit 2、不走 throttle（stamp 新鮮時仍連 Drive）、一筆無關的壞 Session（逐筆讀不到）不使其他角色失敗（exit 0）；sidecar 見 exit 2 → 回錯誤、不開全新、不接舊的；⑤′與「最新那筆剛好讀不到」為已知殘餘風險，不要求擋下。
-8. **沒有新介面**：不寫成測試（凍結 `--help` 沒驗到行為）；審查時對 `build_parser`（`cli.py:2960` 起）的 diff 檢查：U-2 選 (A) 沒有新旗標／新動作；選 (B) 只多 `search --strict`（在另開的 d 單，不在本 PR）。
+7. **查找失敗的現況與驗收**：(a) **agora 側，記錄現況的測試**（假 rclone；各情況在「本機索引為空」與「有舊索引」兩種夾具各驗一次；夾具前提：明設沒有 pending／outbox 訊息，stamp 狀態逐項指定；現況 `search --json` 都 exit 0）：①列舉失敗 → 結果退回本機索引、exit 0，起始設「無 stamp」與「過期 stamp」各一次，驗失敗後**不建立、不更新** `last-sync`；②列舉成功但最新列 session.md 下載失敗 → 結果缺最新列、**`last-sync` 仍被寫**（把 U-13 殘餘風險釘成可見的測試）；③sessions/ 找不到 → exit 0、索引照舊；④批次下載失敗但逐筆補救成功 → 最新列在結果中；⑤②之後 300 秒內再 `search`（throttle）→ 假 rclone 列舉呼叫數不增加、仍缺最新列（記錄限制）；⑤′raw 不完整 → 缺該列；stamp 調成過期後再 `search`、遠端指紋不變 → 仍缺列且無首次提示（`store.py:3045-3057`），標為**接受的殘餘風險**（U-13）。這些測試只記錄現況，**不凍結 stderr 字句、也不是給 sidecar 比對用**。(b) **`--strict` 的驗收**（U-2＝B）：agora 側由另開的 d 單驗（假 rclone、隔離夾具；本機索引為空與有舊索引各驗一次）：Drive 列舉失敗 → exit 2；`sessions/` 找不到 → exit 2；一筆壞資料（逐筆讀不到）→ 仍 exit 0 且其他角色結果正常；不走 throttle（stamp 新鮮時仍連 Drive、假 rclone 列舉呼叫數增加）。**sidecar 側驗收**（不在本 repo）：召回一律帶 `--strict`；見 exit 2（或任何非 0）→ 回錯誤給 PM、不開全新、不接舊的；exit 0 → 照結果召回。⑤′與「最新那筆剛好讀不到」為已知殘餘風險（U-13），不要求擋下。
+8. **沒有新介面**：不寫成測試（凍結 `--help` 沒驗到行為）；審查時對 `build_parser`（`cli.py:2960` 起）的 diff 檢查：除 `search --strict`（在另開的 d 單，不在本 PR）外沒有新旗標／新動作。
 9. **文件**：`docs/design.md` header 一節有 `role:` tag 的約定說明；`session-continue` spec 有一條 Scenario（接續時帶 `--add-tag role:R`）。
 
 **sidecar 側補強驗收**（不在本 repo，列給 MyLinuxPool）：(i) 最新列不合格（`missing_in_cloud` 或 agy）而第二筆合格 → 接第二筆；(ii) 最新合格列被鎖 → 回 409，不改挑舊列、不另開；(iii) 同時傳 `session` 與 `role`（U-12）→ 以 `session` 接、不查找、仍帶 `--add-tag`；(iv) 第一次全新開的退出 import 失敗 → 要有可見錯誤，並由 sidecar 保留該 agent session id 供重試（責任在 sidecar，U-4 前提①）；(v) 選中的 Session continue 失敗（v1 opencode 等，U-11）→ 回錯誤、不跳過。
@@ -118,8 +118,8 @@
 
 ## 8. 範圍與下一步
 
-- 本 note 不改 openspec；若要實作，agora 側 (A) 只剩文件／測試一個小 PR（d 層級），(B) 再加 `search --strict` 一張 d 單，主體在 sidecar（MyLinuxPool#340）。
-- #205 仍是 `狀態:構想`；本 note 是其設計第一步。「是否要做協作關聯」（U-1）與「失敗策略與辨識方式」（U-2 (A)／(B)、U-3、U-11、U-13）需要 PM 或本人拍板後再開實作單；選 (B) 時另開 d 單加 `search --strict`。
+- 本 note 不改 openspec；若要實作，agora 側是兩個 d 層級的 PR：文件／測試一個小 PR，另開一張 d 單加 `search --strict`；主體在 sidecar（MyLinuxPool#340）。
+- #205 仍是 `狀態:構想`；本 note 是其設計第一步。U-1、U-2、U-13 已由本人 2026-11-08 裁定（§6）；U-3、U-11 隨之定案；召回日誌與換線掃描（U-14）屬 MLP 決定，是目前唯一未決項。實作單照 §4 另開（含 `search --strict` 的 d 單）。
 
 ## 9. 第 1 次退回的處理（`ARCH-439-review.md`）
 
@@ -133,13 +133,13 @@
 
 ## 10. 非作者審查（`REPORT-439-rev*.md`）的處理
 
-- **H-1**：同步部分失敗的風險，現在由 U-2 的 (A)／(B) 與 U-13 承接，殘餘風險明寫、待本人裁定；不再用 stderr 文字當契約。
+- **H-1**：同步部分失敗的風險，現在由 U-2＝(B) 與 U-13 承接，殘餘風險明寫（本人 2026-11-08 已裁定）；不再用 stderr 文字當契約。
 - **M-1**：已修。§1、§3 第 3 步、U-9、§7 第 4 項改為「寫回原 agora id」。
 - **M-2**：已修。U-8 如實寫後寫覆蓋、無衝突偵測。
 - **M-3**：已修。§3 第 2 步限定 claude／opencode 並分初篩與真接續；新增 U-11；§7 補強驗收 (v)。
 - **L-1、L-2**：已修（§1 表格、`cli.py:2213-2214`）。
 - **驗收補強**：§7 第 1 項、sidecar 側補強驗收 (i)～(v)、U-12。
-- **架構師第 2 次退回（`ARCH-439-review2.md`）**：M-1 已修（U-2／U-13／§3／§4／§5／§7 第 7 項改成 A／B 二選一，待本人裁）；S-1（本節縮短）、S-2（U-4③）已採用。
+- **架構師第 2 次退回（`ARCH-439-review2.md`）**：M-1 已修（U-2／U-13／§3／§4／§5／§7 第 7 項曾改成 A／B 二選一，現已由本人裁定 B，見 §6）；S-1（本節縮短）、S-2（U-4③）已採用。
 
 ## 11. 專家視角四問
 
@@ -147,7 +147,7 @@
 
 ### ① 頂尖專家會做哪些我們沒想到的事
 
-- **先量失敗有多常發生，再決定要不要為它加旗標。** U-2 的 (A)／(B) 之爭，其實取決於「Drive 連不上＋本機索引為空」與「raw 沒寫完」在真實營運裡每週發生幾次；現在只有推論（U-2、U-13），沒有計數。專家會先讓 sidecar 對每次召回記一行結果（找到／沒找到／失敗＋exit code），跑一兩週再裁。**這是我們缺的**：本設計未列出任何一處記召回結果（sidecar 現況未讀，不能斷言它沒有日誌）。
+- **先量失敗有多常發生，再決定要不要為它加旗標。** U-2 的 (A)／(B)（已裁定 B）之爭，其實取決於「Drive 連不上＋本機索引為空」與「raw 沒寫完」在真實營運裡每週發生幾次；現在只有推論（U-2、U-13），沒有計數。專家會先讓 sidecar 對每次召回記一行結果（找到／沒找到／失敗＋exit code），跑一兩週再裁。**這是我們缺的**：本設計未列出任何一處記召回結果（sidecar 現況未讀，不能斷言它沒有日誌）。
 - **查「召回之後接得上嗎」而不只是「找得到嗎」。** §7 已驗接續本身（第 4 項的假 agent continue、sidecar 補強 (v) 的 continue 失敗），但**尚未對真實角色資料做 agent／版本相容性盤點**；U-11 已知 v1 opencode 接不了、agy 被擋，但沒有統計實際角色的 Session 屬於哪一類。專家會先列出現有長期角色（pm、arch、secretary）最新 Session 的 agent 與版本，確認初篩合格者實際能接。
 - **把「換線」當成一等的壞結果。** 記憶分成兩條線不會報錯，只會悄悄失憶；專家會為它設一個可查的訊號（`role:R` 下的 Session 多於一筆；因為跨 agent 接續寫回同一個 Session，`source.agent` 變動是正常單線延續，不能當訊號；被刪救援另存的那一筆用 `relation`／`parents` 排除），定期掃一次。現況：設計只在 U-2、U-13 描述風險，沒有偵測（是否要做見 U-14）。
 - **懷疑 tag 約定會被繞過。** tag 是自由欄位、誰都能寫（§5 已承認）；專家會問：有沒有人手動 `agora edit` 把 tag 改掉或寫錯字？召回因此靜默失敗（找不到→開全新）。這和 U-2 (a) 的長期後果同型。
@@ -167,7 +167,7 @@
 ### ③ 用哪些方法與工具
 
 - **假 rclone＋隔離夾具重現失敗**：`AGORA_RCLONE` 指向 `tests/fakes/fake_rclone.py`、`AGORA_UPLOAD=inline`，照 `AGENTS.md` 的測試隔離（`isolated_home`）。§7 第 7 項(a) 的六種同步失敗情境（①②③④⑤⑤′）應都能用它釘住（**推論**：`fake_rclone.py` 有 `FAKE_RCLONE_FAIL`、`FAKE_RCLONE_OMIT_FILES`、`FAKE_RCLONE_BULK_PARTIAL`、`FAKE_RCLONE_NOT_FOUND_RC` 等注入點，但未逐條對過、⑤′ 未實際跑過），不連真 Drive。
-- **用 `agora search … --json` 當唯一查詢介面**：不寫新工具；`search … --sort updated --json`（不加 `--limit`）的 exit code 加上 JSON 的 `missing_in_cloud`／`agent` 欄位，就是 sidecar 的全部判斷依據（§3 第 1、2 步）。
+- **用 `agora search … --json` 當唯一查詢介面**：不寫新工具；`search … --strict --sort updated --json`（不加 `--limit`）的 exit code 加上 JSON 的 `missing_in_cloud`／`agent` 欄位，就是 sidecar 的全部判斷依據（§3 第 1、2 步）。
 - **審查 `build_parser` 的 diff**（§7 第 8 項）來確認「沒有新介面」，不用測試凍結 `--help`。
 - **召回結果日誌（建議，屬 sidecar 側）**：每次召回一行（角色、挑到的 id 或「無」、agora exit code），供①的計數與換線掃描用。**這是本設計目前沒有的工具**；加在 sidecar 側，agora 不動。
 - 不用：外部向量檢索、摘要合併（§5 已排除）。
@@ -184,12 +184,12 @@
 | `session`＋`role` 同傳時以 `session` 為準 | sidecar 補強 (iii) | sidecar 側 |
 | 沒有新介面、有文件約定 | 第 8、9 項 | 審查 `build_parser` diff／文件 PR |
 | 第一次→記下→下次找得到 | 第 6 項 | 已列 |
-| 失敗時不靜默換線 | 第 7 項(a)(b)、sidecar 補強 (iv)(v) | 現況可釘；(b) 待 U-2 裁定後才定版 |
+| 失敗時不靜默換線 | 第 7 項(a)(b)、sidecar 補強 (iv)(v) | 現況可釘；`--strict` 驗收與 sidecar 側 (b) 已按 U-2＝B 定版（§7 第 7 項） |
 | **整體「重開後看得到上次對話、另一角色看不到」** | 「整體驗收（人工）」 | **目前未驗**，要 sidecar 實作後才能驗 |
 
 **§7 沒覆蓋的缺口（指出，不在此新增驗收）：**
 1. **沒有「有用」的量化判準**：§7 驗的是機制正確（tag、排序、鎖、失敗），不驗「召回後的 agent 是否真的延續了脈絡」。人工整體驗收只有一個通過／不通過的場景。是否要加（例如第一個畫面含上次對話的某個標記字串）屬 sidecar 側驗收，請 PM／本人決定。
 2. **沒有營運層指標**：①提到的召回結果日誌與換線掃描不在 §7；若要證明長期上沒有悄悄換線，需要它。
-3. **U-13 第②層（raw 沒寫完）無法用 (A)／(B) 驗掉**：§7 第 7 項只把它記錄成已接受的殘餘風險，沒有驗收能證明它不發生。
+3. **U-13 第②層（raw 沒寫完）無法用 `--strict` 驗掉**：§7 第 7 項只把它記錄成已接受的殘餘風險，沒有驗收能證明它不發生。
 
 **沒驗到**：本節沒有跑任何測試或程式；所列行號是我再讀 repo 對過的原文，不代表 §7 的測試已存在或已通過（測試尚未實作）。
