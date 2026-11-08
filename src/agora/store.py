@@ -2982,7 +2982,8 @@ def _folder_files(remote: dict, ulid: str) -> dict:
 
 
 def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
-         kick: bool = True, strict: bool = False, warn=warn) -> Index:
+         kick: bool = True, strict: bool = False, strict_missing: bool = False,
+         warn=warn) -> Index:
     """Start the uploader if anything is waiting, then pull the session.md files whose md5 changed.
 
     `kick=False` is for a command that is about to take an entry out of the outbox
@@ -3000,6 +3001,10 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
     `pull --not-exist-delete` or `push --not-exist-upload` is a decision rather
     than a side effect of running any command. Markers move only when the listing
     came back whole (Q4).
+
+    `strict=True` raises when the listing fails instead of falling back to the local
+    index. `strict_missing=True` (search --strict, #441) also raises when Drive has no
+    `sessions/` at all; a session whose own files cannot be read is never an error.
     """
     say = warn      # the interactive mode passes its own sink, not the screen's (review K3)
     index = Index(paths)   # a bumped index is already back from the mirror
@@ -3025,6 +3030,8 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
         say(f"背景上傳中，{len(waiting)} 筆" if uploader_is_running(paths)
             else f"outbox 還有 {len(waiting)} 筆沒上傳成功")
     missing = remote is None
+    if missing and strict and strict_missing:
+        raise StoreError("Drive 上找不到 sessions/，可能是 folder ID 或 token 有問題")
     remote = remote or {}
     # Sessions waiting to be moved to the Drive trash are on their way out: do not pull
     # them back into the list, and do not call them "deleted on another machine" - they

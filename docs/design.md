@@ -172,7 +172,7 @@ Mac:
 - Drive 上已經不存在的 Session，從鏡像和索引刪掉（outbox、pending 不動）。但 Drive 上**找不到 `sessions/`**（folder ID 或 token 出問題）時不刪，只警告（N12）。
 - continue 時抓不到某個段（另一台機器寫了新版、清掉了舊的段），先重抓那一份 session.md 再試一次（N8）；已驗過的段不重抓。
 - 上傳一律用 `rclone copyto`：`rclone copy` 目的地寫成檔名時會靜默建成同名資料夾（spike V4）。
-- search 前的 sync 有節流：距離上次成功 sync 不到 5 分鐘就跳過；`--no-sync` 直接跳過；網路不通時查本機，印一行警告。
+- search 前的 sync 有節流：距離上次成功 sync 不到 5 分鐘就跳過；`--no-sync` 直接跳過；網路不通時查本機，印一行警告（exit 0）。`--strict`（#441）：不走節流、一定連 Drive；Drive 列舉失敗或找不到 `sessions/` 就 exit 2（不退回本機索引）；單筆 Session 讀不到不算失敗（仍 exit 0，其餘結果照常）；不能和 `--no-sync` 同用（exit 1），其他動作不吃 `--strict`（exit 1）。已知殘餘風險（#439 U-13）：最新那筆剛好讀不到、或對方 raw 還沒寫完時，結果仍可能缺那一筆。
 - import 前一律做一次不節流的 sync（S6）。
 
 ### 4.4 閱讀版（D6、L1）
@@ -202,7 +202,7 @@ Mac:
 ```
 agora <動作> <型態> [session_id] [選項]
 
-agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync]
+agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync | --strict]
 agora import   session --external-session-id <id>[,<id>...] [--external-session-id <id>...] --agent opencode|claude|agy [--header-file F] [--header K=V]... [--add-tag T]... [--as-new]
 agora merge    session <id>, <id>, ... --agent opencode|claude [--header-file F] [--header K=V]...
 agora continue session <id> --agent opencode|claude [--dir <專案目錄>] [--fork] [--sync-period <分鐘>] [--headless [--headless-port <埠>]] [--harness-file <檔>] [--agent-arg=<參數>]... [--header-file F] [--header K=V]... [--add-tag T]... [-- <參數>...]
