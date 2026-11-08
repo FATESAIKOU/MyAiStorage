@@ -102,6 +102,11 @@
 - **WHEN** `--sync-period -1` 或 `--sync-period abc`
 - **THEN** 不開 agent，exit 1，說明要給不小於 0 的分鐘數
 
+#### Scenario: 接續長期角色並保留 role tag
+- **GIVEN** Session A 的 tags 包含 `role:R` 與其他使用者 tag
+- **WHEN** `agora continue session agora:A --agent claude|opencode --add-tag role:R` 一般接續並產生新內容（可跨 agent）
+- **THEN** MUST 寫回同一個 agora id，`source.agent` MUST 更新為目標 agent；原有 tags MUST 保留，`role:R` MUST 恰有一個
+
 ### Requirement: 同一台機器上不能同時接續同一個 Session
 一個 Session 正在接續中（這台機器上有另一個 `agora continue` 正在寫回它）時，再對它 `agora continue`（不含 `--fork`）MUST 被拒絕，exit 4，並在中文說明之前先印一行固定格式 `agora-locked <agora id>`（呼叫方不必解析中文；#54）。被鎖的訊號 MUST 和一般輸入錯誤的 exit 1 分開。對它 `--fork` 不受影響。
 

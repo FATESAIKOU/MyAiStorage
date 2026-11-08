@@ -99,6 +99,14 @@ agora:                                # 系統欄位，使用者不能改
 
 **自動填的欄位**（import／merge／continue／fork）：`type`、`title`（來源的標題）、`description`、`generated`（agent 與模型、來源的建立時間）、`sources`（來源 session；continue／merge 另外列出父 Session），以及整個 `agora` 區塊。`status` 不自動填（OKF 預設 `stable`），`verified` 永遠不自動填。`relation: fork` 的是從別的 Session 分出來的新 Session：`parents` 指向原本那個；原本那個有它（或 continue／merge 的孩子）就不能直接刪（5.6），但 fork 出來的不算分岔，再匯入原本的來源時原本那個仍然原地更新（5.2 的 S7）。
 
+### 3.4.1 長期角色的 `role:` tag 約定
+
+`tags` 用 `role:<角色>` 記錄主要擔當；角色是完整 `ANGAREION_IDENTITY` 原字串，不去序號。召回只給長期角色（PM、架構師、秘書／PMO），隊員一單一開，codex 只當隊員。這是 tag 約定，不是授權。
+
+查找用 `agora search session --filter tags=role:R --strict --sort updated --json`，不加 `--limit` 或 `--no-sync`。tag 逐項全等比對，`role:pm` 不會比到 `role:pm-w2`。呼叫方取最新的合格者（`missing_in_cloud` 不為 true，目標 agent 接得了），不優先同 agent，不略過 locked。claude／opencode 可互接；codex 來源可被 claude／opencode 接，codex 目標接不了任何來源。
+
+接續沿用既有呼叫並加 `--add-tag role:R`，保留原 tag 並去重；一般接續含跨 agent 仍寫回同一個 agora Session。被鎖沿用 exit 4 與 `agora-locked <id>`，不改挑舊列；查找非 0 就回報錯誤。首次沒有合格者才開全新 agent，退出時用 `agora import session --agent <a> --external-session-id <sid> --add-tag role:R` 記下。角色關聯存在 Session header，不另存對照表。
+
 ### 3.5 使用者給的標頭：差分疊加
 
 順序是 **自動填 → `--header-file <yaml>` → `--header key=value`（依序）**，後面的覆蓋前面的：
