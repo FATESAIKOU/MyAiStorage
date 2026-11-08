@@ -1,6 +1,6 @@
 # #439 設計筆記：角色式 session 召回（M6）
 
-- 單：#439（MAS）；承接 #205（c，狀態:構想）。作者：設計作者（隊員，claude-sonnet-5-5）。2026-11-08。架構師第 1、2 次退回（`ARCH-439-review.md`、`review2`），已處理（見 §9、§10）。
+- 單：#439（MAS）；承接 #205（c，狀態:構想）。作者：設計作者（隊員，claude-sonnet-5-5）。2026-11-08。架構師第 1、2 次退回（`ARCH-439-review.md`、`review2`），已處理（見 §9、§10）。§11 為本人新要求的專家視角四問。
 - 範圍：只設計，不寫程式、不改 openspec。sidecar 在別的 repo（MyLinuxPool），本 note 只寫「對 sidecar 的要求」，不碰它的程式。
 - 本人原則：介面簡單、不加多餘機制。
 
@@ -139,3 +139,54 @@
 - **L-1、L-2**：已修（§1 表格、`cli.py:2213-2214`）。
 - **驗收補強**：§7 第 1 項、sidecar 側補強驗收 (i)～(v)、U-12。
 - **架構師第 2 次退回（`ARCH-439-review2.md`）**：M-1 已修（U-2／U-13／§3／§4／§5／§7 第 7 項改成 A／B 二選一，待本人裁）；S-1（本節縮短）、S-2（U-4③）已採用。
+
+## 11. 專家視角四問
+
+本人新要求：設計類產出用四點回答。以下只寫「sidecar 以角色召回 Session」這個設計；引用都回 repo 原文看過，外部資料一律不引用（寫「未查」）。
+
+### ① 頂尖專家會做哪些我們沒想到的事
+
+- **先量失敗有多常發生，再決定要不要為它加旗標。** U-2 的 (A)／(B) 之爭，其實取決於「Drive 連不上＋本機索引為空」與「raw 沒寫完」在真實營運裡每週發生幾次；現在只有推論（U-2、U-13），沒有計數。專家會先讓 sidecar 對每次召回記一行結果（找到／沒找到／失敗＋exit code），跑一兩週再裁。**這是我們缺的**：目前沒有任何一處記召回結果。
+- **查「召回之後接得上嗎」而不只是「找得到嗎」。** §7 驗的是 tag 與排序，不驗「選中的 Session 真的能 continue」；U-11 已知 v1 opencode 接不了、agy 被擋，但沒有統計實際角色的 Session 屬於哪一類。專家會先列出現有長期角色（pm、arch、secretary）最新 Session 的 agent 與版本，確認初篩合格者實際能接。
+- **把「換線」當成一等的壞結果。** 記憶分成兩條線不會報錯，只會悄悄失憶；專家會為它設一個可查的訊號（同一個 `role:R` 下，兩筆 Session 的 `source.agent`／起始時間交錯、而非單線延續），定期掃一次。現況：設計只在 U-2、U-13 描述風險，沒有偵測。
+- **懷疑 tag 約定會被繞過。** tag 是自由欄位、誰都能寫（§5 已承認）；專家會問：有沒有人手動 `agora edit` 把 tag 改掉或寫錯字？召回因此靜默失敗（找不到→開全新）。這和 U-2 (a) 的長期後果同型。
+
+### ② 他們會看哪些一手資料（實際可讀的）
+
+| 要查的事 | 一手來源（本 repo，已讀過） |
+|---|---|
+| tag 比對、排序、去重語意 | `src/agora/header.py:209`（`LIST_KEYS`）、`:238`（`parse_filters`）；`src/agora/store.py:2857`（`_matches`）、`:2803`（`Index.search`）；`src/agora/cli.py:226-230`（附加去重）、`:432-498`（`cmd_search`） |
+| `docs/design.md` 對外契約 | `docs/design.md:100-107`（tags）、`:240-262`（search 排序與 JSON 欄位）、`:382`（同機互斥、exit 4＋`agora-locked`）、`:394`（exit code 對照表，sidecar 靠 exit 4 判 409）、`:397`（跨機後寫的贏） |
+| 同步失敗時 search 的真實行為 | `src/agora/store.py:3005-3020`（throttle、列舉失敗退回本機索引；`strict` 才 raise）、`:3083-3086`（raw 沒寫完被 `index.drop`）、`:3118`（`_index_outbox`）；`src/agora/cli.py:482`（`return 0`） |
+| 接續是不是原地寫回 | `src/agora/cli.py:1472`、`:1548`（更新 `source.agent`）、`:1561-1563`（`--add-tag`）；`openspec/specs/session-continue/spec.md` |
+| 既有測試能不能重用 | `tests/unit/test_search_sort_limit.py`（sort／limit 現有測試）、`tests/unit/test_search_json.py`、`tests/unit/test_add_tag_empty.py`；假 rclone `tests/fakes/fake_rclone.py`；測試隔離規格 `openspec/specs/test-isolation/spec.md` |
+| sidecar 的 `open`／`session`／`agora_too_old` 行為 | 只有 worker 環境說明與 `docs/design.md:382/394` 這類 agora 側的引用；**sidecar 本身的程式與文件在 MyLinuxPool，未讀**；MyLinuxPool#340、MyPMO#3 的內文也**未查**（本 note 只引了 #205 的原話） |
+| 業界做法（agent 長期記憶、session 召回的現有系統） | **未查**，不引用 |
+
+### ③ 用哪些方法與工具
+
+- **假 rclone＋隔離夾具重現失敗**：`AGORA_RCLONE` 指向 `tests/fakes/fake_rclone.py`、`AGORA_UPLOAD=inline`，照 `AGENTS.md` 的測試隔離（`isolated_home`）。§7 第 7 項(a) 的五種同步失敗情境全部能用它釘住，不連真 Drive。
+- **用 `agora search … --json` 當唯一查詢介面**：不寫新工具；`--sort updated --limit 1` ＋ exit code 就是 sidecar 的全部判斷依據（§3、§4）。
+- **審查 `build_parser` 的 diff**（§7 第 8 項）來確認「沒有新介面」，不用測試凍結 `--help`。
+- **召回結果日誌（建議，屬 sidecar 側）**：每次召回一行（角色、挑到的 id 或「無」、agora exit code），供①的計數與換線掃描用。**這是本設計目前沒有的工具**；加在 sidecar 側，agora 不動。
+- 不用：外部向量檢索、摘要合併（§5 已排除）。
+
+### ④ 怎麼證明結果有用（驗收方式）
+
+對照 §7，不另造新驗收：
+
+| 要證明的事 | 對應 §7 | 狀態 |
+|---|---|---|
+| 同一角色找得到最新的、不同角色不串 | 第 1、2 項 | 可在 agora 側測，已列 |
+| 接續後 tag 保留、仍是原 Session | 第 3、4 項 | 可在 agora 側測，已列 |
+| 被鎖沿用 exit 4；missing 排除 | 第 5 項、sidecar 補強 (i)(ii) | 前者 agora 側，後者 sidecar 側 |
+| 第一次→記下→下次找得到 | 第 6 項 | 已列 |
+| 失敗時不靜默換線 | 第 7 項(a)(b)、sidecar 補強 (iv)(v) | 現況可釘；(b) 待 U-2 裁定後才定版 |
+| **整體「重開後看得到上次對話、另一角色看不到」** | 「整體驗收（人工）」 | **目前未驗**，要 sidecar 實作後才能驗 |
+
+**§7 沒覆蓋的缺口（指出，不在此新增驗收）：**
+1. **沒有「有用」的量化判準**：§7 驗的是機制正確（tag、排序、鎖、失敗），不驗「召回後的 agent 是否真的延續了脈絡」。人工整體驗收只有一個通過／不通過的場景。是否要加（例如第一個畫面含上次對話的某個標記字串）屬 sidecar 側驗收，請 PM／本人決定。
+2. **沒有營運層指標**：①提到的召回結果日誌與換線掃描不在 §7；若要證明長期上沒有悄悄換線，需要它。
+3. **U-13 第②層（raw 沒寫完）無法用 (A)／(B) 驗掉**：§7 第 7 項只把它記錄成已接受的殘餘風險，沒有驗收能證明它不發生。
+
+**沒驗到**：本節沒有跑任何測試或程式；所列行號是我再讀 repo 對過的原文，不代表 §7 的測試已存在或已通過（測試尚未實作）。
