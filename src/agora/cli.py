@@ -2,7 +2,7 @@
 
     agora <action> <type> [session_id] [options]
 
-    agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync] [--json]
+    agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync | --strict] [--json]
     agora import   session --external-session-id <id> --agent opencode|claude [--header-file F] [--header K=V]...
     agora merge    session <id>, <id>, ... [--header-file F] [--header K=V]...
     agora continue session <id> --agent opencode|claude [--dir <dir>] [--fork] [--header-file F] [--header K=V]...
@@ -434,7 +434,12 @@ def cmd_search(args, paths: store.Paths) -> int:
         raise InputError("search 不接 session id；用 --filter，例如 --filter text~=表格")
     limit = _limit_of(args)     # said before anything is touched, sync included (#302)
     filters = h.parse_filters(args.filter)
-    index = store.Index(paths) if args.no_sync else store.sync(paths, throttle=True)
+    if args.strict and args.no_sync:
+        raise InputError("--strict 要連 Drive 確認，不能和 --no-sync 一起用")
+    if args.strict:     # #441: Drive 連不上／找不到 sessions/ 要明確失敗（exit 2），不退回本機索引、不走節流
+        index = store.sync(paths, throttle=False, strict=True, strict_missing=True)
+    else:
+        index = store.Index(paths) if args.no_sync else store.sync(paths, throttle=True)
     seen: dict[tuple, str] = {}
     said: set[tuple] = set()      # T7 F2: the same source gets at most one line
     outbox = store.waiting_ulids(paths)
@@ -2999,6 +3004,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="delete：連正在接續中的一起刪（要加 --yes；刪掉之後那個 agent 的寫回會另存成新的 Session）")
     p.add_argument("--raw", action="store_true", help="show：印出原始匯出")
     p.add_argument("--no-sync", action="store_true", help="search：不連 Drive，只查本機索引")
+    p.add_argument("--strict", action="store_true",
+                   help="search：Drive 連不上或找不到 sessions/ 就 exit 2，不退回本機索引；不走 5 分鐘節流；"
+                        "單筆讀不到不算失敗；不能和 --no-sync 同用")
     p.add_argument("--json", action="store_true",
                    help="search：輸出一個 JSON 陣列（其他訊息只走 stderr；空結果是 []）")
     p.add_argument("--sort", choices=["date", "updated"], default=None,
@@ -3081,6 +3089,10 @@ def main(argv: list[str] | None = None) -> int:
         # #301: --json is search's output form; a flag nobody reads must not look like it worked
         # (same rule as --add-tag, #153). Refused before anything runs.
         print(f"[agora] {args.action} 不吃 --json（只有 search 吃）", file=sys.stderr)
+        return EXIT_INPUT
+    if args.strict and args.action != "search":
+        # #441: --strict is search's, same rule as --json above; refused before anything runs.
+        print(f"[agora] {args.action} 不吃 --strict（只有 search 吃）", file=sys.stderr)
         return EXIT_INPUT
     if (args.sort is not None or args.limit is not None) and args.action != "search":
         # #302: --sort／--limit are search's, same rule as --json above; refused before anything runs.
