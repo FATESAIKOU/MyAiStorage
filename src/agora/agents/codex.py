@@ -93,7 +93,25 @@ def _meta(rows):
 
 def _id(path, rows):
     meta = _meta(rows)
-    return meta.get("id") or meta.get("session_id") or next(iter(_UUID.findall(path.name)), None)
+    sid = meta.get("id") or meta.get("session_id") or next(iter(_UUID.findall(path.name)), None)
+    return sid if isinstance(sid, str) and _UUID.fullmatch(sid) else None
+
+
+def _find(session_id):
+    files = _files()
+    for path in files:
+        if session_id in _UUID.findall(path.name):
+            return path
+    # Renamed rollouts: inspect only headers, quietly ignoring unrelated damage.
+    for path in files:
+        try:
+            with path.open("rb") as stream:
+                header = json.loads(stream.readline())
+            if isinstance(header, dict) and _id(path, [header]) == session_id:
+                return path
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+    return None
 
 
 class Codex:
@@ -102,13 +120,12 @@ class Codex:
     def export(self, session_id):
         if not _UUID.fullmatch(session_id):
             raise AgentError("codex session id 不合法")
-        for path in _files():
-            # Filenames normally contain the id; metadata is authoritative and
-            # also supports renamed authorized samples.
+        path = _find(session_id)
+        if path is not None:
             raw = _read(path)
             rows = _rows(raw)
             if _id(path, rows) != session_id:
-                continue
+                raise AgentError(f"找不到 codex session：{session_id}")
             turns, texts = _parse(rows)
             meta = _meta(rows)
             model = next((r.get("payload", {}).get("model") for r in reversed(rows)
@@ -142,7 +159,8 @@ class Codex:
         # load a large rollout just because the TUI cursor moved onto it.
         if not _UUID.fullmatch(session_id):
             return None
-        for path in _files():
+        path = _find(session_id)
+        if path is not None:
             try:
                 with path.open("rb") as stream:
                     first = stream.readline()
@@ -151,7 +169,7 @@ class Codex:
                     except (ValueError, UnicodeDecodeError):
                         header = {}
                     if _id(path, [header] if isinstance(header, dict) else []) != session_id:
-                        continue
+                        return None
                     stream.seek(0, os.SEEK_END)
                     size = stream.tell()
                     stream.seek(max(0, size - 65536))
@@ -177,11 +195,13 @@ class Codex:
         needle = normalize(keyword)
         if not needle:
             return
-        for item in self.list_sessions():
-            if only is None or item.session_id in only:
-                texts = _parse(_rows(self.export(item.session_id).raw))[1]
+        for path in _files():
+            rows = _rows(_read(path))
+            sid = _id(path, rows)
+            if sid and (only is None or sid in only):
+                texts = _parse(rows)[1]
                 if any(needle in normalize(text) for _, text in texts):
-                    yield item.session_id
+                    yield sid
 
     def native(self, turns):
         raise AgentError(CODEX_CONTINUE_LATER)

@@ -288,3 +288,86 @@ def test_last_message_only_reads_tail(rollout, monkeypatch):
     monkeypatch.setattr(codex, "_read", forbidden)
     assert A.last_message(SID) == ("assistant", "已停下，等候指示。")
     assert A.last_message("missing") is None
+
+
+@pytest.mark.parametrize("bad", [b'{}\nBROKEN\n{}\n', b'{}\n{"type":'])
+def test_fix1_unrelated_bad_rollout_imports(rollout, lab, capsys, bad):
+    other = rollout.with_name("rollout-a-00000000-0000-0000-0000-000000000002.jsonl")
+    other.write_bytes(bad)
+    assert other < rollout
+    code, out, err = run(capsys, "import", "session", "--agent", "codex", "--external-session-id", SID)
+    assert code == 0 and out.startswith("agora:"), err
+    assert "最後一行不完整" not in err
+    assert other.name not in err
+
+
+def test_fix1_renamed_target_skips_bad_and_unreadable_headers(rollout, monkeypatch, capsys):
+    renamed = rollout.with_name("rollout-z-renamed.jsonl")
+    rollout.rename(renamed)
+    bad = renamed.with_name("rollout-a-bad.jsonl")
+    bad.write_bytes(b'BROKEN\n')
+    denied = renamed.with_name("rollout-b-denied.jsonl")
+    denied.touch()
+    original = Path.open
+    def open_path(p, *args, **kwargs):
+        if p == denied:
+            raise PermissionError("denied")
+        return original(p, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", open_path)
+    assert A.export(SID).message_count == 11
+    assert A.last_message(SID) == ("assistant", "已停下，等候指示。")
+    assert not capsys.readouterr().err
+
+
+def test_fix1_search_reads_each_rollout_once(rollout, monkeypatch):
+    other_sid = "00000000-0000-0000-0000-000000000002"
+    other = rollout.with_name(f"rollout-other-{other_sid}.jsonl")
+    other.write_bytes(rollout.read_bytes().replace(SID.encode(), other_sid.encode()))
+    seen = []
+    original = codex._read
+    def read(p):
+        seen.append(p)
+        return original(p)
+    monkeypatch.setattr(codex, "_read", read)
+    assert set(A.search_text("樣本測試完成")) == {SID, other_sid}
+    assert sorted(seen) == sorted([rollout, other])
+
+
+def test_fix1_invalid_metadata_id_not_listed(rollout):
+    rollout.write_bytes(rollout.read_bytes().replace(SID.encode(), b"invalid-id"))
+    assert A.list_sessions() == []
+    assert list(A.search_text("樣本")) == []
+    assert A.last_message(SID) is None
+    with pytest.raises(AgentError):
+        A.export(SID)
+
+
+def test_fix1_only_sessions_scanned(rollout, monkeypatch):
+    outside = Path(os.environ["AGORA_CODEX_HOME"]) / "rollout-outside.jsonl"
+    outside.write_bytes(b'BROKEN\n')
+    assert A.export(SID).message_count == 11
+    assert [s.session_id for s in A.list_sessions()] == [SID]
+    assert list(A.search_text("樣本")) == [SID]
+    assert outside not in codex._files()
+
+
+def test_fix1_preview_discards_partial_first_tail_line(rollout):
+    # Synthetic whitespace-padded message: the 64 KiB tail starts inside this
+    # line but its suffix is independently valid JSON. It must still be dropped.
+    message = json.dumps({"type": "response_item", "payload": {
+        "type": "message", "role": "assistant", "content": [
+            {"type": "output_text", "text": "partial-line"}]}}).encode()
+    header = rollout.read_bytes().splitlines(keepends=True)[0]
+    rollout.write_bytes(header + b' ' * 70000 + message + b'\n{}\n')
+    assert A.last_message(SID) is None
+
+
+def test_fix1_title_first_user(rollout):
+    assistant = json.dumps({"type": "response_item", "payload": {
+        "type": "message", "role": "assistant", "content": [
+            {"type": "output_text", "text": "assistant-before-user"}]}}).encode() + b'\n'
+    lines = rollout.read_bytes().splitlines(keepends=True)
+    rollout.write_bytes(lines[0] + assistant + b''.join(lines[1:]))
+    expected = next(text[:80] for role, text in codex._parse(codex._rows(rollout.read_bytes()))[1] if role == "user")
+    assert A.export(SID).title == expected
+    assert A.list_sessions()[0].title == expected
