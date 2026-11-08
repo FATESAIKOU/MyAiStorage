@@ -26,3 +26,11 @@ import 任何測試模組或測試 helper 時，如果使用者真實的目錄�
 - **WHEN** 在 pytest 以外 import 測試 helper，四個變數都指到 /tmp 底下
 - **THEN** 照常 import
 
+
+### Requirement: Codex 根目錄統一隔離
+
+`isolated_home` MUST 無條件把 `AGORA_CODEX_HOME` 指到測試的暫存目錄，並清掉外部 `CODEX_HOME`。測試 MUST NOT 讀寫真的 `~/.codex`。
+
+#### Scenario: 外部環境已有 CODEX_HOME
+- **WHEN** unit 或 integration 測試開始
+- **THEN** `AGORA_CODEX_HOME` 位於該測試的暫存目錄，且 `CODEX_HOME` 不在環境裡

@@ -124,6 +124,8 @@ def isolated_home(tmp_path, monkeypatch, request):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("AGORA_CLAUDE_HOME", str(home))
+    monkeypatch.setenv("AGORA_CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setenv("AGORA_CONFIG", str(tmp_path / "config"))
     monkeypatch.setenv("AGORA_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("AGORA_STATE_DIR", str(tmp_path / "state"))

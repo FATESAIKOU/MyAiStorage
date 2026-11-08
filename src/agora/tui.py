@@ -48,7 +48,7 @@ COLUMNS = {"agora": ("id", "標題", "agent", "更新", "雲端"),
            "import": ("id", "標題", "agent", "更新", "目錄")}
 CLOUD_YES, CLOUD_NO, CLOUD_NEW = "✓", "✗", "未上傳"
 TITLE_MAX = 36                   # the title column is cut here, so the others stay on screen
-AGENT_STYLE = {"opencode": "cyan", "claude": "#ff8700", "agy": "#5fafff", "merge": "green"}
+AGENT_STYLE = {"opencode": "cyan", "claude": "#ff8700", "agy": "#5fafff", "codex": "magenta", "merge": "green"}
 #: The key bar, per tab and side (spec「按鍵」): what a key does here, and only here.
 KEYS = {
     "list": {

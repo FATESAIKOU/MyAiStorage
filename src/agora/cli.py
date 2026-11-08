@@ -44,12 +44,13 @@ from agora.continue_shell import (CONTINUE_LOG, RoundChildDead, StartChildDead, 
                                   _reap_group, _round_child, _round_timeout, _start_child,
                                   _start_payload)
 from agora.errors import InputError
+from agora.agents.codex import CODEX_CONTINUE_LATER, CODEX_MERGE_LATER
 from agora.agents.agy import AGY_CROSS_AGENT, AGY_HEADLESS_LATER, AGY_READ_ONLY
 from agora.agents.opencode import CONFIG_CONTENT_ENV, merge_config_content
 from agora.agents.base import (NO_REPLY, Agent, AgentError, Exported, Launch, collect_increment, merge_turns,
                                reading, reading_of, turns_of, env_seconds)
 
-AGENTS = ("opencode", "claude", "agy")
+AGENTS = ("opencode", "claude", "agy", "codex")
 TYPES = ("session",)
 EXIT_INPUT = 1       # cannot be done: unknown id, nothing to import, too few ids, no --yes, has children
 EXIT_ERROR = 2       # header, Drive, agent or unexpected error (argparse usage errors are 2 too)
@@ -64,7 +65,7 @@ EXIT_AGENT_FAILED = 5  # `continue`'s agent child died (#76); stderr has `agora-
 #: interactive alike).
 AGENT_FAILED_IGNORED = (130, 143, -2, -15)
 DESCRIPTION_MAX = 80
-ACTOR = {"opencode": "opencode", "claude": "claude-code", "agy": "agy"}   # OKF actor prefix per agent
+ACTOR = {"opencode": "opencode", "claude": "claude-code", "agy": "agy", "codex": "codex"}   # OKF actor prefix per agent
 SYNC_PERIOD_MINUTES = 5.0   # --sync-period when the user does not give one
 SYNC_MINIMUM_SECONDS = 0.1  # a floor, so a tiny period cannot turn the wait into a write loop
 LOG_MAX = 1 << 20         # the same ceiling upload.log has (design「不弄亂 agent 的畫面」P15)
@@ -812,8 +813,10 @@ def _render(sections: list[dict], level: int = 3) -> list[str]:
 
 def cmd_merge(args, paths: store.Paths) -> int:
     if not args.agent:
-        raise InputError("merge 要給 --agent opencode|claude（由誰來寫要約；agy 第一版不支援）")
+        raise InputError("merge 要給 --agent opencode|claude（由誰來寫要約；agy／codex 第一版不支援）")
     agent = load_agent(args.agent)
+    if agent.name == "codex":
+        raise InputError(CODEX_MERGE_LATER)
     if agent.name == "agy":
         # Refused here, before a sync/read/summarize, so the refusal cannot be
         # mistaken for a model answering badly and retried three times.
@@ -2204,10 +2207,13 @@ def _load_for_launch(paths: store.Paths, state: dict) -> dict:
 
 
 def cmd_continue(args, paths: store.Paths) -> int:
-    private_tmp.sweep(paths.state)   # #116: before a round/export of this run, not during one
     if not args.agent:
-        raise InputError("continue 要給 --agent opencode|claude|agy")
+        private_tmp.sweep(paths.state)   # preserve cleanup for a refused, missing target
+        raise InputError("continue 要給 --agent opencode|claude|agy（codex 第一版只支援 import／讀取）")
     agent = load_agent(args.agent)
+    if agent.name == "codex":
+        raise InputError(CODEX_CONTINUE_LATER)
+    private_tmp.sweep(paths.state)   # #116: before a round/export of this run, not during one
     if agent.name == "agy":
         # Same-agent interactive continue is PR2b; the rest of the flavours
         # still stop here, before a sync or any agent half starts - the
@@ -2974,7 +2980,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent", choices=AGENTS,
                    help="import：來源的 agent；merge：誰寫要約；continue：用哪個 agent 接"
                         "（agy 支援同 agent 的互動接續；fork／headless／跨 agent／merge 為後續；"
-                        "全文搜尋只搜標題＋preview，不搜內文）")
+                        "全文搜尋只搜標題＋preview，不搜內文；codex 第一版只支援 import／讀取，接續請用 claude 或 opencode）")
     p.add_argument("--filter", action="append", default=[], help="search：KEY=VALUE（全等）或 KEY~=TEXT（包含）")
     p.add_argument("--header", action="append", default=[], help="KEY=VALUE；KEY 可以用點路徑，VALUE 用 YAML 解析")
     p.add_argument("--header-file", help="YAML 標頭檔，先套用，再套 --header")
