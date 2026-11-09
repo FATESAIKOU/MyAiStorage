@@ -612,7 +612,7 @@ def _content_turn_count(turns: list[tuple[str, list[str]]]) -> int:
 def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Paths,
                 index: store.Index, add_tags: "list[str] | None" = None, *,
                 as_new: bool = False) -> int:
-    """One import. Unchanged content and no --header is a no-op that just
+    """One import. Unchanged content with no header or tag changes is a no-op that just
     prints the same id (R4: a re-run after Ctrl-C skips what is done).
 
     The caller syncs once and passes the index in (review S1-3); _save keeps
@@ -660,7 +660,9 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
                 f"agora:{existing[0]}；不會原地更新它，也不會分支。要重新匯入成新的 Session 請用 "
                 f"agora import … --as-new；舊的留著（閱讀版可讀）或自己 delete")
         unchanged = (h.agora_of(old).get("raw") or {}).get("md5") == new_md5
-        if unchanged and not updates and not add_tags:
+        tagged = dict(old)
+        _add_tags(tagged, add_tags)
+        if unchanged and not updates and tagged == old:
             print(f"agora:{existing[0]}")
             return 0
         if unchanged or not _branched(index, existing[0]):
