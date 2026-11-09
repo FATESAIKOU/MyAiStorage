@@ -140,6 +140,16 @@ PM_V5_NEW_SENTENCES = (
 #: `KEY_SENTENCE_CASES` - `findings_for` applies just `PM_V5_NEW_SENTENCES`
 #: (the v1／v3／comm rows already cover the older lists for v5).
 PM_V5_KEY_SENTENCES = PM_V4_KEY_SENTENCES + PM_V5_NEW_SENTENCES
+
+# #448: only worker-team pm v6 onward requires merge evidence.
+PM_V6_NEW_SENTENCES = (
+    'PR 內文第一行寫「作者：<provider/model>。…」。',
+    'PR 留言第一行寫「審查：<provider/model> 結論：可以 merge（head <前 7 碼>）」，要修就寫要修；不能只留在團隊目錄或訊息裡。',
+    'head 變了（含 rebase、補 CI 登記 commit），要再有一則對準新 head 的審查留言。',
+    'merge 前確認作者行與審查留言兩行都在、審查對準目前 head、CI 綠。',
+)
+PM_V6_KEY_SENTENCES = PM_V5_KEY_SENTENCES + PM_V6_NEW_SENTENCES
+
 #: The sentence every `pm` version must keep (judge or dont).
 REVIEW_BY_NON_AUTHOR = "審查一律非作者"
 
@@ -493,6 +503,7 @@ PMO_REL = "atelier/pmo/pm/v1.md"
 PM_V3_REL = "atelier/worker-team/pm/v3.md"
 PM_V4_REL = "atelier/worker-team/pm/v4.md"
 PM_V5_REL = "atelier/worker-team/pm/v5.md"
+PM_V6_REL = "atelier/worker-team/pm/v6.md"
 IMPL_V2_REL = "atelier/worker-team/impl/v2.md"
 REV_V2_REL = "atelier/worker-team/rev/v2.md"
 IMPL_V3_REL = "atelier/worker-team/impl/v3.md"
@@ -699,6 +710,8 @@ def findings_for(path: str, text: str) -> Findings:
     # append-only and not bound by them.
     pm_version_5_or_later = team == "worker-team" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 5
+    pm_version_6_or_later = team == "worker-team" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) >= 6
     pmo_version_4_or_later = team == "pmo" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 4
     # The H4 trigger sentence is version-bound (see its list above): v3 and v4
@@ -746,6 +759,7 @@ def findings_for(path: str, text: str) -> Findings:
             (pmo_version_3_to_4, PMO_V3_TO_4_GROUP_SENTENCES, "v3、v4 的 pmo pm"),
             (pm_version_3_or_later, PM_V3_KEY_SENTENCES, "v3 起的 worker-team pm"),
             (pm_version_5_or_later, PM_V5_NEW_SENTENCES, "v5 起的 worker-team pm"),
+            (pm_version_6_or_later, PM_V6_NEW_SENTENCES, "v6 起的 worker-team pm"),
             (pmo_version_4_or_later, PMO_V4_KEY_SENTENCES, "v4 起的 pmo pm"),
             (pmo_version_5, PMO_V5_KEY_SENTENCES, "v5 的 pmo pm"),
             (pmo_version_6_or_later, PMO_V6_KEY_SENTENCES, "v6 起的 pmo pm"),
@@ -1049,6 +1063,7 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     + [(PMO_V7_REL, sentence, "關鍵句") for sentence in PMO_V7_KEY_SENTENCES]
     + [(PM_V4_REL, sentence, "關鍵句") for sentence in PM_V4_KEY_SENTENCES]
     + [(PM_V5_REL, sentence, "關鍵句") for sentence in PM_V5_KEY_SENTENCES]
+    + [(PM_V6_REL, sentence, "關鍵句") for sentence in PM_V6_KEY_SENTENCES]
     + [(IMPL_V2_REL, sentence, "關鍵句") for sentence in IMPL_V2_KEY_SENTENCES]
     + [(REV_V2_REL, sentence, "關鍵句") for sentence in REV_V2_KEY_SENTENCES]
     + [(IMPL_V3_REL, sentence, "關鍵句") for sentence in IMPL_V3_KEY_SENTENCES]
@@ -1666,3 +1681,28 @@ def test_older_versions_are_not_bound_by_the_comm_rule():
         assert COMM_SENTENCE not in text
         found = findings_for(rel, text)
         assert not found.errors, found.errors
+
+
+def test_pm_v5_is_not_bound_by_the_merge_evidence_sentences():
+    text = (REPO / PM_V5_REL).read_text(encoding="utf-8")
+    for sentence in PM_V6_NEW_SENTENCES:
+        assert sentence not in text
+    assert not findings_for(PM_V5_REL, text).errors
+
+
+def test_pm_v6_is_latest_and_has_matching_version_flags():
+    paths = list((HARNESS_ROOT / "worker-team/pm").glob("v*.md"))
+    assert max(paths, key=lambda p: int(p.stem[1:])).name == "v6.md"
+    text = (REPO / PM_V6_REL).read_text(encoding="utf-8")
+    assert "id: atelier:worker-team-pm@v6\n" in text
+    assert "version: v6\n" in text
+    assert "# PM（v6）\n" in text
+    assert not findings_for(PM_V6_REL, text).errors
+
+
+@pytest.mark.parametrize("old,new", [("@v6", "@v5"), ("version: v6", "version: v5")])
+def test_pm_v6_wrong_version_flags_are_flagged(tmp_path, old, new):
+    text = (REPO / PM_V6_REL).read_text(encoding="utf-8")
+    copy = tmp_path / "v6.md"
+    copy.write_text(text.replace(old, new, 1), encoding="utf-8")
+    assert findings_for(PM_V6_REL, copy.read_text(encoding="utf-8")).errors
