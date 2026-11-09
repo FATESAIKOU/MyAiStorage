@@ -276,6 +276,8 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 
 ### 5.2 import
 
+- raw md5 相同、沒有其他 header updates，且 `--add-tag` 去重後無變化時，import 只印既有 agora id 並回 0，不寫 header、不刷新 `updated_at`、不存檔或上傳（#449）。
+
 - `--agent opencode`：`opencode export <id> > 檔案`，stderr 另外導走、**不能 `2>&1`**。檢查 JSON 能解析、message 數大於 0（S10）。`agora.source.dir` 取 `info.directory`（N9）。
 - `--agent claude`：`~/.claude/projects/*/<id>.jsonl` 加上 `<id>/` 附屬資料夾（S9）；最後一行不完整就丟掉並警告（S10）。`agora.source.dir` 取 jsonl 的 `cwd`（N9）。
 - `--agent agy`（#26 PR1／PR2b）：`$AGORA_AGY_HOME`（預設 `~/.gemini/antigravity-cli`）下的 `conversations/<id>.db`；閒置（沒有 `-wal`）就複製單檔用 `immutable=1` 開，有 `-wal` 就複製 db＋wal（不複製 `-shm`）、在暫存目錄重放再 `VACUUM INTO`，前後比 `(size, mtime_ns)`、最多重試 3 次（複製途中檔案消失也算競態，重試），`quick_check` 與 summaries 的 `step_count` 交叉比對（不符只警告）。raw 是 JSON 信封＋整包 db 的 base64（4.1）。`scan_text` 是**獨立於閱讀版**的掃描明文：遞迴走每個 `steps` 列的 `step_payload`／`render_info`／`metadata` 的所有 length-delimited 欄位，能 UTF-8 解碼且 ≥ 4 bytes 的字串全收（不截斷、去重、保序），所以**工具輸出在 `scan_text` 裡是完整的**；`gen_metadata`／`executor_metadata`／`trajectory_metadata_blob` 是設定與系統提示，不在 `scan_text`（它們只在 `db_b64` 裡；這是已知的掃描缺口，repo 內也沒有掃描實作，掃描在 PM／MyPMO 流程）。`scan_text` 是 db 步驟內容的**明文**子集（`db_b64` 是 base64）：agora 自己不索引 raw，但任何對 raw 檔做全文處理的流程會直接看到這些明文。閱讀版**不含工具結果**（design 4.4）：只有 14／15 的文字與 15 的工具呼叫行；132 是已認得、無閱讀文字，不產生 turn、也不是 `[skip]`。`agora.source.dir` 取 `conversation_summaries.db` 的 `workspace_uris`（第一筆，去掉 `file://`）。`agent_version`、`created_at`、`model` 在 db 裡沒有已確認的欄位，第一版留空（docs/agy-storage.md §10）。
