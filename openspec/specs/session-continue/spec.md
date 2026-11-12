@@ -102,7 +102,7 @@
 - **WHEN** `--sync-period -1` 或 `--sync-period abc`
 - **THEN** 不開 agent，exit 1，說明要給不小於 0 的分鐘數
 
-#### Scenario: 接續長期角色並保留 role tag
+#### Scenario: 接續並保留 role tag
 - **GIVEN** Session A 的 tags 包含 `role:R` 與其他使用者 tag
 - **WHEN** `agora continue session agora:A --agent claude|opencode --add-tag role:R` 一般接續並產生新內容（可跨 agent）
 - **THEN** MUST 寫回同一個 agora id，`source.agent` MUST 更新為目標 agent；原有 tags MUST 保留，`role:R` MUST 恰有一個
