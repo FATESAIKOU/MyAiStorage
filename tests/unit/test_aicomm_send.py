@@ -4,19 +4,21 @@ from __future__ import annotations
 
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
-import base64
 import http.client
 import json
 import os
 import re
-import shutil
 import socket
 import sys
+import time
+import urllib.error
 import urllib.parse
+from pathlib import Path
 
 import pytest
 
-from _aicomm_fakes import FAKE_ID, WAKE_TEXT, RawSidecar, run_aicomm
+from aicomm import sidecar_link
+from _aicomm_fakes import FAKE_ID, WAKE_TEXT, LinkDir, RawSidecar, run_aicomm
 from _aicomm_fakes import aicomm_world as world  # noqa: F401  (the fixture)
 
 BODY = "請看這份草稿 SECRET-BODY-TEXT"
@@ -612,7 +614,7 @@ def test_an_http_proxy_in_the_environment_is_never_used_for_the_sidecar(world, m
 
 # --- #368 PR-1: the `wake:` lines and `--require-wake` --------------------------------------
 # C-n refers to the contract list in the `aicomm-cross-machine-wake` change (tasks.md §1).
-# PR-1 implemented the local path; PR-2 adds the peer fallback below (`pool-peer`).
+# The local path came first; the cross-machine fallback is below (#457).
 # The one grammar every `wake:` line is checked against is `WAKE_406_RE` (#406 D-1, M-1).
 
 
@@ -911,684 +913,787 @@ def test_an_unexpected_error_in_the_wake_path_is_unknown_internal_error(world, m
     assert r.err == "wake: demo-pm-t1 unknown internal-error\n"
 
 
-# --- #368 PR-2: the peer fallback through `pool-peer` ----------------------------------------
-# A recipient that is not on the local sidecar is looked up on the other machines. The fake
-# `pool-peer` (in _aicomm_fakes) records every argv and answers from a scenario file, so a
-# test never runs a real `pool-peer` and never touches the network.
+# --- #457: the cross-machine fallback through the sidecar-link ports -------------------------
+# C-n below is the contract list of the `aicomm-direct-peer` change (design.md §3.9). The
+# local sidecar is asked first; only a 404, an unreachable sidecar or a lookup timeout sends
+# aicomm to the sidecar-link directory. `aicomm.sidecar_link` reads its two files (pure unit
+# tests first), and every listed port is then queried and poked directly over loopback HTTP
+# (FakeSidecar): no external command runs and no other machine is reached.
 
 
-def use_peer(world, find=None, calls=None):
-    """Point aicomm at the fake `pool-peer`, with this `find` answer and per-port `call` answers."""
-    world.use_fake_peer()
-    world.peers({"find": {"rc": 1} if find is None else find, "call": calls or {}})
+def woken(*ports):
+    """The woken code for these peer ports, ascending, as the `wake:` line spells it."""
+    return "peer:" + ",".join(str(port) for port in sorted(ports))
 
 
-def found(*pairs, rc=0, **extra):
-    """A `find` answer that reports these flat `port, state` pairs, as the JSON array."""
-    return {"rc": rc, "stdout": json.dumps(
-        [{"port": port, "agent": {"state": state}}
-         for port, state in zip(pairs[::2], pairs[1::2])]), **extra}
+def peer_records(*pairs):
+    """The `record=` entries for (peer, id) pairs, ascending by port."""
+    return ",".join(f"peer:{peer.port}/{record}"
+                    for peer, record in sorted(pairs, key=lambda pair: pair[0].port))
 
 
-def found_raw(stdout, rc=0, **extra):
-    return {"rc": rc, "stdout": stdout, **extra}
-
-
-def b64(data: bytes) -> str:
-    """The fake peer's `stdout_b64` value: raw bytes it prints, for not-UTF-8 answers."""
-    return base64.b64encode(data).decode("ascii")
-
-
-def called(status=None, body="", rc=0, **extra):
-    """A `call` answer: the HTTP status on the first line and the body after it."""
-    return {"rc": rc, "stdout": "" if status is None else f"{status}\n{body}\n", **extra}
+def free_port():
+    """A loopback port nobody listens on."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def dead_sidecar(world):
     """Point aicomm at a loopback port nobody listens on (the local sidecar is unreachable)."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        dead = s.getsockname()[1]
-    world.setenv("AICOMM_SIDECAR", f"http://127.0.0.1:{dead}")
+    world.setenv("AICOMM_SIDECAR", f"http://127.0.0.1:{free_port()}")
 
 
-def test_c4_without_a_pool_peer_a_missing_agent_is_peer_unavailable(world, monkeypatch, capsys):
-    # the fixture points AICOMM_POOL_PEER at a path that does not exist: no fallback at all
-    r = send(world, monkeypatch, capsys)  # the fake sidecar does not know the agent -> 404
+def stub_ports(monkeypatch, *ports):
+    """Make the sidecar-link reader hand cli exactly these ports, in this order."""
+    monkeypatch.setattr(sidecar_link, "read",
+                        lambda **kwargs: sidecar_link.Ports(tuple(ports)))
+
+
+def link_read(directory, *, local_port=8471, now=None, pid_alive=None, env=None, home=None):
+    """Read one link directory, with the clock and the pid check under the test's control."""
+    if env is None:
+        env = {"AICOMM_SIDECAR_LINK": str(directory)}
+    return sidecar_link.read(
+        local_port=local_port,
+        env=env,
+        home=home if home is not None else Path.home,
+        now=now if now is not None else time.time,
+        pid_alive=pid_alive if pid_alive is not None else (lambda pid: True),
+    )
+
+
+def link_read_at(directory, offset, **kwargs):
+    """Read with the clock pinned `offset` seconds after this heartbeat's mtime."""
+    mtime = (directory / "heartbeat").stat().st_mtime
+    return link_read(directory, now=lambda: mtime + offset, **kwargs)
+
+
+# --- C-1..C-9: the sidecar-link directory on its own (no HTTP, injected clock and pid) ------
+
+
+def test_c1_a_missing_heartbeat_is_unavailable(tmp_path):
+    link = LinkDir(tmp_path / "link")
+    link.fresh(5201)
+    link.no_beat()
+    assert link_read(link.root) == sidecar_link.Unusable(sidecar_link.UNAVAILABLE)
+
+
+def test_c1_a_heartbeat_that_is_not_a_regular_file_is_unavailable(tmp_path):
+    link = LinkDir(tmp_path / "link")
+    link.fresh(5201)
+    link.no_beat()
+    link.heartbeat.mkdir()  # a directory: readable as a path, not as a heartbeat
+    assert link_read(link.root) == sidecar_link.Unusable(sidecar_link.UNAVAILABLE)
+
+
+def test_c2_the_window_is_the_ninety_seconds_the_interface_names():
+    # The numbers below are literal on purpose: a boundary test that read the constant
+    # would move with it and catch nothing. This pin is what keeps the two in step.
+    assert sidecar_link.LINK_FRESH_SECONDS == 90
+
+
+@pytest.mark.parametrize("offset,fresh", [
+    (-91, False), (-90, True), (-89, True),
+    (89, True), (90, True), (91, False), (300, False),
+], ids=["future-over", "future-edge", "future-inside",
+        "old-inside", "old-edge", "old-over", "old-far"])
+def test_c2_the_freshness_window_is_symmetrical(tmp_path, offset, fresh):
+    link = LinkDir(tmp_path / "link")
+    link.fresh(5201)
+    got = link_read_at(link.root, offset)
+    assert isinstance(got, sidecar_link.Ports) is fresh
+    if fresh:
+        assert got == sidecar_link.Ports((5201,))
+    else:
+        assert got == sidecar_link.Unusable(sidecar_link.UNAVAILABLE)
+
+
+@pytest.mark.parametrize("content", ["0", "-1", "12 34", "", "abc", "01", "2147483648"],
+                         ids=["zero", "negative", "two-numbers", "empty", "words", "leading-zero",
+                              "too-big"])
+def test_c3_a_bad_pid_is_unavailable_and_kill_is_never_called(tmp_path, content):
+    link = LinkDir(tmp_path / "link")
+    link.fresh(5201)
+    link.beat(content)
+    asked = []
+    got = link_read(link.root, pid_alive=lambda pid: asked.append(pid) or True)
+    assert got == sidecar_link.Unusable(sidecar_link.UNAVAILABLE)
+    assert asked == []  # 0 or 2147483648 must never reach os.kill
+
+
+def test_c3_a_padded_positive_pid_is_accepted(tmp_path):
+    link = LinkDir(tmp_path / "link")
+    link.fresh(5201)
+    link.beat(" 4242 \n")
+    asked = []
+    got = link_read(link.root, pid_alive=lambda pid: asked.append(pid) or True)
+    assert got == sidecar_link.Ports((5201,))
+    assert asked == [4242]
+
+
+@pytest.mark.parametrize("alive", [True, False], ids=["alive", "gone"])
+def test_c4_the_injected_pid_check_decides_whether_the_heartbeat_is_fresh(tmp_path, alive):
+    link = LinkDir(tmp_path / "link")
+    link.fresh(5201)
+    got = link_read(link.root, pid_alive=lambda pid: alive)
+    assert isinstance(got, sidecar_link.Ports) is alive
+
+
+@pytest.mark.parametrize("error,alive", [
+    (ProcessLookupError(), False),
+    (PermissionError(), True),
+    (OSError(), False),
+], ids=["gone", "no-permission", "other-os-error"])
+def test_c4_the_default_pid_check_reads_the_os_errors(monkeypatch, error, alive):
+    def kill(pid, signal):
+        assert pid == 4242 and signal == 0
+        raise error
+
+    monkeypatch.setattr(sidecar_link.os, "kill", kill)
+    assert sidecar_link._pid_alive(4242) is alive
+
+
+def test_c5_a_missing_ports_file_is_unavailable(tmp_path):
+    link = LinkDir(tmp_path / "link")
+    link.fresh(5201)
+    link.no_ports()
+    assert link_read(link.root) == sidecar_link.Unusable(sidecar_link.UNAVAILABLE)
+
+
+@pytest.mark.parametrize("data,kind", [
+    (b"\xff\xfe not utf-8", sidecar_link.BAD_FORMAT),
+    (b"5201\n\n5202\n", sidecar_link.BAD_FORMAT),
+    (b"52x1\n", sidecar_link.BAD_FORMAT),
+    (b"123456\n", sidecar_link.BAD_FORMAT),  # six digits: not a port line at all
+    (b" 5201\n", sidecar_link.BAD_FORMAT),
+    (b"5201 5202\n", sidecar_link.BAD_FORMAT),
+    (b"\n", sidecar_link.UNAVAILABLE),  # one trailing newline, nothing else: empty list
+    (b"", sidecar_link.UNAVAILABLE),
+], ids=["not-utf8", "blank-line", "words", "six-digits", "leading-space", "two-on-a-line",
+        "only-newline", "empty"])
+def test_c6_a_ports_file_that_cannot_be_read(tmp_path, data, kind):
+    link = LinkDir(tmp_path / "link")
+    link.fresh()
+    link.ports_bytes(data)
+    assert link_read(link.root) == sidecar_link.Unusable(kind)
+
+
+@pytest.mark.parametrize("data,kind", [
+    (b"0\n", sidecar_link.OUT_OF_RANGE),
+    (b"65536\n", sidecar_link.OUT_OF_RANGE),
+    (b"70000\n", sidecar_link.OUT_OF_RANGE),
+    (b"99999\n", sidecar_link.OUT_OF_RANGE),
+], ids=["zero", "65536", "70000", "99999"])
+def test_c7_a_port_outside_one_to_65535_is_out_of_range(tmp_path, data, kind):
+    link = LinkDir(tmp_path / "link")
+    link.fresh()
+    link.ports_bytes(data)
+    assert link_read(link.root) == sidecar_link.Unusable(kind)
+
+
+def test_c7_the_edges_of_the_port_range_are_ports(tmp_path):
+    link = LinkDir(tmp_path / "link")
+    link.fresh()
+    link.ports_text(f"{sidecar_link.PORT_MIN}\n{sidecar_link.PORT_MAX}\n")
+    assert link_read(link.root) == sidecar_link.Ports(
+        (sidecar_link.PORT_MIN, sidecar_link.PORT_MAX))
+
+
+def test_c6_the_first_bad_line_decides_which_code(tmp_path):
+    link = LinkDir(tmp_path / "link")
+    link.fresh()
+    link.ports_text("5201\n0\n52x1\n")  # the out-of-range line comes first
+    assert link_read(link.root) == sidecar_link.Unusable(sidecar_link.OUT_OF_RANGE)
+    link.ports_text("5201\n52x1\n0\n")  # the broken shape comes first
+    assert link_read(link.root) == sidecar_link.Unusable(sidecar_link.BAD_FORMAT)
+
+
+def test_c8_a_repeated_port_is_one_port_and_the_result_is_ascending(tmp_path):
+    link = LinkDir(tmp_path / "link")
+    link.fresh()
+    link.ports_text("5300\n5201\n5300\n")
+    assert link_read(link.root) == sidecar_link.Ports((5201, 5300))
+
+
+def test_c8_the_callers_own_port_is_dropped(tmp_path):
+    link = LinkDir(tmp_path / "link")
+    link.fresh(5201, 8471, 5300)
+    assert link_read(link.root, local_port=8471) == sidecar_link.Ports((5201, 5300))
+
+
+def test_c8_only_the_callers_own_port_is_unavailable(tmp_path):
+    link = LinkDir(tmp_path / "link")
+    link.fresh(8471)
+    assert link_read(link.root, local_port=8471) == sidecar_link.Unusable(
+        sidecar_link.UNAVAILABLE)
+
+
+def test_c9_the_default_directory_is_under_home(tmp_path):
+    home = tmp_path / "home"
+    link = LinkDir(home / ".mylinuxpool" / "sidecar-link")
+    link.fresh(5201)
+    got = link_read(link.root, env={}, home=lambda: home)
+    assert got == sidecar_link.Ports((5201,))
+
+
+@pytest.mark.parametrize("value", ["", "link", "./link"], ids=["empty", "relative", "dotted"])
+def test_c9_an_empty_or_relative_hook_is_no_directory(tmp_path, value):
+    link = LinkDir(tmp_path / "link")
+    link.fresh(5201)
+    got = link_read(link.root, env={"AICOMM_SIDECAR_LINK": value})
+    assert got == sidecar_link.Unusable(sidecar_link.UNAVAILABLE)
+
+
+@pytest.mark.parametrize("error", [RuntimeError("no HOME"), OSError("unreadable")],
+                         ids=["runtime", "os"])
+def test_c9_a_home_that_cannot_be_read_is_no_directory(tmp_path, error):
+    def home():
+        raise error
+
+    got = link_read(tmp_path, env={}, home=home)
+    assert got == sidecar_link.Unusable(sidecar_link.UNAVAILABLE)
+
+
+# --- C-9..C-16: the cli's fallback against the fake link directory ---------------------------
+
+
+def test_c9_an_empty_port_list_is_peer_unavailable(world, monkeypatch, capsys):
+    # the fixture starts with a fresh heartbeat and no ports: nothing to try
+    r = send(world, monkeypatch, capsys)
     assert r.code == 0
     assert r.out.splitlines()[0] == FAKE_ID
     assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
-    assert world.peer_calls() == []
 
 
-def use_peer_from_path(world, bindir, monkeypatch):
-    """The PATH fallback, for real: no `AICOMM_POOL_PEER` and the fake peer on PATH.
-
-    Only reachable through a `pool-peer` wrapper aicomm must find with `shutil.which`;
-    the wrapper leaves a marker next to itself, so a test can prove the wrapper (not an
-    env hook) ran. Returns the marker path.
-    """
-    monkeypatch.delenv("AICOMM_POOL_PEER")
-    bindir.mkdir(parents=True, exist_ok=True)
-    marker = bindir / "path-peer-was-used"
-    wrapper = bindir / "pool-peer"
-    wrapper.write_text(
-        f'#!/bin/sh\necho fell-back > "{marker}"\n'
-        f'exec "{sys.executable}" "{world.fake_peer}" "$@"\n', encoding="utf-8")
-    wrapper.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
-    world.peers({"find": {"rc": 1}, "call": {}})
-    return marker
-
-
-def test_c4_without_the_hook_pool_peer_comes_from_path(world, tmp_path, monkeypatch, capsys):
-    from aicomm import cli
-
-    bindir = tmp_path / "path-bin"
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    marker = use_peer_from_path(world, bindir, monkeypatch)
-    world.peers({"find": found(5201, "idle"), "call": {"5201": called(200)}})
-    # running without the hook, aicomm must resolve the executable on PATH - the wrapper
-    assert cli._peer_executable() == str(bindir / "pool-peer")
-    r = send(world, monkeypatch, capsys)
-    assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 woken peer:5201\n"
-    assert marker.exists()  # the wrapper ran: the executable came from PATH, not a hook
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find", "call"]
-
-
-def test_c4_without_the_hook_and_nothing_on_path_the_peer_is_unavailable(world, tmp_path, monkeypatch, capsys):
-    # no hook, and PATH (the fake `angareion` dir only) has no `pool-peer`: nothing found,
-    # nothing run; here a worker without either setup still answers "not woken", cleanly.
-    # HOME is patched to tmp too (#392): a real `~/.mylinuxpool/bin/pool-peer` must not
-    # be picked up by the bindir fallback.
-    from aicomm import cli
-
-    monkeypatch.delenv("AICOMM_POOL_PEER")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    bindir = tmp_path / "path-bin"
-    bindir.mkdir()
-    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{tmp_path / 'bin'}")
-    assert cli._peer_executable() is None
+@pytest.mark.parametrize("break_link", ["no-heartbeat", "stale", "future", "dead-pid", "zero-pid",
+                                       "huge-pid", "words-pid", "no-ports", "empty-ports"],
+                         ids=["no-heartbeat", "old-mtime", "future-mtime", "dead-pid", "pid-0",
+                              "pid-2**31", "pid-words", "no-ports", "empty-ports"])
+def test_c9_a_link_that_cannot_be_used_is_peer_unavailable(world, monkeypatch, capsys, break_link):
+    peer = world.add_peer()
+    if break_link == "no-heartbeat":
+        world.link.no_beat()
+    elif break_link == "stale":
+        world.link.beat(age=91)  # just past the 90-second window the interface names
+    elif break_link == "future":
+        world.link.beat(age=-300)
+    elif break_link == "dead-pid":
+        world.link.beat(2147483647)  # passes the shape check, nothing answers os.kill
+    elif break_link == "zero-pid":
+        world.link.beat(0)
+    elif break_link == "huge-pid":
+        world.link.beat(2147483648)
+    elif break_link == "words-pid":
+        world.link.beat("not a pid")
+    elif break_link == "no-ports":
+        world.link.no_ports()
+    else:
+        world.link.ports_text("")
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
     assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
-    assert world.peer_calls() == []
+    assert peer.requests == []  # a link that is no use pokes nobody
 
 
-def use_peer_from_home_bin(world, home, monkeypatch, angareion_bin):
-    """The `~/.mylinuxpool/bin` fallback (#392), for real: no hook and nothing on PATH.
-
-    Like `use_peer_from_path`, but the wrapper sits in HOME's install bin; aicomm must
-    find it through the HOME fallback (not PATH), and the wrapper leaves a marker next
-    to itself to prove it (not an env hook) ran. Returns the marker path.
-    """
-    monkeypatch.delenv("AICOMM_POOL_PEER")
-    monkeypatch.setenv("HOME", str(home))
-    bindir = home / ".mylinuxpool" / "bin"
-    bindir.mkdir(parents=True, exist_ok=True)
-    marker = bindir / "bin-peer-was-used"
-    wrapper = bindir / "pool-peer"
-    wrapper.write_text(
-        f'#!/bin/sh\necho fell-back > "{marker}"\n'
-        f'exec "{sys.executable}" "{world.fake_peer}" "$@"\n', encoding="utf-8")
-    wrapper.chmod(0o755)
-    # PATH carries the fake `angareion` dir only - no `pool-peer` on it.
-    monkeypatch.setenv("PATH", str(angareion_bin))
-    world.peers({"find": found(5201, "idle"), "call": {}})
-    return marker
-
-
-def test_c4_without_the_hook_pool_peer_comes_from_home_bin(world, tmp_path, monkeypatch, capsys):
-    # #392: PATH has no `pool-peer`, but HOME's `~/.mylinuxpool/bin` does (the fake
-    # wrapper) - aicomm must resolve and run that one, and the send still walks through.
-    from aicomm import cli
-
-    home = tmp_path / "home"
-    marker = use_peer_from_home_bin(world, home, monkeypatch, tmp_path / "bin")
-    world.peers({"find": found(5201, "idle"), "call": {"5201": called(200)}})
-    assert shutil.which("pool-peer") is None
-    assert cli._peer_executable() == str(home / ".mylinuxpool" / "bin" / "pool-peer")
+@pytest.mark.parametrize("value", ["", "link"], ids=["empty", "relative"])
+def test_c9_a_hook_that_is_not_an_absolute_path_is_peer_unavailable(world, monkeypatch, capsys, value):
+    peer = world.add_peer()
+    world.setenv("AICOMM_SIDECAR_LINK", value)
     r = send(world, monkeypatch, capsys)
-    assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 woken peer:5201\n"
-    assert marker.exists()  # the wrapper ran: the executable came from HOME, not a hook
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find", "call"]
-
-
-def test_when_path_and_home_bin_have_a_peer_the_path_one_wins(world, tmp_path, monkeypatch, capsys):
-    # #392: both PATH and `~/.mylinuxpool/bin` carry a `pool-peer` - PATH wins, the bindir
-    # file is never run.
-    from aicomm import cli
-
-    home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
-    bindir = home / ".mylinuxpool" / "bin"
-    bindir.mkdir(parents=True)
-    bin_marker = bindir / "bin-peer-was-used"
-    bin_decoy = bindir / "pool-peer"
-    # The decoy must satisfy the `run_aicomm` guard - since #393 low-3 that guard wants a
-    # wrapper that really execs the fake, and a comment mention no longer passes - but a
-    # good run must never execute it: PATH's wrapper does the find/call, and the exec
-    # runs the fake with the scenario nailed to "nothing there", so a mistaken pick
-    # still answers find rc 1 and still leaves its marker - both turn this test red.
-    # (`exec env` is POSIX sh: the assignment is for the exec'd fake alone.)
-    dead_scenario = tmp_path / "no-such-scenario"
-    bin_decoy.write_text(
-        f'#!/bin/sh\necho used > "{bin_marker}"\n'
-        f'exec env FAKE_PEER_SCENARIO="{dead_scenario}" '
-        f'"{sys.executable}" "{world.fake_peer}" "$@"\n', encoding="utf-8")
-    bin_decoy.chmod(0o755)
-    path_marker = use_peer_from_path(world, tmp_path / "path-bin", monkeypatch)
-    world.peers({"find": found(5201, "idle"), "call": {"5201": called(200)}})
-    assert cli._peer_executable() == str(tmp_path / "path-bin" / "pool-peer")
-    r = send(world, monkeypatch, capsys)
-    assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 woken peer:5201\n"
-    assert path_marker.exists()
-    assert not bin_marker.exists()  # the bindir decoy stayed unused
-
-
-def test_when_the_home_bin_peer_is_not_executable_it_is_as_if_absent(world, tmp_path, monkeypatch, capsys):
-    # #392: a `~/.mylinuxpool/bin/pool-peer` without the exec bit does not count - no
-    # candidate at all, the send answers `peer-unavailable` as before.
-    from aicomm import cli
-
-    monkeypatch.delenv("AICOMM_POOL_PEER")
-    home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
-    bindir = home / ".mylinuxpool" / "bin"
-    bindir.mkdir(parents=True)
-    (bindir / "pool-peer").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    bindir.joinpath("pool-peer").chmod(0o644)
-    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}")
-    assert shutil.which("pool-peer") is None
-    assert cli._peer_executable() is None
-    r = send(world, monkeypatch, capsys)
-    assert r.code == 0
+    assert r.code == 0  # not a usage error: it is read after the message was delivered
     assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
-    assert world.peer_calls() == []
+    assert peer.requests == []
 
 
-def test_when_path_home_fails_the_peer_is_unavailable(world, tmp_path, monkeypatch, capsys):
-    # #394: `Path.home()` can raise RuntimeError (no HOME and no passwd entry for the
-    # uid) - the bindir fallback must treat that as "no install dir", not die: the send
-    # answers `peer-unavailable`, never an internal error.
-    from aicomm import cli
-
-    monkeypatch.delenv("AICOMM_POOL_PEER")
-    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
-    assert shutil.which("pool-peer") is None
-
-    def broken_home():
-        raise RuntimeError("HOME not set, and no passwd entry for the uid")
-
-    monkeypatch.setattr(cli.Path, "home", staticmethod(broken_home))
-    assert cli._peer_executable() is None
+def test_c10_every_port_says_404_is_not_found(world, monkeypatch, capsys):
+    a = world.add_peer(name=None)
+    b = world.add_peer(name=None)
     r = send(world, monkeypatch, capsys)
-    assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
-    assert world.peer_calls() == []
-
-
-def test_the_hook_wins_over_path(world, tmp_path, monkeypatch, capsys):
-    bindir = tmp_path / "path-bin"
-    bindir.mkdir()
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    marker = tmp_path / "path-peer-was-used"
-    decoy = bindir / "pool-peer"
-    decoy.write_text(f'#!/bin/sh\necho used > "{marker}"\nexit 1\n', encoding="utf-8")
-    decoy.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
-    r = send(world, monkeypatch, capsys)
-    assert r.err == "wake: demo-pm-t1 woken peer:5201\n"
-    assert not marker.exists()
-
-
-def test_c5_find_rc_1_is_not_found(world, monkeypatch, capsys):
-    use_peer(world, {"rc": 1, "stdout": "[]\n"})
-    r = send(world, monkeypatch, capsys)
-    assert r.code == 0
     assert r.err == "wake: demo-pm-t1 not-woken not-found\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find"]
+    assert [q["method"] for q in a.requests] == ["GET"]
+    assert [q["method"] for q in b.requests] == ["GET"]
 
 
-def test_c6_find_rc_3_is_lookup_incomplete_and_calls_nobody(world, monkeypatch, capsys):
-    use_peer(world, {"rc": 3, "stdout": "[]\n"})
+def test_c10_one_port_that_cannot_be_asked_is_lookup_incomplete(world, monkeypatch, capsys):
+    peer = world.add_peer(name=None)
+    world.link.fresh(peer.port, free_port())  # the second port has no listener
     r = send(world, monkeypatch, capsys)
-    assert r.code == 0
     assert r.err == "wake: demo-pm-t1 not-woken lookup-incomplete\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find"]
+    assert peer.pokes() == []
 
 
-def test_c7_find_rc_2_is_peer_unavailable(world, monkeypatch, capsys):
-    use_peer(world, {"rc": 2, "stdout": "", "stderr": "pool-peer: gateway down\n"})
-    r = send(world, monkeypatch, capsys)
-    assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
-
-
-@pytest.mark.parametrize("rc", [4, 42, 255])
-def test_find_with_an_rc_outside_the_contract_is_peer_bad_answer(world, monkeypatch, capsys, rc):
-    use_peer(world, {"rc": rc, "stdout": "[]\n"})
+def test_c10_a_200_whose_body_cannot_be_read_is_peer_bad_answer(world, monkeypatch, capsys):
+    peer = world.add_peer()
+    peer.raw["demo-pm-t1"] = (200, b"not json")
     r = send(world, monkeypatch, capsys)
     assert r.err == "wake: demo-pm-t1 not-woken peer-bad-answer\n"
+    assert peer.pokes() == []
 
 
-def test_c34_a_find_that_cannot_be_started_is_peer_unavailable(world, tmp_path, monkeypatch, capsys):
-    # a directory is not executable: subprocess raises OSError before anything runs
-    world.setenv("AICOMM_POOL_PEER", str(tmp_path))
+def test_c10_a_200_body_too_deep_to_read_is_peer_bad_answer(world, monkeypatch, capsys):
+    peer = world.add_peer()
+    peer.raw["demo-pm-t1"] = (200, DEEP_BODY)
     r = send(world, monkeypatch, capsys)
-    assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
-
-
-@pytest.mark.parametrize("stdout", [
-    "not json\n",
-    "{}\n",
-    '"idle"\n',
-    "null\n",
-    "[]\n",
-    '[1, null, "x", []]\n',
-    '[{"port": "5201", "agent": {"state": "idle"}}]\n',
-    '[{"port": 5201}]\n',
-    '[{"port": 5201, "agent": {}}]\n',
-    '[{"port": 5201, "agent": {"state": 7}}]\n',
-    '[{"port": true, "agent": {"state": "idle"}}]\n',
-    '[{"port": 5201.5, "agent": {"state": "idle"}}]\n',
-], ids=["text", "object", "string", "null", "empty", "no-objects", "string-port", "no-agent",
-        "no-state", "int-state", "bool-port", "float-port"])
-def test_c11_a_find_answer_that_cannot_be_read_is_peer_bad_answer(world, monkeypatch, capsys, stdout):
-    use_peer(world, found_raw(stdout))
-    r = send(world, monkeypatch, capsys)
-    assert r.code == 0
     assert r.err == "wake: demo-pm-t1 not-woken peer-bad-answer\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find"]  # nothing was poked
+    assert peer.pokes() == []
 
 
-def test_a_find_answer_in_bytes_that_are_not_utf8_is_peer_bad_answer(world, monkeypatch, capsys):
-    # the answer cannot be decoded at all: still an ordinary unreadable answer, nothing
-    # was poked yet, so nobody is left "possibly pinged" (`not-woken`, never `unknown`)
-    use_peer(world, {"rc": 0, "stdout_b64": b64(b"\xff\xfe not \x80 utf-8")})
+@pytest.mark.parametrize("status", [500, 403, 201, 204], ids=["500", "403", "201", "204"])
+def test_c10_another_status_is_as_good_as_no_answer(world, monkeypatch, capsys, status):
+    peer = world.add_peer()
+    peer.raw["demo-pm-t1"] = (status, b"{}")
     r = send(world, monkeypatch, capsys)
-    assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 not-woken peer-bad-answer\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find"]  # nothing was poked
+    assert r.err == "wake: demo-pm-t1 not-woken lookup-incomplete\n"
+    assert peer.pokes() == []
+
+
+def test_c10_one_port_is_poked_and_the_other_answers_404(world, monkeypatch, capsys):
+    absent = world.add_peer(name=None)
+    peer = world.add_peer()
+    r = send(world, monkeypatch, capsys)
+    assert r.err == f"wake: demo-pm-t1 woken {woken(peer.port)}\n"
+    assert absent.pokes() == []
 
 
 def test_c8_one_peer_is_poked_with_the_local_pokes_body(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "idle"), {"5201": called(200, '{"ok": true}')})
+    peer = world.add_peer()
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 woken peer:5201\n"
-    find_call, poke_call = world.peer_calls()
-    assert find_call["argv"] == ["find", "demo-pm-t1", "--json", "--timeout", "10"]
-    assert poke_call["argv"] == ["call", "5201", "POST", "/agents/demo-pm-t1/poke", "--timeout", "5"]
-    assert json.loads(poke_call["stdin"]) == {"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": FAKE_ID}
-    assert world.sidecar.pokes() == []  # only the fake `pool-peer` was asked to poke
+    assert r.err == f"wake: demo-pm-t1 woken {woken(peer.port)}\n"
+    assert peer.pokes() == [
+        {"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": FAKE_ID}]
+    assert world.sidecar.pokes() == []  # only the peer sidecar was poked
 
 
-def test_each_recipient_is_looked_up_on_its_own(world, monkeypatch, capsys):
-    world.use_fake_peer()
-    world.peers({"find": {"by_id": {
-        "demo-pm-t1": found(5201, "idle"),
-        "demo-arch-t1": {"rc": 1, "stdout": "[]\n"},
-    }}, "call": {"5201": called(200)}})
-    r = send(world, monkeypatch, capsys, "--mention", "demo-arch-t1")
-    assert r.err == (
-        "wake: demo-pm-t1 woken peer:5201\n"
-        "wake: demo-arch-t1 not-woken not-found\n"
-    )
-    finds = [c["argv"][1] for c in world.peer_calls() if c["argv"][0] == "find"]
-    assert finds == ["demo-pm-t1", "demo-arch-t1"]  # one lookup per recipient, in order
-
-
-def test_the_poke_path_quotes_the_name(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+def test_c10_the_poke_path_quotes_the_name(world, monkeypatch, capsys):
+    peer = world.add_peer(name="demo pm/1")
     r = send(world, monkeypatch, capsys, to="demo pm/1")
     assert r.code == 0
-    find_call, poke_call = world.peer_calls()
-    assert find_call["argv"][1] == "demo pm/1"  # argv, one token, no quoting
-    assert poke_call["argv"][3] == f"/agents/{urllib.parse.quote('demo pm/1', safe='')}/poke"
+    quoted = urllib.parse.quote("demo pm/1", safe="")
+    assert [(q["method"], q["path"]) for q in peer.requests] == [
+        ("GET", f"/agents/{quoted}"), ("POST", f"/agents/{quoted}/poke")]
 
 
-def test_the_name_is_one_argv_token_and_never_a_shell_word(world, tmp_path, monkeypatch, capsys):
-    canary = tmp_path / "canary"
-    # A shell would split this into `<pool-peer> find demo-pm-t1` and `touch <canary>`.
-    name = f"demo-pm-t1; touch {canary} #"
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
-    r = send(world, monkeypatch, capsys, to=name)
-    assert r.code == 0
-    assert not canary.exists()  # argv, not a shell word: nothing after the ';' runs
-    find_call, _ = world.peer_calls()
-    assert find_call["argv"] == ["find", name, "--json", "--timeout", "10"]
+def test_c15_each_recipient_is_looked_up_on_its_own(world, monkeypatch, capsys):
+    a = world.add_peer(name="demo-a-t1")
+    b = world.add_peer(name="demo-b-t1")
+    r = send(world, monkeypatch, capsys, "--mention", "demo-b-t1", to="demo-a-t1")
+    assert r.err == (
+        f"wake: demo-a-t1 woken {woken(a.port)}\n"
+        f"wake: demo-b-t1 woken {woken(b.port)}\n"
+    )
+    # every port is asked about every recipient; only the one that has it is poked
+    assert [q["path"] for q in a.requests if q["method"] == "POST"] == ["/agents/demo-a-t1/poke"]
+    assert [q["path"] for q in b.requests if q["method"] == "POST"] == ["/agents/demo-b-t1/poke"]
+    for peer in (a, b):
+        assert [q["method"] for q in peer.requests].count("GET") == 2  # one per recipient
+        assert [q["method"] for q in peer.requests].count("POST") == 1
+
+
+def test_c15_every_recipient_rereads_the_link(world, monkeypatch, capsys):
+    first = world.add_peer(name="demo-a-t1")
+    second = world.add_peer(name="demo-b-t1")
+    world.link.fresh(first.port)
+    real_read = sidecar_link.read
+    seen = []
+
+    def read(**kwargs):
+        result = real_read(**kwargs)
+        seen.append(result)
+        world.link.fresh(second.port)  # the file changes between the two recipients
+        return result
+
+    monkeypatch.setattr(sidecar_link, "read", read)
+    r = send(world, monkeypatch, capsys, "--mention", "demo-b-t1", to="demo-a-t1")
+    assert r.err == (
+        f"wake: demo-a-t1 woken {woken(first.port)}\n"
+        f"wake: demo-b-t1 woken {woken(second.port)}\n"
+    )
+    assert len(seen) == 2  # once per recipient, no cache
+    assert second.pokes() == [
+        {"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": FAKE_ID}]
 
 
 def test_c15_a_sidecar_that_cannot_be_reached_still_looks_elsewhere(world, monkeypatch, capsys):
     dead_sidecar(world)
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    peer = world.add_peer()
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 woken peer:5201\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find", "call"]
+    assert r.err == f"wake: demo-pm-t1 woken {woken(peer.port)}\n"
+    assert [q["method"] for q in peer.requests] == ["GET", "POST"]
 
 
 @pytest.mark.parametrize("local", ["idle", "running", "exited", "500", "broken"],
                          ids=["idle", "running", "exited", "http-500", "bad-answer"])
-def test_c15_a_local_answer_never_sends_it_to_another_machine(world, monkeypatch, capsys, local):
+def test_c16_a_local_answer_never_asks_another_sidecar(world, monkeypatch, capsys, local):
     if local in ("idle", "running", "exited"):
         agent(world, state=local)
     else:
         world.sidecar.raw["demo-pm-t1"] = (500, b"{}") if local == "500" else (200, b"not json")
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    peer = world.add_peer()
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
-    assert world.peer_calls() == []  # the other machines are never asked
+    assert peer.requests == []
 
 
-def test_c16_a_local_poke_timeout_never_asks_pool_peer(world, monkeypatch, capsys):
+def test_c16_a_local_poke_timeout_never_asks_another_sidecar(world, monkeypatch, capsys):
     from aicomm import cli
 
     agent(world)
     monkeypatch.setattr(cli, "POKE_TIMEOUT", 0.3)
     world.sidecar.poke_delay = 2.0
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    peer = world.add_peer()
     r = send(world, monkeypatch, capsys)
     assert r.err == "wake: demo-pm-t1 unknown poke-timeout\n"
-    assert world.peer_calls() == []
+    assert peer.requests == []
 
 
-def test_c9_the_same_port_reported_twice_is_poked_once(world, monkeypatch, capsys):
-    use_peer(world, found_raw(json.dumps([
-        {"port": 5201, "agent": {"state": "idle"}},
-        {"port": 5201, "agent": {"state": "idle"}},
-    ])), {"5201": called(200)})
+def test_c16_every_peer_sees_only_the_two_routes(world, monkeypatch, capsys):
+    a = world.add_peer()
+    b = world.add_peer()
     r = send(world, monkeypatch, capsys)
-    assert r.err == "wake: demo-pm-t1 woken peer:5201\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find", "call"]
+    assert r.err == f"wake: demo-pm-t1 woken {woken(a.port, b.port)}\n"
+    for peer in (a, b):
+        assert [(q["method"], q["path"]) for q in peer.requests] == [
+            ("GET", "/agents/demo-pm-t1"), ("POST", "/agents/demo-pm-t1/poke")]
+        assert all("/pokes/" not in q["path"] for q in peer.requests)
 
 
-def test_c9_the_first_item_of_a_port_is_the_one_that_counts(world, monkeypatch, capsys):
-    use_peer(world, found_raw(json.dumps([
-        {"port": 5201, "agent": {"state": "exited"}},
-        {"port": 5201, "agent": {"state": "idle"}},
-    ])), {"5201": called(200)})
+def test_c16_a_pool_peer_on_path_is_never_run(world, tmp_path, monkeypatch, capsys):
+    marker = tmp_path / "pool-peer-ran"
+    bin_dir = tmp_path / "old-bin"
+    bin_dir.mkdir()
+    script = bin_dir / "pool-peer"
+    script.write_text(f'#!/bin/sh\ntouch "{marker}"\n', encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    world.link.no_beat()  # "cannot look": no reason to fall back to anything else either
     r = send(world, monkeypatch, capsys)
-    assert r.err == "wake: demo-pm-t1 not-woken state-exited\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find"]
+    assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
+    assert not marker.exists()
 
 
-def test_c9_every_pokeable_peer_is_poked_and_only_the_woken_ports_are_listed(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "idle", 5202, "idle"), {"5201": called(200), "5202": called(500)})
+def test_c9_the_same_port_listed_twice_is_looked_up_once(world, monkeypatch, capsys):
+    peer = world.add_peer()
+    world.link.ports_text(f"{peer.port}\n{peer.port}\n")
     r = send(world, monkeypatch, capsys)
-    assert r.err == "wake: demo-pm-t1 woken peer:5201\n"
-    pokes = [c["argv"][1] for c in world.peer_calls() if c["argv"][0] == "call"]
-    assert pokes == ["5201", "5202"]  # both were tried, in the order `find` listed them
+    assert r.err == f"wake: demo-pm-t1 woken {woken(peer.port)}\n"
+    assert [q["method"] for q in peer.requests] == ["GET", "POST"]
 
 
-def test_c9_the_woken_ports_are_listed_from_the_smallest(world, monkeypatch, capsys):
-    use_peer(world, found(5202, "idle", 5201, "idle"), {"5201": called(200), "5202": called(200)})
+def test_c8_the_local_sidecar_port_is_never_asked_again(world, monkeypatch, capsys):
+    peer = world.add_peer()
+    world.link.fresh(world.sidecar.port, peer.port)
     r = send(world, monkeypatch, capsys)
-    assert r.err == "wake: demo-pm-t1 woken peer:5201,5202\n"
+    assert r.err == f"wake: demo-pm-t1 woken {woken(peer.port)}\n"
+    assert [q["path"] for q in world.sidecar.requests] == ["/agents/demo-pm-t1"]
+
+
+def test_c8_a_list_with_only_the_local_port_is_peer_unavailable(world, monkeypatch, capsys):
+    world.link.fresh(world.sidecar.port)
+    r = send(world, monkeypatch, capsys)
+    assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
+
+
+@pytest.mark.parametrize("data,code", [
+    ("0\n", "peer-port-out-of-range"),
+    ("65536\n", "peer-port-out-of-range"),
+    ("123456\n", "peer-bad-answer"),  # six digits: a broken line, not a port
+    ("52x1\n", "peer-bad-answer"),
+    ("5201\n\n", "peer-bad-answer"),
+], ids=["zero", "65536", "six-digits", "words", "blank-line"])
+def test_c7_a_bad_port_line_is_reported_before_any_poke(world, monkeypatch, capsys, data, code):
+    peer = world.add_peer()
+    world.link.ports_text(data)
+    r = send(world, monkeypatch, capsys)
+    assert r.err == f"wake: demo-pm-t1 not-woken {code}\n"
+    assert peer.requests == []  # the whole list is dropped, not just the bad line
 
 
 @pytest.mark.parametrize("state", ["starting", "waiting-quota", "exited"])
-def test_c9_a_peer_in_another_state_is_not_poked(world, monkeypatch, capsys, state):
-    use_peer(world, found(5201, state), {"5201": called(200)})
+def test_c12_a_peer_in_another_state_is_not_poked(world, monkeypatch, capsys, state):
+    peer = world.add_peer(state=state)
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
     assert r.err == f"wake: demo-pm-t1 not-woken state-{state}\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find"]
+    assert [q["method"] for q in peer.requests] == ["GET"]
 
 
-def test_a_peer_state_that_is_not_one_token_is_a_peer_bad_answer(world, monkeypatch, capsys):
-    use_peer(world, found_raw(json.dumps([
-        {"port": 5201, "agent": {"state": "idle\nwake: demo-pm-t1 woken local"}},
-    ])), {"5201": called(200)})
+def test_c12_a_peer_state_that_is_not_one_token_is_peer_bad_answer(world, monkeypatch, capsys):
+    peer = world.add_peer()
+    peer.agents["demo-pm-t1"]["state"] = "idle\nwake: demo-pm-t1 woken local"
     r = send(world, monkeypatch, capsys)
     assert r.err == "wake: demo-pm-t1 not-woken peer-bad-answer\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find"]
+    assert [q["method"] for q in peer.requests] == ["GET"]
 
 
-@pytest.mark.parametrize("port", [5199, 5100, 5400, 0, 65535])
-def test_c10_a_port_outside_the_pool_range_is_never_called(world, monkeypatch, capsys, port):
-    use_peer(world, found(port, "idle"), {str(port): called(200)})
-    r = send(world, monkeypatch, capsys)
-    assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 not-woken peer-port-out-of-range\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find"]  # `call` was never run
-
-
-@pytest.mark.parametrize("port", [5200, 5399])
-def test_c10_the_edges_of_the_pool_range_are_called(world, monkeypatch, capsys, port):
-    use_peer(world, found(port, "idle"), {str(port): called(200)})
-    r = send(world, monkeypatch, capsys)
-    assert r.err == f"wake: demo-pm-t1 woken peer:{port}\n"
-
-
-def test_c27_each_peer_decides_its_own_interrupt(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "running", 5202, "idle"),
-             {"5201": called(200), "5202": called(200)})
+def test_c12_the_peers_own_interrupt_is_decided_per_sidecar(world, monkeypatch, capsys):
+    running = world.add_peer(state="running")
+    idle = world.add_peer(state="idle")
     r = send(world, monkeypatch, capsys, "--interrupt")
-    assert r.err == "wake: demo-pm-t1 woken peer:5201,5202 interrupt\n"
-    bodies = {c["argv"][1]: json.loads(c["stdin"]) for c in world.peer_calls() if c["argv"][0] == "call"}
+    assert r.err == f"wake: demo-pm-t1 woken {woken(running.port, idle.port)} interrupt\n"
+    bodies = {peer.port: peer.pokes()[0] for peer in (running, idle)}
     assert bodies == {
-        "5201": {"text": WAKE_TEXT, "interrupt": True, "via": "aicomm-peer", "ref": FAKE_ID},
-        "5202": {"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": FAKE_ID},
+        running.port: {"text": WAKE_TEXT, "interrupt": True, "via": "aicomm-peer", "ref": FAKE_ID},
+        idle.port: {"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": FAKE_ID},
     }
 
 
-def test_c27_a_peer_that_did_not_wake_does_not_add_interrupt(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "running", 5202, "idle"),
-             {"5201": called(500), "5202": called(200)})
+def test_c12_a_peer_that_did_not_wake_does_not_add_interrupt(world, monkeypatch, capsys):
+    failed = world.add_peer(state="running")
+    failed.poke_status = 500
+    won = world.add_peer(state="idle")
     r = send(world, monkeypatch, capsys, "--interrupt")
-    assert r.err == "wake: demo-pm-t1 woken peer:5202\n"
+    assert r.err == f"wake: demo-pm-t1 woken {woken(won.port)}\n"
 
 
-def test_c12_a_call_that_times_out_is_unknown_and_is_not_retried(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "idle"), {"5201": called(rc=3)})
+def test_c13_every_pokeable_peer_is_poked_and_only_the_woken_ones_are_listed(world, monkeypatch, capsys):
+    failed = world.add_peer()
+    failed.poke_status = 500
+    won = world.add_peer()
     r = send(world, monkeypatch, capsys)
-    assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 unknown poke-timeout\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find", "call"]  # one call, no resend
+    assert r.err == f"wake: demo-pm-t1 woken {woken(won.port)}\n"
+    assert [q["method"] for q in failed.requests] == ["GET", "POST"]  # both were tried
+    assert [q["method"] for q in won.requests] == ["GET", "POST"]
+
+
+def test_c13_the_woken_ports_are_listed_from_the_smallest(world, monkeypatch, capsys):
+    a = world.add_peer()
+    b = world.add_peer()
+    world.link.ports_list(b.port, a.port)  # file order is not the result order
+    r = send(world, monkeypatch, capsys)
+    assert r.err == f"wake: demo-pm-t1 woken {woken(a.port, b.port)}\n"
 
 
 @pytest.mark.parametrize("status,body,code", [
     (409, '{"code": "agent_awaiting_answer"}', "awaiting-answer"),
     (409, '{"error": "agent_awaiting_answer"}', "awaiting-answer"),
     (409, '{"code": "agent_not_running"}', "agent-not-running"),
-    (409, '{"error": "agent_not_running"}', "agent-not-running"),
     (409, '{"code": "something_else"}', "http-409"),
-    (409, '{"code": 7, "error": "agent_not_running"}', "agent-not-running"),
     (409, "not json", "http-409"),
     (500, "", "http-500"),
     (201, "", "http-201"),
-], ids=["code-awaiting", "error-awaiting", "code-not-running", "error-not-running",
-        "unknown-code", "code-not-a-string", "unreadable-409", "http-500", "http-201"])
-def test_c13_a_call_answer_is_read_with_the_local_pokes_table(world, monkeypatch, capsys, status, body, code):
-    use_peer(world, found(5201, "idle"), {"5201": called(status, body)})
+], ids=["code-awaiting", "error-awaiting", "code-not-running", "unknown-code",
+        "unreadable-409", "http-500", "http-201"])
+def test_c12_a_poke_answer_is_read_with_the_local_pokes_table(world, monkeypatch, capsys,
+                                                             status, body, code):
+    peer = world.add_peer()
+    peer.poke_status = status
+    peer.poke_body = body.encode("utf-8")
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
     assert r.err == f"wake: demo-pm-t1 not-woken {code}\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find", "call"]
+    assert len(peer.pokes()) == 1  # one poke, no resend
 
 
-@pytest.mark.parametrize("stdout", ["", "\n", "not a status\n{}", "2000\n{}", "OK\n{}", "20\n{}",
-                                    "200 OK\n{}"],
-                         ids=["empty", "blank", "words", "four-digits", "words-again", "two-digits",
-                              "status-with-words"])
-def test_c14_a_call_whose_first_line_is_not_a_status_is_unknown_peer_bad_answer(world, monkeypatch, capsys, stdout):
-    use_peer(world, found(5201, "idle"), {"5201": {"rc": 0, "stdout": stdout}})
-    r = send(world, monkeypatch, capsys)
-    assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 unknown peer-bad-answer\n"
-
-
-def test_c14_a_call_answer_in_bytes_that_are_not_utf8_is_unknown_peer_bad_answer(world, monkeypatch, capsys):
-    # same for bytes that cannot be decoded; the poke was already sent, so nobody may
-    # conclude "not woken" - `unknown` is still the only safe word here
-    use_peer(world, found(5201, "idle"), {"5201": {"rc": 0, "stdout_b64": b64(b"\xff\xfe 200")}})
-    r = send(world, monkeypatch, capsys)
-    assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 unknown peer-bad-answer\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find", "call"]  # one call, no resend
-
-
-@pytest.mark.parametrize("rc", [1, 4, 255])
-def test_c28_a_call_rc_outside_the_contract_is_unknown_peer_bad_answer(world, monkeypatch, capsys, rc):
-    use_peer(world, found(5201, "idle"), {"5201": called(rc=rc)})
-    r = send(world, monkeypatch, capsys)
-    assert r.err == "wake: demo-pm-t1 unknown peer-bad-answer\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find", "call"]
-
-
-def test_c36_a_call_that_cannot_connect_is_peer_unavailable(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "idle"), {"5201": called(rc=2)})
-    r = send(world, monkeypatch, capsys)
-    assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find", "call"]
-
-
-def test_c35_a_call_that_cannot_be_started_is_peer_unavailable(world, monkeypatch, capsys):
+def break_poke(monkeypatch, error):
+    """Make the peer poke raise `error`; every other request goes through as usual."""
     from aicomm import cli
 
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
-    real_run = cli._run_pool_peer
+    real = cli._request
 
-    def run(executable, args, stdin_text, limit):
-        if args[:1] == ["call"]:  # only the poke fails to start; `find` already answered
-            raise FileNotFoundError(executable)
-        return real_run(executable, args, stdin_text, limit)
+    def request(method, url, payload, timeout):
+        if method == "POST":
+            raise error
+        return real(method, url, payload, timeout)
 
-    monkeypatch.setattr(cli, "_run_pool_peer", run)
+    monkeypatch.setattr(cli, "_request", request)
+
+
+@pytest.mark.parametrize("error,kind,code", [
+    (ConnectionRefusedError("refused"), "not-woken", "peer-unavailable"),
+    (urllib.error.URLError(ConnectionRefusedError("refused")), "not-woken", "peer-unavailable"),
+    (ConnectionResetError("reset"), "unknown", "poke-error"),
+    (socket.timeout("slow"), "unknown", "poke-timeout"),
+    (http.client.BadStatusLine("broken"), "unknown", "peer-bad-answer"),
+], ids=["refused", "refused-in-urlerror", "reset", "timeout", "bad-status-line"])
+def test_c11_the_pokes_transport_result(world, monkeypatch, capsys, error, kind, code):
+    peer = world.add_peer()
+    break_poke(monkeypatch, error)
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find"]
+    assert r.err == f"wake: demo-pm-t1 {kind} {code}\n"
+    assert [q["method"] for q in peer.requests] == ["GET"]  # one attempt, no resend
 
 
-def test_c17_a_find_that_hangs_is_lookup_incomplete(world, monkeypatch, capsys):
+def test_c11_a_poke_that_cannot_connect_is_peer_unavailable(world, monkeypatch, capsys):
     from aicomm import cli
 
-    monkeypatch.setattr(cli, "_peer_child_limit", lambda seconds: 0.2)  # the real one is 12 s
-    use_peer(world, found(5201, "idle", delay=2))
+    peer = world.add_peer()
+    real = cli._request
+
+    def request(method, url, payload, timeout):
+        if method == "POST":
+            raise ConnectionRefusedError("refused")
+        return real(method, url, payload, timeout)
+
+    monkeypatch.setattr(cli, "_request", request)
     r = send(world, monkeypatch, capsys)
-    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
+    assert len(peer.requests) == 1
+
+
+def test_c14_a_stuck_port_uses_up_the_budget_and_the_rest_are_unasked(world, monkeypatch, capsys):
+    from aicomm import cli
+
+    stuck = world.add_peer(name=None)
+    stuck.get_delay = 2.0
+    later = world.add_peer()
+    stub_ports(monkeypatch, stuck.port, later.port)
+    monkeypatch.setattr(cli, "PEER_GET_TIMEOUT", 3.0)
+    monkeypatch.setattr(cli, "PEER_LOOKUP_BUDGET", 0.5)
+    r = send(world, monkeypatch, capsys)
     assert r.err == "wake: demo-pm-t1 not-woken lookup-incomplete\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find"]
+    assert later.requests == []  # the budget ran out before this one was asked
+    assert stuck.pokes() == []
 
 
-def test_c17_a_call_that_hangs_is_unknown_poke_timeout(world, monkeypatch, capsys):
+def test_c14_each_request_is_capped_by_what_is_left_of_the_budget(world, monkeypatch, capsys):
     from aicomm import cli
 
-    monkeypatch.setattr(cli, "_peer_child_limit", lambda seconds: 0.2)  # the real one is 7 s
-    use_peer(world, found(5201, "idle"), {"5201": called(200, delay=2)})
+    stuck = world.add_peer()
+    stuck.get_delay = 3.0
+    stub_ports(monkeypatch, stuck.port)
+    monkeypatch.setattr(cli, "PEER_GET_TIMEOUT", 3.0)
+    monkeypatch.setattr(cli, "PEER_LOOKUP_BUDGET", 0.4)
+    started = time.monotonic()
     r = send(world, monkeypatch, capsys)
-    assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 unknown poke-timeout\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find", "call"]
+    elapsed = time.monotonic() - started
+    assert r.err == "wake: demo-pm-t1 not-woken lookup-incomplete\n"
+    assert elapsed < 1.5  # cut at the remaining budget, not at the 3 s per-request cap
 
 
-def test_the_child_limit_is_the_given_timeout_plus_two_seconds():
+def test_c14_a_slow_port_that_answers_in_time_is_used(world, monkeypatch, capsys):
     from aicomm import cli
 
-    assert (cli.PEER_FIND_TIMEOUT, cli.PEER_CALL_TIMEOUT) == (10, 5)
-    assert cli._peer_child_limit(cli.PEER_FIND_TIMEOUT) == 12
-    assert cli._peer_child_limit(cli.PEER_CALL_TIMEOUT) == 7
+    peer = world.add_peer()
+    peer.get_delay = 0.2
+    monkeypatch.setattr(cli, "PEER_GET_TIMEOUT", 1.0)
+    r = send(world, monkeypatch, capsys)
+    assert r.err == f"wake: demo-pm-t1 woken {woken(peer.port)}\n"
+
+
+def test_c13_an_unknown_from_one_peer_beats_a_not_woken_from_another(world, monkeypatch, capsys):
+    from aicomm import cli
+
+    reset = world.add_peer()
+    awaiting = world.add_peer()
+    awaiting.poke_status = 409
+    awaiting.poke_body = b'{"code": "agent_awaiting_answer"}'
+    real = cli._request
+
+    def request(method, url, payload, timeout):
+        if method == "POST" and f":{reset.port}/" in url:
+            raise ConnectionResetError("reset")
+        return real(method, url, payload, timeout)
+
+    monkeypatch.setattr(cli, "_request", request)
+    r = send(world, monkeypatch, capsys)
+    assert r.err == "wake: demo-pm-t1 unknown poke-error\n"
+
+
+def test_c13_two_unknowns_take_the_lowest_ports_reason(world, monkeypatch, capsys):
+    first = world.add_peer()
+    second = world.add_peer()
+    from aicomm import cli
+
+    real = cli._request
+
+    def request(method, url, payload, timeout):
+        if method == "POST":
+            if f":{first.port}/" in url:
+                raise http.client.BadStatusLine("broken")
+            raise socket.timeout("slow")
+        return real(method, url, payload, timeout)
+
+    monkeypatch.setattr(cli, "_request", request)
+    r = send(world, monkeypatch, capsys)
+    low = min(first.port, second.port)
+    expected = "peer-bad-answer" if low == first.port else "poke-timeout"
+    assert r.err == f"wake: demo-pm-t1 unknown {expected}\n"
+
+
+def test_c13_two_not_woken_take_the_lowest_ports_reason(world, monkeypatch, capsys):
+    exited = world.add_peer(state="exited")
+    awaiting = world.add_peer(state="idle")
+    awaiting.poke_status = 409
+    awaiting.poke_body = b'{"code": "agent_awaiting_answer"}'
+    r = send(world, monkeypatch, capsys)
+    low = min(exited.port, awaiting.port)
+    expected = "state-exited" if low == exited.port else "awaiting-answer"
+    assert r.err == f"wake: demo-pm-t1 not-woken {expected}\n"
 
 
 def test_c18_a_peer_result_is_still_one_line_per_recipient(world, monkeypatch, capsys):
     agent(world, "demo-arch-t1", state="exited")
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    peer = world.add_peer()
     r = send(world, monkeypatch, capsys, "--mention", "demo-arch-t1")
     assert r.code == 0
     lines = r.err.splitlines()
     assert lines == [
-        "wake: demo-pm-t1 woken peer:5201",
+        f"wake: demo-pm-t1 woken {woken(peer.port)}",
         "wake: demo-arch-t1 not-woken state-exited",
     ]
     for line in lines:
         assert WAKE_406_RE.fullmatch(line), line
 
 
-@pytest.mark.parametrize("scenario,code", [
-    ({"rc": 2, "stdout": "SECRET-STDOUT", "stderr": "pool-peer: SECRET-DIAGNOSTIC\n"}, "peer-unavailable"),
-    ({"rc": 0, "stdout": "SECRET-STDOUT", "stderr": "pool-peer: SECRET-DIAGNOSTIC\n"}, "peer-bad-answer"),
-], ids=["rc-2", "rc-0-not-an-array"])
-def test_c18_the_pool_peers_output_never_reaches_the_wake_line(world, monkeypatch, capsys, scenario, code):
-    # A.4: the `wake:` line carries a reason code, never `pool-peer`'s own words.
-    use_peer(world, scenario)
+@pytest.mark.parametrize("state,expected", [
+    ("unreadable", "peer-bad-answer"),
+    ("http-500", "http-500"),
+], ids=["unreadable-200", "poke-500"])
+def test_c18_a_peer_answer_never_reaches_the_wake_line(world, monkeypatch, capsys, state, expected):
+    peer = world.add_peer()
+    if state == "unreadable":
+        peer.raw["demo-pm-t1"] = (200, b'SECRET-DIAGNOSTIC not json')
+        want = f"wake: demo-pm-t1 not-woken {expected}\n"
+    else:
+        peer.poke_status = 500
+        peer.poke_body = b'{"error": "SECRET-DIAGNOSTIC"}'
+        want = f"wake: demo-pm-t1 not-woken {expected}\n"
     r = send(world, monkeypatch, capsys)
-    assert r.err == f"wake: demo-pm-t1 not-woken {code}\n"
+    assert r.err == want
     assert "SECRET" not in r.err and "SECRET" not in r.out
 
 
-def test_c18_a_calls_own_output_never_reaches_the_wake_line(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "idle"),
-             {"5201": {"rc": 2, "stdout": "SECRET-STDOUT", "stderr": "pool-peer: SECRET-DIAGNOSTIC\n"}})
-    r = send(world, monkeypatch, capsys)
-    assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
-    assert "SECRET" not in r.err and "SECRET" not in r.out
-
-
-def test_c21_a_name_starting_with_a_dash_is_never_given_to_pool_peer(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+def test_c21_a_name_starting_with_a_dash_is_never_given_to_a_sidecar(world, monkeypatch, capsys):
+    peer = world.add_peer(name="-demo-pm-t1")
     # `--to=-name` so argparse takes it as the value and not as an option
     r = run_aicomm(["send", "--channel", "team-demo", "--to=-demo-pm-t1", "--body", BODY],
                    monkeypatch, capsys)
     assert r.code == 0
     assert r.err == "wake: -demo-pm-t1 not-woken bad-name\n"
-    assert world.peer_calls() == []
+    assert peer.requests == []
 
 
-@pytest.mark.parametrize("extra,to", [(("--no-wake",), "demo-pm-t1"), ((), None)], ids=["no-wake", "broadcast"])
-def test_c22_nobody_is_looked_up_on_another_machine_either(world, monkeypatch, capsys, extra, to):
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+@pytest.mark.parametrize("extra,to", [(("--no-wake",), "demo-pm-t1"), ((), None)],
+                         ids=["no-wake", "broadcast"])
+def test_c22_nobody_is_looked_up_when_waking_is_off(world, monkeypatch, capsys, extra, to):
+    peer = world.add_peer()
     r = send(world, monkeypatch, capsys, *extra, to=to)
     assert r.code == 0
-    assert world.peer_calls() == []
+    assert peer.requests == []
 
 
-def test_an_unknown_from_one_peer_beats_a_not_woken_from_another(world, monkeypatch, capsys):
-    use_peer(world, found(5202, "idle", 5201, "idle"),
-             {"5201": called(rc=3), "5202": called(500)})
-    r = send(world, monkeypatch, capsys)
-    assert r.err == "wake: demo-pm-t1 unknown poke-timeout\n"
-
-
-def test_two_unknowns_take_the_lowest_ports_reason(world, monkeypatch, capsys):
-    use_peer(world, found(5202, "idle", 5201, "idle"),
-             {"5201": called(rc=1), "5202": called(rc=3)})
-    r = send(world, monkeypatch, capsys)
-    assert r.err == "wake: demo-pm-t1 unknown peer-bad-answer\n"
-
-
-def test_two_not_woken_take_the_lowest_ports_reason(world, monkeypatch, capsys):
-    use_peer(world, found(5203, "idle", 5202, "exited"),
-             {"5203": called(409, '{"error": "agent_awaiting_answer"}')})
-    r = send(world, monkeypatch, capsys)
-    assert r.err == "wake: demo-pm-t1 not-woken state-exited\n"
-
-
-def test_a2_a_ref_without_equals_asks_nobody_on_another_machine(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+def test_a2_a_ref_without_equals_asks_nobody_anywhere(world, monkeypatch, capsys):
+    peer = world.add_peer()
     r = send(world, monkeypatch, capsys, "--ref", "noequals")
     assert r.code == 1
-    assert world.peer_calls() == [] and world.sidecar.requests == []
+    assert world.sidecar.requests == [] and peer.requests == []
 
 
-def test_a3_log_never_asks_pool_peer(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+def test_a3_log_never_asks_a_sidecar(world, monkeypatch, capsys):
+    peer = world.add_peer()
     r = run_aicomm(["log"], monkeypatch, capsys)
     assert r.code == 0
-    assert world.peer_calls() == []
+    assert peer.requests == [] and world.sidecar.requests == []
 
 
 # --- #406: the wake outcome (`queued`) and the sidecar record id ---------------------------
 # C-n below refers to the contract list in the `aicomm-wake-outcome` change (design.md §3).
-# The local lines come from the fake sidecar; the cross-machine ones from the fake
-# `pool-peer`. The fake sidecar answers a plain `{}` by default, so every test above keeps
+# The local lines come from the fake sidecar; the cross-machine ones from a peer FakeSidecar.
+# The fake sidecar answers a plain `{}` by default, so every test above keeps
 # its exact old line (no `record=`, no ` queued`).
 
 RECORD_A = "01JX000000000000000000000A"
@@ -1726,45 +1831,46 @@ def test_406_c6_a_refused_poke_still_reports_its_record_id(world, monkeypatch, c
 
 @pytest.mark.parametrize("extra", [(), ("--require-wake",)], ids=["plain", "require-wake"])
 def test_406_c7_a_queued_peer_poke_carries_a_peer_record(world, monkeypatch, capsys, extra):
-    use_peer(world, found(5201, "running"), {
-        "5201": called(200, json.dumps({"poke_id": RECORD_A, "poke_outcome": "queued"})),
-    })
+    peer = world.add_peer(state="running")
+    peer.poke_body = poke_answer(poke_id=RECORD_A, poke_outcome="queued")
     r = send(world, monkeypatch, capsys, *extra)
     assert r.code == 0
-    assert r.err == f"wake: demo-pm-t1 woken peer:5201 queued record=peer:5201/{RECORD_A}\n"
+    assert r.err == (f"wake: demo-pm-t1 woken {woken(peer.port)} queued "
+                     f"record=peer:{peer.port}/{RECORD_A}\n")
 
 
 # --- C-8: merging several machines -------------------------------------------------------
 
 
 def test_406_c8_one_sent_and_one_queued_is_not_queued(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "idle", 5202, "running"), {
-        "5201": called(200, json.dumps({"poke_id": RECORD_A, "poke_outcome": "sent"})),
-        "5202": called(200, json.dumps({"poke_id": RECORD_B, "poke_outcome": "queued"})),
-    })
+    sent = world.add_peer(state="idle")
+    sent.poke_body = poke_answer(poke_id=RECORD_A, poke_outcome="sent")
+    queued = world.add_peer(state="running")
+    queued.poke_body = poke_answer(poke_id=RECORD_B, poke_outcome="queued")
     r = send(world, monkeypatch, capsys)
-    assert r.err == (f"wake: demo-pm-t1 woken peer:5201,5202 "
-                     f"record=peer:5201/{RECORD_A},peer:5202/{RECORD_B}\n")
+    assert r.err == (f"wake: demo-pm-t1 woken {woken(sent.port, queued.port)} "
+                     f"record={peer_records((sent, RECORD_A), (queued, RECORD_B))}\n")
 
 
 def test_406_c8_every_woken_peer_queued_is_queued(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "running", 5202, "running"), {
-        "5201": called(200, json.dumps({"poke_id": RECORD_A, "poke_outcome": "queued"})),
-        "5202": called(200, json.dumps({"poke_id": RECORD_B, "poke_outcome": "queued"})),
-    })
+    first = world.add_peer(state="running")
+    first.poke_body = poke_answer(poke_id=RECORD_A, poke_outcome="queued")
+    second = world.add_peer(state="running")
+    second.poke_body = poke_answer(poke_id=RECORD_B, poke_outcome="queued")
     r = send(world, monkeypatch, capsys)
-    assert r.err == (f"wake: demo-pm-t1 woken peer:5201,5202 queued "
-                     f"record=peer:5201/{RECORD_A},peer:5202/{RECORD_B}\n")
+    assert r.err == (f"wake: demo-pm-t1 woken {woken(first.port, second.port)} queued "
+                     f"record={peer_records((first, RECORD_A), (second, RECORD_B))}\n")
 
 
 def test_406_c8_a_failed_peer_still_lists_its_record(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "idle", 5202, "running"), {
-        "5201": called(409, json.dumps({"code": "agent_awaiting_answer", "poke_id": RECORD_A})),
-        "5202": called(200, json.dumps({"poke_id": RECORD_B, "poke_outcome": "queued"})),
-    })
+    refused = world.add_peer(state="idle")
+    refused.poke_status = 409
+    refused.poke_body = poke_answer(code="agent_awaiting_answer", poke_id=RECORD_A)
+    queued = world.add_peer(state="running")
+    queued.poke_body = poke_answer(poke_id=RECORD_B, poke_outcome="queued")
     r = send(world, monkeypatch, capsys)
-    assert r.err == (f"wake: demo-pm-t1 woken peer:5202 queued "
-                     f"record=peer:5201/{RECORD_A},peer:5202/{RECORD_B}\n")
+    assert r.err == (f"wake: demo-pm-t1 woken {woken(queued.port)} queued "
+                     f"record={peer_records((refused, RECORD_A), (queued, RECORD_B))}\n")
 
 
 # --- C-9: no poke, no record --------------------------------------------------------------
@@ -1775,19 +1881,19 @@ def _local_exited(world):
 
 
 def _not_found(world):
-    use_peer(world, {"rc": 1, "stdout": "[]\n"})
+    world.add_peer(name=None)
 
 
 def _peer_unavailable(world):
-    pass  # the fixture's hook points at a path that does not exist
+    pass  # the fixture's link has a fresh heartbeat and no ports: nothing to try
 
 
 def _lookup_incomplete(world):
-    use_peer(world, {"rc": 3, "stdout": ""})
+    world.link.fresh(free_port())  # a port nobody listens on
 
 
 def _port_out_of_range(world):
-    use_peer(world, found(5199, "idle"), {"5199": called(200)})
+    world.link.ports_text("0\n")
 
 
 @pytest.mark.parametrize("setup,code", [
@@ -1806,13 +1912,13 @@ def test_406_c9_nobody_poked_means_no_record(world, monkeypatch, capsys, setup, 
 
 
 def test_406_c9_bad_name_means_no_record(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    peer = world.add_peer(name="-demo-pm-t1")
     # `--to=-name` so argparse takes it as the value, not as an option
     r = run_aicomm(["send", "--channel", "team-demo", "--to=-demo-pm-t1", "--body", BODY],
                    monkeypatch, capsys)
     assert r.code == 0
     assert r.err == "wake: -demo-pm-t1 not-woken bad-name\n"
-    assert world.peer_calls() == []
+    assert peer.requests == []
 
 
 # --- C-10: the answer never arrived, so there is no record --------------------------------
@@ -1837,14 +1943,15 @@ def test_406_c10_a_local_poke_error_has_no_record(world, monkeypatch, capsys):
     assert r.err == "wake: demo-pm-t1 unknown poke-error\n"
 
 
-@pytest.mark.parametrize("rc,kind,code", [
-    (3, "unknown", "poke-timeout"),
-    (2, "not-woken", "peer-unavailable"),
-    (1, "unknown", "peer-bad-answer"),
-    (4, "unknown", "peer-bad-answer"),
-], ids=["rc-3", "rc-2", "rc-1", "rc-4"])
-def test_406_c10_a_call_without_a_usable_body_has_no_record(world, monkeypatch, capsys, rc, kind, code):
-    use_peer(world, found(5201, "idle"), {"5201": called(rc=rc)})
+@pytest.mark.parametrize("error,kind,code", [
+    (socket.timeout("slow"), "unknown", "poke-timeout"),
+    (ConnectionRefusedError("refused"), "not-woken", "peer-unavailable"),
+    (http.client.BadStatusLine("broken"), "unknown", "peer-bad-answer"),
+], ids=["timeout", "refused", "bad-answer"])
+def test_406_c10_a_peer_poke_without_a_usable_answer_has_no_record(world, monkeypatch, capsys,
+                                                                  error, kind, code):
+    world.add_peer()
+    break_poke(monkeypatch, error)
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
     assert r.err == f"wake: demo-pm-t1 {kind} {code}\n"
@@ -1861,12 +1968,8 @@ def test_406_c11_every_line_matches_the_closed_grammar(world, monkeypatch, capsy
     agent(world, "demo-gone-t1", state="idle")
     world.sidecar.poke_bodies["demo-gone-t1"] = (
         500, poke_answer(poke_id=RECORD_B, poke_outcome="failed"))
-    world.use_fake_peer()
-    world.peers({
-        "find": {"by_id": {"demo-peer-t1": found(5201, "running")}},
-        "call": {"5201": called(200, json.dumps(
-            {"poke_id": RECORD_C, "poke_outcome": "queued"}))},
-    })
+    peer = world.add_peer(state="running", name="demo-peer-t1")
+    peer.poke_body = poke_answer(poke_id=RECORD_C, poke_outcome="queued")
     r = send(world, monkeypatch, capsys, "--mention", "demo-arch-t1",
              "--mention", "demo-gone-t1", "--mention", "demo-peer-t1")
     assert r.code == 0
@@ -1875,7 +1978,8 @@ def test_406_c11_every_line_matches_the_closed_grammar(world, monkeypatch, capsy
         f"wake: demo-pm-t1 woken local queued record=local/{RECORD_A}",
         "wake: demo-arch-t1 not-woken state-exited",
         f"wake: demo-gone-t1 not-woken http-500 record=local/{RECORD_B}",
-        f"wake: demo-peer-t1 woken peer:5201 queued record=peer:5201/{RECORD_C}",
+        f"wake: demo-peer-t1 woken {woken(peer.port)} queued "
+        f"record=peer:{peer.port}/{RECORD_C}",
     ]
     for line in lines:
         assert WAKE_406_RE.fullmatch(line), line
@@ -1950,18 +2054,18 @@ def test_406_c13_the_new_fields_add_no_request_and_no_subcommand(world, monkeypa
     local_poke(world, poke_id=RECORD_A, poke_outcome="sent")
     first = send(world, monkeypatch, capsys)
     assert first.code == 0
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    peer = world.add_peer(name="demo-elsewhere-t1")
     second = send(world, monkeypatch, capsys, to="demo-elsewhere-t1")
     assert second.code == 0
-    assert second.err == "wake: demo-elsewhere-t1 woken peer:5201\n"
+    assert second.err == f"wake: demo-elsewhere-t1 woken {woken(peer.port)}\n"
     # only the two documented requests, and never a record lookup
     assert world.sidecar.foreign_requests() == []
+    assert peer.foreign_requests() == []
     assert all("/pokes/" not in r["path"] for r in world.sidecar.requests)
+    assert all("/pokes/" not in r["path"] for r in peer.requests)
     # the pokes carry `text`, `interrupt`, `via` and `ref`
     assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm", "ref": FAKE_ID}]
-    peer_pokes = [c for c in world.peer_calls() if c["argv"][0] == "call"]
-    assert [json.loads(c["stdin"]) for c in peer_pokes] == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": FAKE_ID}]
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find", "call"]
+    assert peer.pokes() == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": FAKE_ID}]
     # still only three subcommands
     bad = run_aicomm(["status"], monkeypatch, capsys)
     assert bad.code == 1
@@ -1971,7 +2075,7 @@ def test_406_c13_the_new_fields_add_no_request_and_no_subcommand(world, monkeypa
 # --- C-15: the nested 409 error code (D-7) ------------------------------------------------
 
 
-@pytest.mark.parametrize("transport", ["local", "call"], ids=["local", "call"])
+@pytest.mark.parametrize("transport", ["local", "peer"], ids=["local", "peer"])
 @pytest.mark.parametrize("body,code", [
     ({"error": {"code": "agent_awaiting_answer", "message": "x"}}, "awaiting-answer"),
     ({"error": {"code": "agent_not_running"}}, "agent-not-running"),
@@ -1990,7 +2094,9 @@ def test_406_c15_the_409_error_code_is_read_from_both_shapes(world, monkeypatch,
         world.sidecar.poke_status = 409
         world.sidecar.poke_body = poke_answer(**body)
     else:
-        use_peer(world, found(5201, "idle"), {"5201": called(409, json.dumps(body))})
+        peer = world.add_peer(state="idle")
+        peer.poke_status = 409
+        peer.poke_body = json.dumps(body).encode("utf-8")
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
     assert r.err == f"wake: demo-pm-t1 not-woken {code}\n"
@@ -2054,10 +2160,6 @@ def send_out(world, text):
     world.setenv("FAKE_ANG_SEND_RAW", json.dumps(text))
 
 
-def peer_pokes(world):
-    return [json.loads(c["stdin"]) for c in world.peer_calls() if c["argv"][0] == "call"]
-
-
 def test_413_c1_local_poke_carries_via_and_ref(world, monkeypatch, capsys):
     agent(world)
     send_out(world, ULID + "\n")
@@ -2069,14 +2171,13 @@ def test_413_c1_local_poke_carries_via_and_ref(world, monkeypatch, capsys):
 
 
 def test_413_c2_peer_poke_stdin_is_the_exact_body_with_peer_via(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    peer = world.add_peer()
     send_out(world, ULID + "\n")
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
-    find_call, poke_call = world.peer_calls()
-    assert poke_call["argv"] == ["call", "5201", "POST", "/agents/demo-pm-t1/poke", "--timeout", "5"]
-    assert poke_call["stdin"] == json.dumps(
-        {"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": ULID})
+    assert peer.pokes() == [
+        {"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": ULID}]
+    assert r.err == f"wake: demo-pm-t1 woken {woken(peer.port)}\n"
 
 
 @pytest.mark.parametrize("bad", BAD_IDS, ids=["space", "65", "empty", "non-ascii", "dot"])
@@ -2092,12 +2193,12 @@ def test_413_c3_a_bad_message_id_drops_the_ref_key_but_still_pokes_once(world, m
 
 @pytest.mark.parametrize("bad", BAD_IDS, ids=["space", "65", "empty", "non-ascii", "dot"])
 def test_413_c3_a_bad_message_id_drops_the_ref_key_on_a_peer_too(world, monkeypatch, capsys, bad):
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    peer = world.add_peer()
     send_out(world, bad + "\n")
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
-    assert peer_pokes(world) == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer"}]
-    assert r.err == "wake: demo-pm-t1 woken peer:5201\n"
+    assert peer.pokes() == [{"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer"}]
+    assert r.err == f"wake: demo-pm-t1 woken {woken(peer.port)}\n"
 
 
 @pytest.mark.parametrize("out", ["  " + ULID + "  \n", ULID + "\nextra\n"], ids=["padded", "extra-line"])
@@ -2136,14 +2237,15 @@ def test_413_c6_every_recipient_gets_the_same_ref(world, monkeypatch, capsys):
 
 
 def test_413_c7_every_machine_gets_the_same_via_and_ref(world, monkeypatch, capsys):
-    use_peer(world, found(5201, "running", 5202, "idle"), {"5201": called(200), "5202": called(200)})
+    running = world.add_peer(state="running")
+    idle = world.add_peer(state="idle")
     send_out(world, ULID + "\n")
     r = send(world, monkeypatch, capsys, "--interrupt")
-    assert r.err == "wake: demo-pm-t1 woken peer:5201,5202 interrupt\n"
-    bodies = {c["argv"][1]: json.loads(c["stdin"]) for c in world.peer_calls() if c["argv"][0] == "call"}
+    assert r.err == f"wake: demo-pm-t1 woken {woken(running.port, idle.port)} interrupt\n"
+    bodies = {peer.port: peer.pokes()[0] for peer in (running, idle)}
     assert bodies == {
-        "5201": {"text": WAKE_TEXT, "interrupt": True, "via": "aicomm-peer", "ref": ULID},
-        "5202": {"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": ULID},
+        running.port: {"text": WAKE_TEXT, "interrupt": True, "via": "aicomm-peer", "ref": ULID},
+        idle.port: {"text": WAKE_TEXT, "interrupt": False, "via": "aicomm-peer", "ref": ULID},
     }
 
 
@@ -2157,23 +2259,23 @@ def test_413_c8_via_and_ref_constants_fit_the_sidecar_shape():
 
 def test_413_c9_no_wake_no_recipient_and_only_self_send_no_request(world, monkeypatch, capsys):
     agent(world)
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    peer = world.add_peer()
     assert send(world, monkeypatch, capsys, "--no-wake").code == 0
     assert send(world, monkeypatch, capsys, to=None).code == 0
     world.setenv("ANGAREION_IDENTITY", "demo-pm-t1")
     assert send(world, monkeypatch, capsys).code == 0
     assert world.sidecar.requests == []
-    assert world.peer_calls() == []
+    assert peer.requests == []
 
 
 def test_413_c10_a_failed_send_pokes_nobody(world, monkeypatch, capsys):
     agent(world)
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    peer = world.add_peer()
     world.setenv("FAKE_ANG_SEND_EXIT", "1")
     r = send(world, monkeypatch, capsys)
     assert r.code == 1
     assert world.sidecar.requests == []
-    assert world.peer_calls() == []
+    assert peer.requests == []
 
 
 def test_413_c11_text_stays_fixed_and_the_keys_are_one_of_two_sets(world, monkeypatch, capsys):
@@ -2192,11 +2294,11 @@ def test_413_c11_text_stays_fixed_and_the_keys_are_one_of_two_sets(world, monkey
 
 def test_413_c12_a_send_ref_value_never_reaches_the_poke(world, monkeypatch, capsys):
     agent(world)
-    use_peer(world, found(5201, "idle"), {"5201": called(200)})
+    peer = world.add_peer()
     send(world, monkeypatch, capsys, "--ref", "note=REF-SENTINEL-413")
     agent(world, "demo-other-t1")
     send(world, monkeypatch, capsys, "--ref", "note=REF-SENTINEL-413", to="demo-other-t1")
-    raw = json.dumps(world.sidecar.pokes()) + "".join(c["stdin"] for c in world.peer_calls())
+    raw = json.dumps(world.sidecar.pokes()) + json.dumps(peer.pokes())
     assert "REF-SENTINEL-413" not in raw and "note=" not in raw
 
 
@@ -2220,7 +2322,7 @@ def test_413_c14_the_record_id_is_still_read_from_a_poke_with_via_and_ref(world,
 
 # --- #420: the other json.loads sites read a too-deep body as unreadable, too ---------------
 
-def test_420_a_200_agent_answer_too_deep_to_read_is_no_state():
+def test_420_a_200_answer_too_deep_to_read_is_no_state():
     from aicomm import cli
 
     assert cli._agent_state(DEEP_BODY) is None
@@ -2232,17 +2334,3 @@ def test_420_a_deep_agent_answer_is_not_woken_bad_answer(world, monkeypatch, cap
     assert r.code == 0
     assert r.err == "wake: demo-pm-t1 not-woken bad-answer\n"
     assert world.sidecar.pokes() == []
-
-
-def test_420_a_find_answer_too_deep_to_read_is_no_peers():
-    from aicomm import cli
-
-    assert cli._parse_peers("[" * 200000) is None
-
-
-def test_420_a_deep_find_answer_is_peer_bad_answer(world, monkeypatch, capsys):
-    use_peer(world, found_raw("[" * 200000))
-    r = send(world, monkeypatch, capsys)
-    assert r.code == 0
-    assert r.err == "wake: demo-pm-t1 not-woken peer-bad-answer\n"
-    assert [c["argv"][0] for c in world.peer_calls()] == ["find"]  # nothing was poked

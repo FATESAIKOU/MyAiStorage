@@ -117,8 +117,7 @@ def test_e2e_angareion_log_to_me_vs_aicomm_log_argv(env, monkeypatch, capsys):
     monkeypatch.setenv("FAKE_ANG_LOG", str(log))
     monkeypatch.setenv("ANGAREION_IDENTITY", IDENTITY)
     monkeypatch.setenv("AICOMM_SIDECAR", "http://127.0.0.1:8471")
-    # `aicomm log` never wakes anybody; the guard in run_aicomm still wants both fakes set.
-    monkeypatch.setenv("AICOMM_POOL_PEER", "/nonexistent/pool-peer")
+    # `aicomm log` never wakes anybody; the guard in run_aicomm still wants a fake sidecar.
     # sidecar not needed for log; but run_aicomm asserts
     from _aicomm_fakes import FakeSidecar
     sc = FakeSidecar()

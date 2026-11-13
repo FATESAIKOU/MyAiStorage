@@ -51,13 +51,13 @@ def test_c29_the_skill_says_the_cost_covers_the_whole_pool():
     # #368 PR-2: a recipient on another machine can be woken too, so "同台" is no longer true.
     text = _skill()
     assert "同台" not in text
-    assert "pool 內任何 agent（含別台機器上的，經 `pool-peer`）都能叫醒 PMO" in text
+    assert "pool 內任何 agent（含別台機器上的，經 `127.0.0.1:<port>` 的 sidecar）都能叫醒 PMO" in text
 
 
 def test_c29_the_skill_says_the_cross_machine_access_control_is_elsewhere():
     text = _skill()
     assert "本機走 sidecar open 帶白名單（MyLinuxPool#346）" in text
-    assert "跨機的存取控制併在 MyPMO#297 再議" in text
+    assert "跨機（經 `127.0.0.1:<port>` 的 sidecar）的存取控制併在 MyPMO#297 再議" in text
 
 
 def test_skill_explains_delivery_exit_codes_and_the_idle_wait():
@@ -293,7 +293,7 @@ def test_c19_the_skill_usage_line_lists_require_wake():
     assert "--require-wake" in usage
 
 
-# --- #368 PR-2: the cross-machine fallback (`pool-peer`) is written down -------------------
+# --- #457: the cross-machine fallback (sidecar-link) is written down -----------------------
 
 
 @pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
@@ -304,30 +304,38 @@ def test_the_transitional_no_peer_fallback_sentences_are_gone(path):
     assert "peer:<port> 那一種還沒提供" not in text
 
 
-def test_docs_record_the_pool_peer_usages_and_the_port_range():
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_the_old_cross_machine_command_is_gone(path):
+    text = path.read_text(encoding="utf-8")
+    assert "pool-peer" not in text
+    assert "AICOMM_POOL_PEER" not in text
+
+
+def test_docs_record_the_sidecar_link_files_and_the_two_routes():
     text = DOCS.read_text(encoding="utf-8")
-    for needle in ("pool-peer find <id> --json --timeout 10",
-                   "pool-peer call <port> POST /agents/<id>/poke --timeout 5",
-                   "5200", "5399", "AICOMM_POOL_PEER", "peer:<port>", "argv"):
-        assert needle in text
+    for needle in ("~/.mylinuxpool/sidecar-link/", "`heartbeat`", "`ports`",
+                   "AICOMM_SIDECAR_LINK", "LINK_FRESH_SECONDS", "PEER_LOOKUP_BUDGET",
+                   "127.0.0.1:P/agents/<id>", "127.0.0.1:P/agents/<id>/poke",
+                   "peer:<port>", "`aicomm-peer`"):
+        assert needle in text, needle
 
 
 def test_a4_the_docs_say_a_peer_port_is_not_a_machine_address():
-    # A.4: `peer:<port>` names a sidecar port inside the pool, never a machine.
+    # A.4: `peer:<port>` names a local sidecar-link port, never a machine.
     text = DOCS.read_text(encoding="utf-8")
-    assert "`peer:<port>` 是 pool 內 sidecar 的**埠號，不是機器位址**" in text
+    assert "不是機器位址" in text and "`peer:<port>`" in text
 
 
-def test_a4_the_docs_say_the_wake_line_does_not_relay_pool_peer_output():
+def test_a4_the_docs_say_the_wake_line_does_not_relay_an_answer_body():
     text = DOCS.read_text(encoding="utf-8")
-    assert "`pool-peer` 的 stdout／stderr 不會被轉印進去" in text
+    assert "sidecar 回應的 body 不會被轉印進去" in text
 
 
-def test_the_docs_describe_the_order_local_first_then_the_pool():
+def test_the_docs_describe_the_order_local_first_then_the_link():
     for path in (SKILL, DOCS):
         text = path.read_text(encoding="utf-8")
         assert "先問本機" in text or "先本機" in text
-        assert "pool-peer" in text
+        assert "sidecar-link" in text
 
 
 # --- #406: the queued outcome and the sidecar record id are written down -------------------
@@ -354,7 +362,7 @@ def test_406_c14_queued_and_the_record_id_are_written_down(path):
 def test_406_c14_the_two_record_queries_are_written_down(path):
     text = path.read_text(encoding="utf-8")
     assert "curl -s 127.0.0.1:8471/pokes/<id>" in text
-    assert "pool-peer call <port> GET /pokes/<id>" in text
+    assert "curl -s 127.0.0.1:<port>/pokes/<id>" in text
 
 
 @pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
