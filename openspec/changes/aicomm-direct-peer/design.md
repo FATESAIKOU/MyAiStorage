@@ -92,7 +92,7 @@
 
 1. 目錄＝`AICOMM_SIDECAR_LINK`（只給測試與手動用，見 §4.3）或 `Path.home()/".mylinuxpool"/"sidecar-link"`。`Path.home()` 丟 `RuntimeError`／`OSError` → 當作沒有目錄（＝查不了，`peer-unavailable`）。`AICOMM_SIDECAR_LINK` 設了但是**空字串**或**不是絕對路徑** → 一樣當作沒有目錄（`peer-unavailable`）；不是用法錯誤——它在送達之後才讀，不能改 exit code，而且它是測試鉤子（契約 C-9）。
 2. 心跳：「新鮮」＝`age = time.time() - st_mtime` 落在 `[-LINK_FRESH_SECONDS, LINK_FRESH_SECONDS]`（`LINK_FRESH_SECONDS = 90`）**而且**檔內 pid 還活著。四種不新鮮：(a) 讀不到（不存在、不是普通檔、沒有權限、IO 錯）；(b) mtime 超出窗（含遠在未來：時鐘跳動不該讓一個檔永遠新鮮）；(c) pid 讀不懂——去掉頭尾空白後不符合 `^[1-9][0-9]*$`，或大於 2147483647（`os.kill` 收不下的 pid 會丟 `OverflowError`，**不是** `OSError`）；(d) pid 不在（`os.kill(pid, 0)` 的 `ProcessLookupError`；`PermissionError` 算活著，其他 `OSError` 算不在）。**永遠不把 0 或負數交給 `os.kill`**（0 會送給整個 process group），所以先用上面的樣式擋。
-3. `ports`：讀不到 → 查不了。解碼成 UTF-8（解不開＝清單讀不懂＝`peer-bad-answer`）。只允許最後一個換行造成的一個空字串；其他空行＝格式不對。每一行必須是 `^[0-9]{1,5}$`（格式不對＝清單讀不懂），數值必須在 1–65535（是整數但超出範圍＝埠號不合法）。重複的埠只留第一次出現的那一筆（與今天「同一個 port 只戳一次」相同），處理時由小到大排序（檔案保證遞增；就算不是，結果也一樣）。
+3. `ports`：讀不到 → 查不了。解碼成 UTF-8（解不開＝清單讀不懂＝`peer-bad-answer`）。只允許最後一個換行造成的一個空字串：`ports` 去掉末尾一個換行後是空的，就算**空檔**（＝查不了＝`peer-unavailable`），不當成「一個空行」；其他空行＝格式不對。每一行必須是 `^[0-9]{1,5}$`（格式不對＝清單讀不懂），數值必須在 1–65535（是整數但超出範圍＝埠號不合法）。重複的埠只留第一次出現的那一筆（與今天「同一個 port 只戳一次」相同），處理時由小到大排序（檔案保證遞增；就算不是，結果也一樣）。
 4. **清單層級的語意（定死，M-2）**：
    - **有一行不合格＝整份清單不用**：這台機器上所有要走跨機後援的收件人都拿到同一個原因碼，不會「跳過壞行、用剩下的」。這和今天的 `peer-port-out-of-range` 不同（今天是**逐台**：只有找到那台、而且那台可戳時才出現）；這是刻意的大聲失敗（§7）。
    - **優先序＝依檔案順序，第一個不合格的行決定**：同一份清單裡同時有 `0` 與 `52x1` 時，先出現的那一個決定是 `peer-port-out-of-range` 還是 `peer-bad-answer`。非 UTF-8 是整檔解不開、沒有行可言，一律 `peer-bad-answer`。
@@ -161,8 +161,8 @@
 
 | 模組 | 做什麼 | 依賴 | 不做什麼 |
 |---|---|---|---|
-| 新增 `src/aicomm/sidecar_link.py`（約 90 行） | 「目錄→可用埠」：解析目錄（env 或 home）、判斷心跳新鮮、解析 `ports`（UTF-8、空行、樣式、範圍、去重、排序）、扣掉本機埠 | 只依賴標準函式庫（`os`、`re`、`time`、`pathlib`）；時鐘（`now`）、pid 檢查（`pid_alive`）、home 以參數注入，預設用真的 | MUST NOT `import aicomm.cli`；MUST NOT 發 HTTP；MUST NOT 有原因碼字串 |
-| `src/aicomm/cli.py` | 逐埠 `GET`、逐埠 `POST`、`_merge_peers()`、原因碼與 `wake:` 行 | `sidecar_link`、`urllib`、既有判讀表 | MUST NOT 自己解析 `heartbeat`／`ports` 的格式 |
+| 新增 `src/aicomm/sidecar_link.py`（約 90 行） | 「目錄→可用埠」：解析目錄（env 或 home）、判斷心跳新鮮、解析 `ports`（UTF-8、空行、樣式、範圍、去重、排序）、扣掉呼叫端傳入的本機埠 `local_port` | 只依賴標準函式庫（`os`、`re`、`time`、`pathlib`）；介面 `read(*, local_port: int, env=os.environ, home=Path.home, now=time.time, pid_alive=<預設 os.kill 版>)`：`local_port` 必填，時鐘（`now`）、pid 檢查（`pid_alive`）、home 以參數注入，預設用真的 | MUST NOT `import aicomm.cli`；MUST NOT 發 HTTP；MUST NOT 有原因碼字串；MUST NOT 自己算本機埠（只用傳進來的 `local_port`） |
+| `src/aicomm/cli.py` | 算本機埠（`urllib.parse.urlsplit(sidecar_base(...)).port`；沒有埠用 80；只比埠號）、逐埠 `GET`、逐埠 `POST`、`_merge_peers()`、原因碼與 `wake:` 行 | `sidecar_link`、`urllib`、既有判讀表 | MUST NOT 自己解析 `heartbeat`／`ports` 的格式 |
 
 - 回傳值是型別化的結果：`Ports(tuple[int, ...])` 或 `Unusable(kind)`，`kind ∈ {unavailable, bad-format, out-of-range}`。**原因碼字串不在這個模組**：cli 把 `unavailable → peer-unavailable`、`bad-format → peer-bad-answer`、`out-of-range → peer-port-out-of-range` 對應過去。原因碼仍只在 cli 的常數一處定義，「原因碼與常數一致」的測試不必動。
 - 為什麼逐埠查／戳與合併留在 cli：它們和本機路徑共用 `_request`、`_poke_answer`、`_poke_body`、`_merge_peers`、`_Wake`；搬出去會讓新模組反過來 import cli（環），或得把一半的 cli 一起搬走（超出本單）。`_wake_elsewhere()`（`:587-613`）保留名字與位置，內容改成「`sidecar_link.read(...)` → 逐埠 GET → 逐埠 POST → `_merge_peers()`」。
@@ -187,7 +187,7 @@ spec delta 是規範本體；下表是它的收斂索引，每條寫成「輸入
 | C-5 | `ports` 讀不到 | `Unusable(unavailable)` → `peer-unavailable` | 讀 sidecar-link 的埠清單 | 純單元 |
 | C-6 | `ports` 不是 UTF-8／有空行（只允許末尾換行造成的一個）／某行不符合 `^[0-9]{1,5}$` | `Unusable(bad-format)` → `peer-bad-answer`；**整份清單不用**；優先序＝檔案順序第一個不合格的行；非 UTF-8 一律 `bad-format` | 讀 sidecar-link 的埠清單／清單的錯誤是整份的 | 純單元 |
 | C-7 | `ports` 某行是整數但不在 1–65535 | `Unusable(out-of-range)` → `peer-port-out-of-range`；整份清單不用 | 讀 sidecar-link 的埠清單／清單的錯誤是整份的 | 純單元 |
-| C-8 | 合格且非空的 `ports`＋本機埠 P₀ | `Ports`：去重（留第一次）、升冪、扣掉 P₀；扣完為空 → `unavailable` → `peer-unavailable` | 清單的錯誤是整份的 | 純單元 |
+| C-8 | 合格且非空的 `ports`＋呼叫端傳入的本機埠 `local_port`（P₀） | `Ports`：去重（留第一次）、升冪、扣掉 P₀；扣完為空 → `unavailable` → `peer-unavailable` | 讀 sidecar-link 的埠清單／清單的錯誤是整份的 | 純單元 |
 | C-9 | `AICOMM_SIDECAR_LINK`：未設 → 用 `home/.mylinuxpool/sidecar-link`；空字串／非絕對路徑／`Path.home()` 失敗 → 沒有目錄 | 沒有目錄 → `peer-unavailable`（不改 exit code） | sidecar 位址固定為預設 loopback 位址 | 純單元＋cli 整合 |
 | C-10 | 每個埠 `GET http://127.0.0.1:P/agents/<quoted>` | 404→不在這台；200＋JSON 物件＋`state` 字串→有回答；200 但讀不懂→`peer-bad-answer`；連不上／逾時／HTTP 層讀不懂／非 200 非 404／預算用完→查不到 | 每一個埠怎麼查 | cli 整合 |
 | C-11 | 每一台戳的傳輸結果 | 逾時→`unknown poke-timeout`；連線被拒（含包在 `URLError`）→`not-woken peer-unavailable`；其他連線錯誤→`unknown poke-error`；`HTTPException`→`unknown peer-bad-answer` | 跨機查詢與戳的連線結果 | cli 整合 |
