@@ -438,8 +438,10 @@ def _query_port(quoted: str, port: int, timeout: float) -> tuple[str, str | None
     """Ask one port's sidecar about one quoted id: what came back, and any `state`.
 
     Only a 200 with a readable `state` is an answer (the state is a string); a 404 is "not
-    on this one"; everything else - no listener, a timeout, an unreadable answer, another
-    status - is "could not ask", which is never the same as "not there".
+    on this one"; an answer the HTTP layer cannot read (no listener, a timeout, a broken
+    response, another status) is "could not ask", which is never the same as "not there".
+    A 200 whose body or `state` cannot be read is its own class: the machine answered, we
+    just could not read it (`QUERY_UNREADABLE`, a `peer-bad-answer`, not "could not ask").
     """
     url = f"http://127.0.0.1:{port}/agents/{quoted}"
     try:
@@ -493,7 +495,7 @@ def _merge_peers(name: str, answers: list[tuple[int, _Wake]]) -> _Wake:
     first; `queued` needs every successful poke to say so.
     """
     ordered = sorted(answers, key=lambda pair: pair[0])
-    if not ordered:  # cannot happen with a parsed answer; keep one line per recipient anyway
+    if not ordered:  # cannot happen: `_wake_elsewhere` returns before merging nothing
         return _not_woken(name, REASON_PEER_BAD_ANSWER)
     records = tuple(record for _, answer in ordered for record in answer.records)
     woken = [(port, answer) for port, answer in ordered if answer.woken]

@@ -22,6 +22,7 @@ import shutil
 import socket
 import stat
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -270,6 +271,17 @@ class RawSidecar:
                         if not chunk:
                             break
                         data += chunk
+                    # Read the whole request body too when there is one: closing with the
+                    # body still in flight would be a reset, not the clean FIN a test that
+                    # says "the server closed after reading" means to produce.
+                    head, _, rest = data.partition(b"\r\n\r\n")
+                    found = re.search(rb"(?i)content-length:\s*([0-9]+)", head)
+                    wanted = int(found.group(1)) if found else 0
+                    while len(rest) < wanted:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        rest += chunk
                     answer = self.answers[min(self.connections, len(self.answers) - 1)]
                     self.connections += 1
                     conn.sendall(answer)
@@ -290,13 +302,21 @@ class Result:
 def _link_is_test_only() -> bool:
     """True when the sidecar-link directory aicomm could read is one a test owns.
 
-    An explicit `AICOMM_SIDECAR_LINK` is the test's own (the fixture always sets one). With
-    it unset, aicomm would read `~/.mylinuxpool/sidecar-link` under HOME, which is allowed
-    only when that directory does not exist - `isolated_home` points HOME at a tmp dir, so
-    the real one a worker has is out of reach either way.
+    An explicit `AICOMM_SIDECAR_LINK` counts only when it resolves under the system temp
+    directory, which is where pytest's `tmp_path` lives: a real directory exported in the
+    shell (an `AICOMM_SIDECAR_LINK` left set by hand) must not slip past the guard. With
+    it unset, aicomm would read `~/.mylinuxpool/sidecar-link` under HOME, allowed only when
+    that directory does not exist - `isolated_home` points HOME at a tmp dir.
     """
-    if os.environ.get("AICOMM_SIDECAR_LINK"):
-        return True
+    override = os.environ.get("AICOMM_SIDECAR_LINK")
+    if override:
+        try:
+            target = Path(override)
+            if not target.is_absolute():
+                return True  # the reader treats it as no directory: nothing real to read
+            return target.resolve().is_relative_to(Path(tempfile.gettempdir()).resolve())
+        except (OSError, RuntimeError):
+            return False
     try:
         return not (Path.home() / ".mylinuxpool" / "sidecar-link").exists()
     except (OSError, RuntimeError):  # no home to look under: nothing to reach

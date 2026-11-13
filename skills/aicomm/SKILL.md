@@ -83,7 +83,7 @@ aicomm log [同 angareion log 的全部旗標] [--json]                         
   - `unknown`：不要重送。
 - `interrupt` 與 `queued` 互斥：帶 `--interrupt` 的戳不會排隊，同時回報時以 ` interrupt` 為準。`queued` **不是原因碼**。對方在提問框裡（409 `awaiting-answer`）sidecar **不送、不排隊**，所以是 `not-woken awaiting-answer`，不是 `queued`。
 - `record=` 是那一戳在 sidecar 的紀錄：本機 `local/<id>`、跨機 `peer:<port>/<id>`；多台依 port 由小到大。只在至少拿到一個合格 id 時才寫，沒有 id 的行和舊版一字不差。對照紀錄：路由是 `GET /pokes/<id>`，本機 `curl -s 127.0.0.1:8471/pokes/<id>`，跨機同一個路由 `curl -s 127.0.0.1:<port>/pokes/<id>`。查回 404 `poke_not_found` 是紀錄已過期或沒留下，**不代表沒叫醒**。`woken` 只代表 sidecar 收下了，**不代表對方已讀**。
-- 叫醒是盡力而為：收件人在本機 sidecar 上是 `idle` 或 `running` 才戳；不在本機時讀本機的 sidecar-link 埠清單，對清單上每一台（跳過本機自己的埠）直接查、直接戳（先問本機，回 404、連不上或查詢逾時才讀清單；本機戳過之後不論成敗都不再找）。清單上每一台都確定沒有是 `not-woken not-found`；有查不到的台是 `not-woken lookup-incomplete`；sidecar-link 不可用（沒有心跳、心跳不新鮮、清單空或扣掉本機埠後沒有埠、清單壞掉）是 `not-woken peer-unavailable`；`starting`、`waiting-quota`、`exited` 都不戳（訊息還是在 Angareion，對方之後 `inbox` 一定讀得到）。
+- 叫醒是盡力而為：收件人在本機 sidecar 上是 `idle` 或 `running` 才戳；不在本機時讀本機的 sidecar-link 埠清單，對清單上每一台（跳過本機自己的埠）直接查、直接戳（先問本機，回 404、連不上或查詢逾時才讀清單；本機戳過之後不論成敗都不再找）。清單上每一台都確定沒有是 `not-woken not-found`；有查不到的台是 `not-woken lookup-incomplete`；sidecar-link 不可用（沒有心跳、心跳不新鮮、清單讀不到或空、扣掉本機埠後沒有埠）是 `not-woken peer-unavailable`；清單壞掉是另一種（不是 `peer-unavailable`）：某行格式不對是 `peer-bad-answer`、某行是整數但不在 1–65535 是 `peer-port-out-of-range`（見下面原因碼那條）；`starting`、`waiting-quota`、`exited` 都不戳（訊息還是在 Angareion，對方之後 `inbox` 一定讀得到）。
 - 跨機叫醒成功時 stderr 是 `wake: <agent> woken peer:<port>`；`<port>` 是本機 sidecar-link 清單裡的一個埠號（不是機器位址）。能戳的每一台都戳，合併成一行；看到 `unknown` 不要重送。
 - 戳的內容固定（請對方執行 `aicomm inbox`），不含你的訊息。對方在 `running` 時，戳會排到它這一輪之後，不打斷。
 - 連送兩則會戳兩次，沒有去重；一件事一則講完。

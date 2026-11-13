@@ -311,6 +311,22 @@ def test_the_old_cross_machine_command_is_gone(path):
     assert "AICOMM_POOL_PEER" not in text
 
 
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_a_broken_port_list_is_never_folded_into_peer_unavailable(path):
+    """#457 review low-1: a broken `ports` file is `peer-bad-answer`/`peer-port-out-of-range`.
+
+    The "cannot look" list may only hold the cases that really mean `peer-unavailable`
+    (no heartbeat, stale heartbeat, no list, nothing left after the local port).
+    """
+    text = path.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if "不可用（" in line:
+            inside = line.split("不可用（", 1)[1].split("）", 1)[0]
+            assert "壞" not in inside, inside
+    assert "清單壞掉）" not in text  # the shape the first draft of SKILL.md had
+    assert "`peer-bad-answer`" in text and "`peer-port-out-of-range`" in text
+
+
 def test_docs_record_the_sidecar_link_files_and_the_two_routes():
     text = DOCS.read_text(encoding="utf-8")
     for needle in ("~/.mylinuxpool/sidecar-link/", "`heartbeat`", "`ports`",

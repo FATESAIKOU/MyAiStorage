@@ -44,6 +44,21 @@ def test_the_hook_counts_even_with_a_default_directory(tmp_path, monkeypatch):
     assert _link_is_test_only() is True
 
 
+def test_a_hook_outside_the_temp_directory_is_refused(tmp_path, monkeypatch):
+    # L-3: an AICOMM_SIDECAR_LINK exported in the shell (a real directory) must not pass,
+    # even though it is an absolute path.
+    setup_env(tmp_path, monkeypatch)
+    monkeypatch.setenv("AICOMM_SIDECAR_LINK", "/etc")
+    assert _link_is_test_only() is False
+
+
+def test_a_relative_hook_can_reach_nothing_real(tmp_path, monkeypatch):
+    # a relative override is "no directory" for the reader, so it is safe to allow
+    setup_env(tmp_path, monkeypatch)
+    monkeypatch.setenv("AICOMM_SIDECAR_LINK", "link")
+    assert _link_is_test_only() is True
+
+
 def test_run_aicomm_refuses_without_a_fake_sidecar(tmp_path, monkeypatch, capsys):
     # (3) the composed guard: no AICOMM_SIDECAR, nothing to run against.
     monkeypatch.delenv("AICOMM_SIDECAR", raising=False)

@@ -1206,6 +1206,14 @@ def test_c9_a_hook_that_is_not_an_absolute_path_is_peer_unavailable(world, monke
     assert peer.requests == []
 
 
+def test_c9_the_local_port_of_an_address_without_a_port_is_eighty():
+    from aicomm import cli
+
+    assert cli._local_port("http://127.0.0.1") == 80
+    assert cli._local_port("http://localhost") == 80
+    assert cli._local_port("http://127.0.0.1:8471") == 8471
+
+
 def test_c10_every_port_says_404_is_not_found(world, monkeypatch, capsys):
     a = world.add_peer(name=None)
     b = world.add_peer(name=None)
@@ -1534,6 +1542,26 @@ def test_c11_a_poke_that_cannot_connect_is_peer_unavailable(world, monkeypatch, 
     assert len(peer.requests) == 1
 
 
+def test_c11_a_peer_that_closes_after_reading_the_poke_is_peer_bad_answer(
+        world, monkeypatch, capsys):
+    # The other real reset (#457 review 低-4): the peer answers the lookup with a normal
+    # 200, then reads the poke body and closes with no byte back. urllib raises
+    # `RemoteDisconnected`, which is both an `HTTPException` and a `ConnectionResetError`;
+    # the `HTTPException` branch wins, so this is `unknown peer-bad-answer`. An injected
+    # `ConnectionResetError` (above) is the case where the socket is reset instead.
+    body = json.dumps({"state": "idle"}).encode("utf-8")
+    answer = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+              + str(len(body)).encode() + b"\r\n\r\n" + body)
+    peer = RawSidecar([answer, b""])
+    try:
+        world.link.fresh(peer.port)
+        r = send(world, monkeypatch, capsys)
+    finally:
+        peer.close()
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 unknown peer-bad-answer\n"  # never "not-woken", never a resend
+
+
 def test_c14_a_stuck_port_uses_up_the_budget_and_the_rest_are_unasked(world, monkeypatch, capsys):
     from aicomm import cli
 
@@ -1572,6 +1600,90 @@ def test_c14_a_slow_port_that_answers_in_time_is_used(world, monkeypatch, capsys
     monkeypatch.setattr(cli, "PEER_GET_TIMEOUT", 1.0)
     r = send(world, monkeypatch, capsys)
     assert r.err == f"wake: demo-pm-t1 woken {woken(peer.port)}\n"
+
+
+def test_c14_the_budget_and_timeouts_are_the_numbers_the_spec_names():
+    from aicomm import cli
+
+    assert (cli.PEER_LOOKUP_BUDGET, cli.PEER_GET_TIMEOUT, cli.PEER_POKE_TIMEOUT) == (
+        10.0, 3.0, 5.0)
+
+
+class FakeClock:
+    """A monotonic clock the test moves by hand, so no test ever sleeps."""
+
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+
+def test_c14_each_port_gets_the_smaller_of_the_cap_and_the_budget_left(
+        world, monkeypatch, capsys):
+    from aicomm import cli
+
+    ports = (50001, 50002, 50003)
+    stub_ports(monkeypatch, *ports)
+    clock = FakeClock()
+    monkeypatch.setattr(cli.time, "monotonic", clock)
+    seen = []
+    peers = {f"127.0.0.1:{port}" for port in ports}
+
+    def request(method, url, payload, timeout):
+        if url.split("/")[2] in peers:
+            seen.append(timeout)
+            clock.value += 8.0  # each answer eats eight of the ten seconds
+        return 404, b""
+
+    monkeypatch.setattr(cli, "_request", request)
+    r = send(world, monkeypatch, capsys)
+    assert r.err == "wake: demo-pm-t1 not-woken lookup-incomplete\n"
+    # 10 s left -> 3 s; 2 s left -> 2 s; then the budget is gone and the third port is unasked
+    assert seen == [3.0, 2.0]
+
+
+def test_c14_a_wall_clock_jump_does_not_move_the_budget(world, monkeypatch, capsys):
+    from aicomm import cli
+
+    ports = (50001, 50002, 50003)
+    stub_ports(monkeypatch, *ports)
+    clock = FakeClock()
+    monkeypatch.setattr(cli.time, "monotonic", clock)  # the budget's clock
+    wall = FakeClock()
+    monkeypatch.setattr(cli.time, "time", wall)  # the wall clock, which now runs backwards
+    seen = []
+    peers = {f"127.0.0.1:{port}" for port in ports}
+
+    def request(method, url, payload, timeout):
+        if url.split("/")[2] in peers:
+            seen.append(timeout)
+            clock.value += 8.0
+            wall.value -= 10_000.0
+        return 404, b""
+
+    monkeypatch.setattr(cli, "_request", request)
+    r = send(world, monkeypatch, capsys)
+    assert r.err == "wake: demo-pm-t1 not-woken lookup-incomplete\n"
+    assert seen == [3.0, 2.0]  # the wall clock jumped back; the budget did not reset
+
+
+def test_c14_a_peer_poke_uses_the_poke_timeout(world, monkeypatch, capsys):
+    from aicomm import cli
+
+    peer = world.add_peer()
+    seen = []
+    real = cli._request
+
+    def request(method, url, payload, timeout):
+        if f":{peer.port}/" in url:
+            seen.append((method, timeout))
+        return real(method, url, payload, timeout)
+
+    monkeypatch.setattr(cli, "_request", request)
+    r = send(world, monkeypatch, capsys)
+    assert r.err == f"wake: demo-pm-t1 woken {woken(peer.port)}\n"
+    assert seen == [("GET", 3.0), ("POST", 5.0)]
 
 
 def test_c13_an_unknown_from_one_peer_beats_a_not_woken_from_another(world, monkeypatch, capsys):
