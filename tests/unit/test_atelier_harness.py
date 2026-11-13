@@ -150,6 +150,35 @@ PM_V6_NEW_SENTENCES = (
 )
 PM_V6_KEY_SENTENCES = PM_V5_KEY_SENTENCES + PM_V6_NEW_SENTENCES
 
+#: #455 (owner 2026-11-13, the question tool, relayed by the PMO): every teammate
+#: is opened with `remember:false` - only a continuation of the same older
+#: teammate's conversation leaves it out - and long-term roles (PM/architect)
+#: keep the default. The same sentence is stated by `pmo` v8 (its 模型 section),
+#: so it lives in one constant and both lists below carry it verbatim.
+REMEMBER_FALSE_SENTENCE = (
+    "開隊員一律帶 `remember:false`（要接續同一位舊隊員的對話才省略）；"
+    "長期角色（PM／架構師）照預設。"
+)
+#: #455's other change: the `dont` line that used to forbid every workflow
+#: dispatch is relaxed to `ci.yml` on the PM's own branch; workflows that touch a
+#: real machine or change settings (`create-worker`／`delete-worker`) stay
+#: forbidden, and so does everything else on that line. Whole sentence, so
+#: deleting or rewording it goes red.
+PM_V7_DISPATCH_SENTENCE = (
+    "沒有本人那一次授權的真機操作不做（有授權的那一次見 `judge`）：不 ssh 其他機器、不改 secret；"
+    "dispatch workflow 只准 `ci.yml`、`ref` 填自己的分支（要 CI 時用），"
+    "`create-worker`／`delete-worker` 這類動真機或改設定的 workflow 仍不行"
+)
+#: What worker-team pm `v7` (#455) adds: the two sentences above. `v6` and
+#: earlier are append-only and not bound by these.
+PM_V7_NEW_SENTENCES = (REMEMBER_FALSE_SENTENCE, PM_V7_DISPATCH_SENTENCE)
+PM_V7_KEY_SENTENCES = PM_V6_KEY_SENTENCES + PM_V7_NEW_SENTENCES
+#: The sentence v6:162 (`dont`) keeps and v7 must not weaken: teammates never
+#: dispatch workflows. Only the PM's own `ci.yml` exception above is new.
+PM_V6_TEAMMATE_DISPATCH_SENTENCE = (
+    "不讓隊員讀憑證、碰真機、ssh、dispatch workflow、改 secret；給隊員的只有路徑或環境變數名。"
+)
+
 #: The sentence every `pm` version must keep (judge or dont).
 REVIEW_BY_NON_AUTHOR = "審查一律非作者"
 
@@ -382,6 +411,13 @@ PMO_V7_NEW_SENTENCES = (
 #: `KEY_SENTENCE_CASES` - `findings_for` applies just `PMO_V7_NEW_SENTENCES`
 #: (the v2／v3／v4／v5／v6 rows already cover the older lists for v7).
 PMO_V7_KEY_SENTENCES = PMO_V6_KEY_SENTENCES + PMO_V7_NEW_SENTENCES
+#: What pmo pm `v8` (#455) adds: the `remember:false` sentence shared with
+#: worker-team pm v7 (see `REMEMBER_FALSE_SENTENCE`). `v7` and earlier are
+#: append-only and not bound by it. Only the source for `KEY_SENTENCE_CASES` -
+#: `findings_for` applies just `PMO_V8_NEW_SENTENCES` (the v2~v7 rows already
+#: cover the older lists).
+PMO_V8_NEW_SENTENCES = (REMEMBER_FALSE_SENTENCE,)
+PMO_V8_KEY_SENTENCES = PMO_V7_KEY_SENTENCES + PMO_V8_NEW_SENTENCES
 #: The v6:101 line the v7 rewrite must not keep whole (design §6): its「停太久」
 #: and「必要時」are replaced by the O-1／O-2 threshold and action. Compared after the
 #: bold markers are stripped, like the `pm` v5 guard.
@@ -504,6 +540,7 @@ PM_V3_REL = "atelier/worker-team/pm/v3.md"
 PM_V4_REL = "atelier/worker-team/pm/v4.md"
 PM_V5_REL = "atelier/worker-team/pm/v5.md"
 PM_V6_REL = "atelier/worker-team/pm/v6.md"
+PM_V7_REL = "atelier/worker-team/pm/v7.md"
 IMPL_V2_REL = "atelier/worker-team/impl/v2.md"
 REV_V2_REL = "atelier/worker-team/rev/v2.md"
 IMPL_V3_REL = "atelier/worker-team/impl/v3.md"
@@ -513,6 +550,7 @@ PMO_V4_REL = "atelier/pmo/pm/v4.md"
 PMO_V5_REL = "atelier/pmo/pm/v5.md"
 PMO_V6_REL = "atelier/pmo/pm/v6.md"
 PMO_V7_REL = "atelier/pmo/pm/v7.md"
+PMO_V8_REL = "atelier/pmo/pm/v8.md"
 ARCH_REL = "atelier/worker-team/arch/v1.md"
 ARCH_V2_REL = "atelier/worker-team/arch/v2.md"
 ARCH_V3_REL = "atelier/worker-team/arch/v3.md"
@@ -712,6 +750,10 @@ def findings_for(path: str, text: str) -> Findings:
         and version_match is not None and int(version_match.group(1)) >= 5
     pm_version_6_or_later = team == "worker-team" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 6
+    # `pm` v7 (#455) relaxes the workflow-dispatch line and adds the
+    # `remember:false` sentence; v6 and earlier are append-only and not bound.
+    pm_version_7_or_later = team == "worker-team" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) >= 7
     pmo_version_4_or_later = team == "pmo" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 4
     # The H4 trigger sentence is version-bound (see its list above): v3 and v4
@@ -729,6 +771,10 @@ def findings_for(path: str, text: str) -> Findings:
     # append-only and not bound by them.
     pmo_version_7_or_later = team == "pmo" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 7
+    # `pmo` v8 (#455) adds the `remember:false` sentence; v7 and earlier are
+    # append-only and not bound by it.
+    pmo_version_8_or_later = team == "pmo" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) >= 8
     # `arch` is version-bound per file (#403): v1 keeps the「長期常駐」sentence,
     # v2 replaces it with「按需開」, so each list applies only to its own version.
     # `comm` (#236, #432): worker-team pm v4+, impl v2+, rev v2+, arch v3+
@@ -760,10 +806,12 @@ def findings_for(path: str, text: str) -> Findings:
             (pm_version_3_or_later, PM_V3_KEY_SENTENCES, "v3 起的 worker-team pm"),
             (pm_version_5_or_later, PM_V5_NEW_SENTENCES, "v5 起的 worker-team pm"),
             (pm_version_6_or_later, PM_V6_NEW_SENTENCES, "v6 起的 worker-team pm"),
+            (pm_version_7_or_later, PM_V7_NEW_SENTENCES, "v7 起的 worker-team pm"),
             (pmo_version_4_or_later, PMO_V4_KEY_SENTENCES, "v4 起的 pmo pm"),
             (pmo_version_5, PMO_V5_KEY_SENTENCES, "v5 的 pmo pm"),
             (pmo_version_6_or_later, PMO_V6_KEY_SENTENCES, "v6 起的 pmo pm"),
             (pmo_version_7_or_later, PMO_V7_NEW_SENTENCES, "v7 起的 pmo pm"),
+            (pmo_version_8_or_later, PMO_V8_NEW_SENTENCES, "v8 起的 pmo pm"),
             (role == "impl" and is_v1_or_later, IMPL_KEY_SENTENCES, "v1 起的 impl"),
             (comm_required, (COMM_SENTENCE,), "宣告 comm 的版本（pm v4／impl v2／rev v2／arch v3／pmo v7 起）"),
             (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev"),
@@ -1064,6 +1112,8 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     + [(PM_V4_REL, sentence, "關鍵句") for sentence in PM_V4_KEY_SENTENCES]
     + [(PM_V5_REL, sentence, "關鍵句") for sentence in PM_V5_KEY_SENTENCES]
     + [(PM_V6_REL, sentence, "關鍵句") for sentence in PM_V6_KEY_SENTENCES]
+    + [(PM_V7_REL, sentence, "關鍵句") for sentence in PM_V7_KEY_SENTENCES]
+    + [(PMO_V8_REL, sentence, "關鍵句") for sentence in PMO_V8_KEY_SENTENCES]
     + [(IMPL_V2_REL, sentence, "關鍵句") for sentence in IMPL_V2_KEY_SENTENCES]
     + [(REV_V2_REL, sentence, "關鍵句") for sentence in REV_V2_KEY_SENTENCES]
     + [(IMPL_V3_REL, sentence, "關鍵句") for sentence in IMPL_V3_KEY_SENTENCES]
@@ -1690,9 +1740,8 @@ def test_pm_v5_is_not_bound_by_the_merge_evidence_sentences():
     assert not findings_for(PM_V5_REL, text).errors
 
 
-def test_pm_v6_is_latest_and_has_matching_version_flags():
-    paths = list((HARNESS_ROOT / "worker-team/pm").glob("v*.md"))
-    assert max(paths, key=lambda p: int(p.stem[1:])).name == "v6.md"
+def test_pm_v6_has_matching_version_flags():
+    """#455：v7 出現之後，v6 不再是最大版；旗標仍然要對得上（照 #450 的寫法）。"""
     text = (REPO / PM_V6_REL).read_text(encoding="utf-8")
     assert "id: atelier:worker-team-pm@v6\n" in text
     assert "version: v6\n" in text
@@ -1706,3 +1755,68 @@ def test_pm_v6_wrong_version_flags_are_flagged(tmp_path, old, new):
     copy = tmp_path / "v6.md"
     copy.write_text(text.replace(old, new, 1), encoding="utf-8")
     assert findings_for(PM_V6_REL, copy.read_text(encoding="utf-8")).errors
+
+
+def test_pm_v6_is_not_bound_by_the_v7_sentences():
+    """#455：新句只約束 worker-team pm v7 起；v6 沒有這些句子時仍無錯。
+
+    append-only 的舊版不動，也不把新規則追溯套上去。
+    """
+    text = (REPO / PM_V6_REL).read_text(encoding="utf-8")
+    for sentence in PM_V7_NEW_SENTENCES:
+        assert sentence not in text, f"v6 不該有 v7 的句子：「{sentence}」"
+    assert not findings_for(PM_V6_REL, text).errors
+
+
+def test_pmo_v7_is_not_bound_by_the_v8_sentence():
+    """#455：`remember:false` 那句話只約束 pmo pm v8 起；v7 沒有它時仍無錯。"""
+    text = (REPO / PMO_V7_REL).read_text(encoding="utf-8")
+    for sentence in PMO_V8_NEW_SENTENCES:
+        assert sentence not in text, f"v7 不該有 v8 的句子：「{sentence}」"
+    assert not findings_for(PMO_V7_REL, text).errors
+
+
+def test_the_pm_v7_dispatch_relaxation_keeps_the_real_machine_limits():
+    """#455：放寬只到 `ci.yml`、`ref` 填自己的分支；動真機或改設定的 workflow
+    仍禁（句子裡要有 `create-worker`／`delete-worker`），而 v6:162 那句
+    「不讓隊員 … dispatch workflow」原樣保留（`dont` 第 162 行不動）。
+    """
+    text = (REPO / PM_V7_REL).read_text(encoding="utf-8")
+    assert PM_V7_DISPATCH_SENTENCE in text
+    assert "`ci.yml`" in PM_V7_DISPATCH_SENTENCE
+    assert "`create-worker`" in PM_V7_DISPATCH_SENTENCE
+    assert "`delete-worker`" in PM_V7_DISPATCH_SENTENCE
+    assert PM_V6_TEAMMATE_DISPATCH_SENTENCE in text, \
+        "v7 沒有原樣保留「不讓隊員 … dispatch workflow」那句"
+
+
+def test_pm_v7_is_latest_and_has_matching_version_flags():
+    paths = list((HARNESS_ROOT / "worker-team/pm").glob("v*.md"))
+    assert max(paths, key=lambda p: int(p.stem[1:])).name == "v7.md"
+    text = (REPO / PM_V7_REL).read_text(encoding="utf-8")
+    assert "id: atelier:worker-team-pm@v7\n" in text
+    assert "version: v7\n" in text
+    assert "# PM（v7）\n" in text
+    assert not findings_for(PM_V7_REL, text).errors
+
+
+def test_pmo_v8_is_latest_and_has_matching_version_flags():
+    paths = list((HARNESS_ROOT / "pmo/pm").glob("v*.md"))
+    assert max(paths, key=lambda p: int(p.stem[1:])).name == "v8.md"
+    text = (REPO / PMO_V8_REL).read_text(encoding="utf-8")
+    assert "id: atelier:pmo-pm@v8\n" in text
+    assert "version: v8\n" in text
+    assert "# PMO（v8）\n" in text
+    assert not findings_for(PMO_V8_REL, text).errors
+
+
+@pytest.mark.parametrize("rel,old,new", [
+    (PM_V7_REL, "@v7", "@v6"), (PM_V7_REL, "version: v7", "version: v6"),
+    (PMO_V8_REL, "@v8", "@v7"), (PMO_V8_REL, "version: v8", "version: v7"),
+])
+def test_a_wrong_version_flag_on_the_newest_harness_is_flagged(tmp_path, rel, old, new):
+    """#455：v7／v8 的 id 與 version 旗標要和檔名同一個版本（照 v6 的寫法）。"""
+    text = (REPO / rel).read_text(encoding="utf-8")
+    copy = tmp_path / Path(rel).name
+    copy.write_text(text.replace(old, new, 1), encoding="utf-8")
+    assert findings_for(rel, copy.read_text(encoding="utf-8")).errors
