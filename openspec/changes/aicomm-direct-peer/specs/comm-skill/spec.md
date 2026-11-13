@@ -148,7 +148,7 @@
 ### Requirement: sidecar 位址固定為預設 loopback 位址
 skill MUST 使用 sidecar 文件的預設位址（loopback）；MUST NOT 讀任何設定檔，MUST NOT 提供使用者可設定的位址。測試用覆寫（環境變數 `AICOMM_SIDECAR`，作者提議 P5，可被拒絕）若存在，MUST 只收單一位址、MUST 為 loopback；需要叫醒時覆寫值不是 loopback MUST 以 exit 1 拒絕，且 MUST 在寫進 Angareion 之前拒絕。「需要叫醒」＝沒有 `--no-wake`，且（`--to` 加 `--mention`）排除自己後的候選不是空的。不需要叫醒時 MUST NOT 對 sidecar 發任何請求。這個檢查 MUST NOT 被宣稱為防止跨機叫醒（轉發埠本身是 loopback）。
 
-跨機叫醒要讀的心跳與埠清單，目錄另由環境變數 `AICOMM_SIDECAR_LINK` 指定（只給測試與手動用；sidecar 開的 agent 的環境是白名單，拿不到這個變數）；沒設 MUST 用 `~/.mylinuxpool/sidecar-link`（見「讀 sidecar-link 的心跳」與「讀 sidecar-link 的埠清單」）。這個變數只決定讀哪一個目錄，MUST NOT 被當成 sidecar 位址，也 MUST NOT 被當成使用者可設定的叫醒位址（跨機能打哪些埠由清單決定）。skill MUST NOT 為此讀任何其他設定檔，MUST NOT 從這個目錄讀心跳與埠清單以外的檔。
+跨機叫醒要讀的心跳與埠清單，目錄另由環境變數 `AICOMM_SIDECAR_LINK` 指定（只給測試與手動用；安全界線是 loopback＋兩條路由，不依賴誰拿得到這個變數）；沒設 MUST 用 `~/.mylinuxpool/sidecar-link`（見「讀 sidecar-link 的心跳」與「讀 sidecar-link 的埠清單」）。設了但是空字串或不是絕對路徑 MUST 當成沒有目錄（結果是「查不了」，即 `not-woken peer-unavailable`；MUST NOT 當成用法錯誤：它在訊息送達之後才讀，MUST NOT 因此改變結束碼）。這個變數只決定讀哪一個目錄，MUST NOT 被當成 sidecar 位址，也 MUST NOT 被當成使用者可設定的叫醒位址（跨機能打哪些埠由清單決定）。skill MUST NOT 為此讀任何其他設定檔，MUST NOT 從這個目錄讀心跳與埠清單以外的檔。
 
 #### Scenario: 預設位址
 - **WHEN** 沒有覆寫
@@ -165,6 +165,10 @@ skill MUST 使用 sidecar 文件的預設位址（loopback）；MUST NOT 讀任�
 #### Scenario: 跨機執行檔的測試掛鉤
 - **WHEN** `AICOMM_SIDECAR_LINK` 指到一個假的清單目錄，且本機回 404
 - **THEN** 用它讀心跳與埠清單；它 MUST NOT 被當成 sidecar 位址，查詢與戳仍只打本機的 loopback 位址與清單上各埠的 `127.0.0.1:<port>`
+
+#### Scenario: 測試鉤子是空字串或不是絕對路徑
+- **WHEN** `AICOMM_SIDECAR_LINK` 是空字串或相對路徑（例如 `link`），且本機回 404
+- **THEN** 當成沒有目錄：stderr 是 `wake: <agent> not-woken peer-unavailable`；exit 0；沒有任何對別的 sidecar 的請求；MUST NOT 用 exit 1 回報用法錯誤
 
 ### Requirement: 沒有硬控制，叫醒的節制由 SKILL.md 軟規則承擔
 skill MUST NOT 實作名單、角色或權限類的叫醒限制。`skills/aicomm/SKILL.md` MUST 寫明三條軟規則：(1) `send` 預設不中斷，要中斷才加 `--interrupt`；(2) 隊員基本上不要中斷上位職（PM、PMO）；(3) 「收到」這類沒有要對方動作的回覆加 `--no-wake`，不要叫醒對方。SKILL.md MUST 寫明：之後要硬控制，不在 aicomm 做——本機走 sidecar open 帶白名單（MyLinuxPool#346），跨機（經 `127.0.0.1:<port>` 的 sidecar）的存取控制併在 MyPMO#297 再議；並寫明代價：pool 內任何 agent（含別台機器上的）都能叫醒 PMO，與 M2 D6 的 watch 規則並存。SKILL.md MUST NOT 宣稱 aicomm 或 sidecar 白名單擋得住跨機的叫醒。
@@ -315,6 +319,8 @@ skill MUST NOT 修改 Angareion 的協定或程式；它對 Angareion 只用其�
 ### Requirement: 同一個收件人戳了好幾台時取一個結果
 同一個收件人在埠清單上有一台以上的結果時，MUST 照這個順序取一個：只要有一台 200 就是 `woken`（列出成功的那幾個 port，由小到大）；否則只要有一台 `unknown`，就是 `unknown`；都不是就是 `not-woken`。`unknown` 或 `not-woken` 有好幾台時，原因碼 MUST 取 port 由小到大的第一個。`record=` MUST 列出每一台有拿到合格 `poke_id` 的戳（含失敗的那幾台），依 port 由小到大。` queued` MUST 只在成功（200）的每一台都回報排隊時才加；只要有一台是當下送出，MUST NOT 加 ` queued`。
 
+（契約 C-13。）
+
 #### Scenario: 多台取一個結果
 - **WHEN** 同一個收件人在兩台都可戳，一台 200、另一台的戳逾時；成功的那台沒有回 id（舊版 sidecar）
 - **THEN** stderr 是 `wake: <agent> woken peer:<成功的 port>`（有一台 200 就是 `woken`，不寫 `unknown`）；逾時的那台沒有紀錄 id
@@ -332,7 +338,7 @@ skill MUST NOT 修改 Angareion 的協定或程式；它對 Angareion 只用其�
 - **THEN** stderr 是 `wake: <agent> woken peer:5202 queued record=peer:5201/<A>,peer:5202/<B>`
 
 ### Requirement: 叫醒的原因碼清單
-原因碼 MUST 只有這些（新增要改 `design.md` 或後續 change，並同步 cli 的常數與文件）：`not-woken` 是 `not-found`、`peer-unavailable`、`lookup-incomplete`、`peer-port-out-of-range`、`peer-bad-answer`、`bad-answer`、`bad-name`、`state-<state>`、`agent-not-running`、`awaiting-answer`、`http-<碼>`；`unknown` 是 `poke-timeout`、`poke-error`、`peer-bad-answer`、`internal-error`。跨機的碼 MUST 對應到「讀 sidecar-link 的心跳」、「讀 sidecar-link 的埠清單」、「每一個埠怎麼查」與「每一個埠怎麼戳」的結果：`not-found`＝清單上每一台都 404；`lookup-incomplete`＝至少一台查不到、而且沒有任何一台給出可讀的回答；`peer-unavailable`＝心跳或清單不可用，或某一台的戳連線被拒；`peer-port-out-of-range`＝清單的某一行是整數但不在 1–65535；`peer-bad-answer`＝清單格式不對、某一台的查詢回應讀不懂，或某一台的戳回應 HTTP 層讀不懂。`unknown` MUST 只用於「可能已經戳到」的情況：看到它 MUST NOT 重送。
+原因碼 MUST 只有這些（新增要改 `design.md` 或後續 change，並同步 cli 的常數與文件）：`not-woken` 是 `not-found`、`peer-unavailable`、`lookup-incomplete`、`peer-port-out-of-range`、`peer-bad-answer`、`bad-answer`、`bad-name`、`state-<state>`、`agent-not-running`、`awaiting-answer`、`http-<碼>`；`unknown` 是 `poke-timeout`、`poke-error`、`peer-bad-answer`、`internal-error`。跨機的碼 MUST 對應到「讀 sidecar-link 的心跳」、「讀 sidecar-link 的埠清單」、「每一個埠怎麼查」與「每一個埠怎麼戳」的結果：`not-found`＝清單上每一台都 404；`lookup-incomplete`＝至少一台查不到、而且沒有任何一台給出可讀的回答；`peer-unavailable`＝心跳或清單不可用（含扣掉本機埠後一個埠都不剩），或某一台的戳連線被拒；`peer-port-out-of-range`＝清單的某一行是整數但不在 1–65535（整份清單不用）；`peer-bad-answer`＝清單格式不對（同一份清單有多個壞行時，依檔案順序第一個不合格的行決定；非 UTF-8 一律這個碼）、某一台的查詢回應讀不懂，或某一台的戳回應 HTTP 層讀不懂。`unknown` MUST 只用於「可能已經戳到」的情況：看到它 MUST NOT 重送。
 
 #### Scenario: 原因碼與常數一致
 - **WHEN** 檢查 `src/aicomm/cli.py` 的原因碼常數
@@ -378,7 +384,9 @@ skill MUST NOT 修改 Angareion 的協定或程式；它對 Angareion 只用其�
 ## ADDED Requirements
 
 ### Requirement: 跨機叫醒直連本機的 sidecar-link 埠
-本機查不到人時，skill MUST 依「讀 sidecar-link 的心跳」與「讀 sidecar-link 的埠清單」讀出埠清單，並對清單裡**每一個**埠 P（跳過與本機 sidecar 同一個埠）直接以 `GET http://127.0.0.1:P/agents/<id>` 查、以 `POST http://127.0.0.1:P/agents/<id>/poke` 戳；MUST NOT 呼叫 `pool-peer` 或任何其他外部指令，MUST NOT 自己連 Gateway 或任何非 loopback 位址。`<id>` MUST 先做 URL quote。aicomm 對每一台 sidecar MUST 只打兩個路由：`GET /agents/<id>` 與 `POST /agents/<id>/poke`。同一個 id 在好幾台上時 MUST 全部戳（與舊版 `pool-peer find` 都列出的語意相同），結果合併成一行（見「同一個收件人戳了好幾台時取一個結果」）。
+本機查不到人時，skill MUST 依「讀 sidecar-link 的心跳」與「讀 sidecar-link 的埠清單」讀出埠清單，並對清單裡**每一個**埠 P（跳過與本機 sidecar 同一個埠）直接以 `GET http://127.0.0.1:P/agents/<id>` 查、以 `POST http://127.0.0.1:P/agents/<id>/poke` 戳；MUST NOT 呼叫 `pool-peer` 或任何其他外部指令，MUST NOT 連任何非 loopback 位址。`<id>` MUST 先做 URL quote。aicomm 對每一台 sidecar MUST 只打兩個路由：`GET /agents/<id>` 與 `POST /agents/<id>/poke`。同一個 id 在好幾台上時 MUST 全部戳（與舊版 `pool-peer find` 都列出的語意相同），結果合併成一行（見「同一個收件人戳了好幾台時取一個結果」）。
+
+（契約 C-16。）
 
 #### Scenario: 只打兩個路由
 - **WHEN** 本機回 404，跨機在兩台找到並戳了
@@ -393,22 +401,43 @@ skill MUST NOT 修改 Angareion 的協定或程式；它對 Angareion 只用其�
 - **THEN** 兩台都戳；stderr 是 `wake: <agent> woken peer:<兩個埠，由小到大>`
 
 ### Requirement: 讀 sidecar-link 的心跳
-跨機叫醒用的目錄 MUST 是 `~/.mylinuxpool/sidecar-link`（或 `AICOMM_SIDECAR_LINK` 指定的目錄，只給測試與手動用）。skill MUST 先讀 `heartbeat`：讀不到、mtime 與現在的差超過 90 秒（絕對值；mtime 遠在未來也算不新鮮）、內容不是符合 `^[1-9][0-9]*$` 的 pid、或 `os.kill(pid, 0)` 說那個 pid 不在（`ProcessLookupError`；`PermissionError` 算活著，其他 `OSError` 算不在），MUST 視為「查不了」（見「查不了」的結果）。MUST NOT 把 0 或負數交給 `os.kill`。
+跨機叫醒用的目錄 MUST 是 `~/.mylinuxpool/sidecar-link`（或 `AICOMM_SIDECAR_LINK` 指定的目錄，只給測試與手動用）；`Path.home()` 丟 `RuntimeError`／`OSError`、或 `AICOMM_SIDECAR_LINK` 是空字串／非絕對路徑時，MUST 當成沒有目錄（查不了）。skill MUST 先讀 `heartbeat`：讀不到、mtime 與現在的差超過 90 秒（絕對值；mtime 遠在未來也算不新鮮）MUST 視為「查不了」（見「查不了」的結果）；pid 的驗證見「心跳的 pid 驗證」。
+
+（契約 C-1、C-2、C-9。）
 
 #### Scenario: 沒有心跳
 - **WHEN** 本機回 404，目錄裡沒有 `heartbeat`
 - **THEN** stderr 是 `wake: <agent> not-woken peer-unavailable`；exit 0；沒有任何對別的 sidecar 的請求
 
 #### Scenario: 心跳不新鮮
-- **WHEN** 本機回 404，`heartbeat` 的 mtime 是 91 秒前，或檔內 pid 已經不在
+- **WHEN** 本機回 404，`heartbeat` 的 mtime 是 91 秒前，或 mtime 遠在未來（例如 300 秒後）
 - **THEN** stderr 是 `wake: <agent> not-woken peer-unavailable`；沒有任何對別的 sidecar 的請求
+
+#### Scenario: 取家目錄失敗
+- **WHEN** 沒有設 `AICOMM_SIDECAR_LINK`，而 `Path.home()` 丟 `RuntimeError`／`OSError`
+- **THEN** 當成沒有目錄：stderr 是 `wake: <agent> not-woken peer-unavailable`；exit 0
 
 #### Scenario: 心跳剛好在新鮮窗內
 - **WHEN** 本機回 404，`heartbeat` 的 mtime 是 89 秒前、內容是活著的 pid，`ports` 有一個可用的埠
 - **THEN** 照那個埠查；不是 `peer-unavailable`
 
+### Requirement: 心跳的 pid 驗證
+`heartbeat` 的內容 MUST 去掉頭尾空白後符合 `^[1-9][0-9]*$` 且不大於 2147483647；否則 MUST 當成不新鮮（查不了）。pid 超過 2147483647 時 `os.kill` 會丟 `OverflowError`（不是 `OSError`），MUST 在呼叫前擋掉。`os.kill(pid, 0)`：`ProcessLookupError` 或其他 `OSError` MUST 算不在；`PermissionError` MUST 算活著。MUST NOT 把 0 或負數交給 `os.kill`。
+
+（契約 C-3、C-4。）
+
+#### Scenario: 心跳的 pid 已經不在
+- **WHEN** 本機回 404，`heartbeat` 的 mtime 是 5 秒前，但檔內 pid 已經不在（`ProcessLookupError`）
+- **THEN** stderr 是 `wake: <agent> not-woken peer-unavailable`；沒有任何對別的 sidecar 的請求
+
+#### Scenario: 心跳的 pid 讀不懂或太大
+- **WHEN** 本機回 404，`heartbeat` 的內容是 `0`、`-1`、`12 34`、空字串，或 `2147483648`（合樣式但 `os.kill` 收不下）
+- **THEN** 當成不新鮮：stderr 是 `wake: <agent> not-woken peer-unavailable`；`os.kill` MUST NOT 被呼叫（不會變成 `unknown internal-error`）；沒有任何對別的 sidecar 的請求
+
 ### Requirement: 讀 sidecar-link 的埠清單
-心跳新鮮時 skill MUST 讀同一個目錄的 `ports`：每行一個十進位埠；重複的埠 MUST 只留第一次出現的那一筆，處理時由小到大。讀不到、或沒有任何可用的埠 MUST 視為「查不了」（見「查不了」的結果）；不是 UTF-8、有空行（只允許最後一個換行造成的一個空字串）、或某一行不是 `^[0-9]{1,5}$` MUST 是 `not-woken peer-bad-answer`；某一行是整數但不在 1–65535 MUST 是 `not-woken peer-port-out-of-range`。清單含本機 sidecar 的埠時 MUST 跳過它。
+心跳新鮮時 skill MUST 讀同一個目錄的 `ports`：每行一個十進位埠；重複的埠 MUST 只留第一次出現的那一筆，處理時由小到大。讀不到、或扣掉本機埠後沒有任何可用的埠 MUST 視為「查不了」（見「查不了」的結果）；不是 UTF-8、有空行（只允許最後一個換行造成的一個空字串）、或某一行不是 `^[0-9]{1,5}$` MUST 是 `not-woken peer-bad-answer`；某一行是整數但不在 1–65535 MUST 是 `not-woken peer-port-out-of-range`。清單含本機 sidecar 的埠時 MUST 跳過它；錯誤怎麼定案見「清單的錯誤是整份的」。
+
+（契約 C-5～C-7。）
 
 #### Scenario: 沒有埠清單或清單是空的
 - **WHEN** 本機回 404，心跳新鮮，但目錄裡沒有 `ports`，或 `ports` 是空的
@@ -430,8 +459,27 @@ skill MUST NOT 修改 Angareion 的協定或程式；它對 Angareion 只用其�
 - **WHEN** `ports` 含著本機 sidecar 的埠（預設 8471，或 `AICOMM_SIDECAR` 的埠）
 - **THEN** 跳過那個埠；不會對同一個 sidecar 查第二次或戳第二次
 
+### Requirement: 清單的錯誤是整份的
+只要有一行不合格，這台機器上所有的跨機收件人 MUST 拿到同一個原因碼，MUST NOT 跳過壞行改用剩下的行（與舊版逐台的 `peer-port-out-of-range` 不同）。有好幾個不合格的行時，原因碼 MUST 依檔案順序由第一個不合格的行決定；不是 UTF-8 時整檔解不開，MUST 一律是 `peer-bad-answer`。本機的埠 MUST 這樣算：`urllib.parse.urlsplit(sidecar_base(...)).port`；沒有埠 MUST 用 80；只比埠號，不比主機。扣掉本機埠後一個埠都不剩 MUST 是 `not-woken peer-unavailable`（與空檔相同），MUST NOT 回 `not-found`。
+
+（契約 C-8。）
+
+#### Scenario: 有一行壞就整份不用
+- **WHEN** `ports` 是 `5201`、`52x1`，而 5201 上的 sidecar 其實有這個 id
+- **THEN** 不查也不戳 5201；stderr 是 `wake: <agent> not-woken peer-bad-answer`（整份清單不用，不是只跳過壞行）
+
+#### Scenario: 好幾個壞行時依檔案順序取第一個
+- **WHEN** `ports` 依序是 `0`、`52x1`（或反過來：`52x1`、`0`）
+- **THEN** 分別是 `wake: <agent> not-woken peer-port-out-of-range`、`wake: <agent> not-woken peer-bad-answer`（第一個不合格的行決定，與後面還有哪些壞行無關）
+
+#### Scenario: 扣掉本機埠後沒有埠
+- **WHEN** 本機回 404，心跳新鮮，`ports` 只有本機 sidecar 的那個埠（例如只有 8471）
+- **THEN** stderr 是 `wake: <agent> not-woken peer-unavailable`（查不了：一台都沒查，MUST NOT 說成 `not-found`）；沒有任何對別的 sidecar 的請求
+
 ### Requirement: 「查不了」的結果
 「查不了」＝心跳或埠清單不可用。MUST 是 `not-woken peer-unavailable`（MAS-2；與舊版 `pool-peer` rc 2 同一個語意），且 MUST NOT 改走別的路徑（MUST NOT 退回 `pool-peer`、MUST NOT 讀別的檔、MUST NOT 試非 loopback 位址）。skill MUST NOT 快取 `heartbeat` 與 `ports`：每一位收件人的後援都重新讀。
+
+（契約 C-15。）
 
 #### Scenario: 查不了不改走別的路徑
 - **WHEN** 本機回 404，心跳或埠清單不可用，而 PATH 上（或 `AICOMM_POOL_PEER`）有一個可用的 `pool-peer`
@@ -443,6 +491,10 @@ skill MUST NOT 修改 Angareion 的協定或程式；它對 Angareion 只用其�
 
 ### Requirement: 每一個埠怎麼查
 對清單裡每一個埠 P（跳過本機的埠），MUST 以 `GET http://127.0.0.1:P/agents/<id>` 查（`<id>` 先 URL quote），結果 MUST 分成四類：404＝這台確定沒有；200 且 body 是 JSON 物件、`state` 是字串＝這台有回答；200 但 body／`state` 讀不懂＝讀不懂；連不上、逾時、HTTP 層讀不懂、200／404 以外的狀態碼、或查詢預算用完＝查不到。404 與查不到的埠 MUST NOT 列入結果清單（與舊版只列找到的機器相同）；所有埠都 404 MUST 是 `not-woken not-found`；不是所有埠都 404（至少一台查不到）且沒有任何一台給出回答（全部是 404 或查不到），MUST 是 `not-woken lookup-incomplete`。
+
+查詢的總預算與每個請求的上限見「跨機叫醒的時間預算」；預算 MUST 用單調時鐘計（`time.monotonic()`），心跳的 age MUST 用 `time.time() - st_mtime`。
+
+（契約 C-10、C-14。）
 
 #### Scenario: 全部 404
 - **WHEN** 清單的每一個埠都回 404
@@ -456,8 +508,14 @@ skill MUST NOT 修改 Angareion 的協定或程式；它對 Angareion 只用其�
 - **WHEN** 清單有一個埠回 200，但 body 不是 JSON 物件或 `state` 不是字串
 - **THEN** 不戳那一台，stderr 是 `wake: <agent> not-woken peer-bad-answer`
 
+#### Scenario: 別台的 200 body 太深讀不懂
+- **WHEN** 清單有一個埠回 200，body 是超過解析上限的巢狀 JSON（`json.loads` 丟 `RecursionError`）
+- **THEN** 不戳那一台，stderr 是 `wake: <agent> not-woken peer-bad-answer`（與本機的 `bad-answer` 分開：這是跨機這台讀不懂；不會變成 `unknown` 或讓 `send` 失敗）
+
 ### Requirement: 每一個埠怎麼戳
 對「有回答」的每一台：`state` 是 `idle`／`running` MUST 戳（`POST http://127.0.0.1:P/agents/<id>/poke`，body 與本機同一個組法、`via` 是 `"aicomm-peer"`）；其他值 MUST NOT 戳，結果是 `not-woken state-<state>`；`state` 不是一個 token（`[A-Za-z0-9_-]+`）MUST NOT 戳，結果是 `not-woken peer-bad-answer`。「讀不懂」的那一台 MUST NOT 戳，結果是 `not-woken peer-bad-answer`。能戳的每一台 MUST 都戳（MAS-3）；每一台的 `interrupt` MUST 各自判斷（只有那一台是 `running` 且呼叫端帶 `--interrupt` 才是 true）；`via`／`ref` 每一台都相同。
+
+（契約 C-12。）
 
 #### Scenario: 只有一台有這個 id
 - **WHEN** 清單有三個埠，兩個回 404、一個回 200 `idle`
@@ -481,6 +539,8 @@ skill MUST NOT 修改 Angareion 的協定或程式；它對 Angareion 只用其�
 
 ### Requirement: 跨機查詢與戳的連線結果
 跨機查詢（`GET /agents/<id>`）沒有可用回答時：連不上、逾時、HTTP 層讀不懂（`http.client.HTTPException`）、200／404 以外的狀態碼，MUST 都算那一台「查不到」（見「每一個埠怎麼查」），MUST NOT 說成 `unknown`（還沒戳任何人）。跨機戳（`POST /agents/<id>/poke`）沒有拿到 HTTP 回應時：逾時 MUST 是 `unknown poke-timeout`；連線被拒（`ConnectionRefusedError`，含包在 `urllib.error.URLError` 裡的）MUST 是 `not-woken peer-unavailable`（確定沒送出去）；其他連線錯誤（被重置等）MUST 是 `unknown poke-error`；HTTP 層讀不懂 MUST 是 `unknown peer-bad-answer`（那一台回了東西，可能已經戳到）。每一種都 MUST NOT 重送、MUST NOT 改查別台。
+
+（契約 C-11。）
 
 #### Scenario: 某一台連不上
 - **WHEN** 本機回 404，清單有一個埠沒有人監聽
