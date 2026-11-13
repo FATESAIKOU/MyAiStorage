@@ -1,14 +1,13 @@
-"""Fakes for the aicomm tests: a loopback fake sidecar and fake `angareion`/`pool-peer`.
+"""Fakes for the aicomm tests: a loopback fake sidecar, a sidecar-link dir, fake `angareion`.
 
-aicomm talks to three things: the `angareion` command and MyLinuxPool's `pool-peer`
-command (both found on PATH or given by an environment variable), and the local sidecar
-(HTTP on loopback). All three are replaced here, so a test never reaches the real channel,
-the real pool or the real sidecar. `run_aicomm` refuses to run unless `AICOMM_SIDECAR` is
-set and the peer is a test one too: either `AICOMM_POOL_PEER` set, or - when a
-PATH/HOME-fallback test leaves it unset - neither PATH nor `~/.mylinuxpool/bin` has a
-`pool-peer`, or the one(s) found are wrappers around the fake one. So a test that forgets
-its fakes fails instead of knocking on the real sidecar or on a real `pool-peer` (a worker
-has one on PATH).
+aicomm talks to the `angareion` command and to a sidecar over loopback HTTP; when the local
+sidecar does not know a recipient it also reads the sidecar-link directory (`heartbeat` and
+`ports`). All of that is replaced here, so a test never reaches the real channel, the real
+sidecar, or the real `~/.mylinuxpool/sidecar-link`. `run_aicomm` refuses to run unless
+`AICOMM_SIDECAR` is set and the sidecar-link directory is one a test owns: either
+`AICOMM_SIDECAR_LINK` points somewhere, or the default directory under HOME (which the
+`isolated_home` fixture points at a tmp dir) does not exist. So a test that forgets its
+fakes fails instead of knocking on the real sidecar or reading a real link.
 """
 
 from __future__ import annotations
@@ -19,12 +18,14 @@ import io
 import json
 import os
 import re
-import shlex
 import shutil
 import socket
 import stat
 import sys
+import tempfile
 import threading
+import time
+import urllib.parse
 from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -71,84 +72,64 @@ def install_fake_angareion(bin_dir: Path) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-# `pool-peer` (MyLinuxPool) is the other command aicomm runs (#368). The fake answers
-# from the scenario file `FAKE_PEER_SCENARIO` points at: `{"find": {rc, stdout, delay,
-# stderr, stdout_b64}}` and `{"call": {"<port>": {rc, stdout, delay, stderr, stdout_b64}}}`;
-# a scenario that names nobody (`find` rc 1) is the default. `stdout_b64` is base64 raw
-# bytes the peer prints on stdout, for answers that are not UTF-8. `find` may instead be
-# `{"by_id": {"<id>": {...}}}` so several recipients in one send get different answers.
-# Every call is appended to `FAKE_PEER_LOG` as one JSON line `{"argv", "stdin"}` before it
-# sleeps, so a call aicomm killed on its own timeout is still recorded.
-_FAKE_POOL_PEER = r'''#!{python}
-import base64, json, os, sys, time
-argv = sys.argv[1:]
-stdin = sys.stdin.read() if argv[:1] == ["call"] else ""
-with open(os.environ["FAKE_PEER_LOG"], "a", encoding="utf-8") as f:
-    f.write(json.dumps({{"argv": argv, "stdin": stdin}}) + "\n")
-path = os.environ.get("FAKE_PEER_SCENARIO", "")
-scenario = {{}}
-if path and os.path.exists(path):
-    with open(path, encoding="utf-8") as f:
-        scenario = json.load(f)
-if argv[:1] == ["find"]:
-    answer = scenario.get("find") or {{"rc": 1}}
-    by_id = answer.get("by_id")
-    if isinstance(by_id, dict):
-        answer = by_id.get(argv[1] if len(argv) > 1 else "") or {{"rc": 1}}
-elif argv[:1] == ["call"]:
-    answer = (scenario.get("call") or {{}}).get(argv[1] if len(argv) > 1 else "") or {{}}
-else:
-    answer = {{}}
-delay = float(answer.get("delay") or 0)
-if delay:
-    time.sleep(delay)
-raw = answer.get("stdout_b64")
-if raw:
-    sys.stdout.buffer.write(base64.b64decode(raw))
-else:
-    sys.stdout.write(answer.get("stdout") or "")
-sys.stderr.write(answer.get("stderr") or "")
-sys.exit(int(answer.get("rc") or 0))
-'''
-
-
-def install_fake_pool_peer(path: Path) -> None:
-    """Write the fake `pool-peer` to `path` and make it executable."""
-    path.write_text(_FAKE_POOL_PEER.format(python=sys.executable), encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
-
-
 def angareion_calls(log: Path) -> list[dict]:
     if not log.exists():
         return []
     return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line]
 
 
-def pool_peer_calls(log: Path) -> list[dict]:
-    """Every argv (and stdin) the fake `pool-peer` was given, in order."""
-    if not log.exists():
-        return []
-    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line]
+class LinkDir:
+    """A fake sidecar-link directory: the two files, written outright by a test.
 
-
-def assert_only_pool_peer_calls(log: Path) -> None:
-    """`pool-peer` is only ever asked the two things design §2 allows (#368).
-
-    `find <id> --json --timeout 10` and `call <port> POST /agents/<id>/poke --timeout 5`;
-    nothing else, and no `list`.
+    `fresh(*ports)` is the common case - a heartbeat naming this process and that port
+    list. The other writers exist for the boundary cases: an old or future mtime, a dead
+    or malformed pid, a missing file, a list that is not what the reader expects.
     """
-    for call in pool_peer_calls(log):
-        argv = call["argv"]
-        what = f"unexpected pool-peer argv: {argv}"
-        if argv[:1] == ["find"]:
-            assert len(argv) == 5 and argv[2:] == ["--json", "--timeout", "10"], what
-        elif argv[:1] == ["call"]:
-            assert len(argv) == 6 and argv[2] == "POST", what
-            assert argv[4:] == ["--timeout", "5"], what
-            assert re.fullmatch(r"[1-9][0-9]*", argv[1]), what
-            assert re.fullmatch(r"/agents/[^/]+/poke", argv[3]), what
-        else:
-            raise AssertionError(what)
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        root.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def heartbeat(self) -> Path:
+        return self.root / "heartbeat"
+
+    @property
+    def ports(self) -> Path:
+        return self.root / "ports"
+
+    def _touch(self, path: Path, age: float) -> None:
+        if age:
+            when = time.time() - age
+            os.utime(path, (when, when))
+
+    def beat(self, content: object = None, *, age: float = 0.0) -> None:
+        """Write the heartbeat; the default content is this (live) process's pid."""
+        self.heartbeat.write_text(
+            str(os.getpid() if content is None else content), encoding="utf-8")
+        self._touch(self.heartbeat, age)
+
+    def no_beat(self) -> None:
+        self.heartbeat.unlink(missing_ok=True)
+
+    def ports_text(self, text: str, *, age: float = 0.0) -> None:
+        self.ports.write_text(text, encoding="utf-8")
+        self._touch(self.ports, age)
+
+    def ports_bytes(self, data: bytes) -> None:
+        self.ports.write_bytes(data)
+
+    def ports_list(self, *values: object, age: float = 0.0) -> None:
+        """Write the list: one value per line, in the order given."""
+        self.ports_text("".join(f"{value}\n" for value in values), age=age)
+
+    def no_ports(self) -> None:
+        self.ports.unlink(missing_ok=True)
+
+    def fresh(self, *ports: object) -> None:
+        """A healthy link: a live heartbeat plus that port list (an empty one by default)."""
+        self.beat()
+        self.ports_list(*ports)
 
 
 class FakeSidecar:
@@ -192,7 +173,7 @@ class FakeSidecar:
                 m = re.fullmatch(r"/agents/([^/]+)", self.path)
                 if not m:
                     return self._reply(400, b"{}")
-                name = m.group(1)
+                name = urllib.parse.unquote(m.group(1))  # the real sidecar decodes the path
                 if name in sidecar.raw:
                     status, payload = sidecar.raw[name]
                     return self._reply(status, payload)
@@ -210,13 +191,17 @@ class FakeSidecar:
                 if not m:
                     return self._reply(400, b"{}")
                 status, payload = sidecar.poke_bodies.get(
-                    m.group(1), (sidecar.poke_status, sidecar.poke_body)
+                    urllib.parse.unquote(m.group(1)), (sidecar.poke_status, sidecar.poke_body)
                 )
                 self._reply(status, payload)
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
+
+    @property
+    def port(self) -> int:
+        return self._server.server_address[1]
 
     @property
     def url(self) -> str:
@@ -264,8 +249,12 @@ class RawSidecar:
         self._thread.start()
 
     @property
+    def port(self) -> int:
+        return self._sock.getsockname()[1]
+
+    @property
     def url(self) -> str:
-        return f"http://127.0.0.1:{self._sock.getsockname()[1]}"
+        return f"http://127.0.0.1:{self.port}"
 
     def _serve(self) -> None:
         while not self._stop.is_set():
@@ -282,6 +271,17 @@ class RawSidecar:
                         if not chunk:
                             break
                         data += chunk
+                    # Read the whole request body too when there is one: closing with the
+                    # body still in flight would be a reset, not the clean FIN a test that
+                    # says "the server closed after reading" means to produce.
+                    head, _, rest = data.partition(b"\r\n\r\n")
+                    found = re.search(rb"(?i)content-length:\s*([0-9]+)", head)
+                    wanted = int(found.group(1)) if found else 0
+                    while len(rest) < wanted:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        rest += chunk
                     answer = self.answers[min(self.connections, len(self.answers) - 1)]
                     self.connections += 1
                     conn.sendall(answer)
@@ -299,107 +299,39 @@ class Result:
         self.code, self.out, self.err = code, out, err
 
 
-# What "a shell wrapper around the fake peer" means (#393 low-3): a POSIX-ish shell
-# shebang as the fallback family writes - `#!/bin/sh`, `#!/bin/dash`, `#!/usr/bin/sh`,
-# `#!/usr/bin/env sh/bash/...`, also with env flags like `#!/usr/bin/env -S bash -eu`.
-# The fake peer itself has `#!/…python` and is never a PATH/HOME candidate on its own,
-# so a candidate that starts like that is not a wrapper and must not pass.
-_SHELL_SHEBANG = re.compile(
-    r"#!\S*[ /](?:ba|da|a|k|z)?sh(?: |$)"
-    r"|#!\S*/env(?: -\S+)* (?:ba|da|a|k|z)?sh(?: |$)"
-)
+def _link_is_test_only() -> bool:
+    """True when the sidecar-link directory aicomm could read is one a test owns.
 
-# A python interpreter: `python`, `python3`, `.../python3.12` - the only thing an
-# accepted wrapper may actually start around the fake.
-_PYTHON = re.compile(r"^(?:.*/)?python(?:[\d.]+)?$")
-
-
-def _wrapper_line_runs(line: str, script: str) -> bool:
-    """One wrapper line execs `script`: a run, never a mention (#393 low-3).
-
-    After `shlex` tokenizes the line (quotes stripped out, comments dropped by
-    `comments=True`), the rule is: the line must directly start a python interpreter,
-    or an `exec` chain that resolves to one, and `script` must be one of that
-    interpreter's arguments. For the `exec` form the chain may go through `env`,
-    `KEY=VALUE` assignments and `-flag` options, which are skipped; the token after the
-    chain then has to be a python interpreter (`python`, `python3`, `.../python3.12`),
-    and `script` has to follow it. Everything else is a mention, not a run: a whole-line
-    comment leaves no tokens at all, and `exec cat <fake>` or `exec echo <fake>` hand
-    the fake to a command that is not python, while `exec <real-pool-peer> <fake>` runs
-    the real peer with the fake as a mere extra argument - all rejected.
+    An explicit `AICOMM_SIDECAR_LINK` counts only when it resolves under the system temp
+    directory, which is where pytest's `tmp_path` lives: a real directory exported in the
+    shell (an `AICOMM_SIDECAR_LINK` left set by hand) must not slip past the guard. With
+    it unset, aicomm would read `~/.mylinuxpool/sidecar-link` under HOME, allowed only when
+    that directory does not exist - `isolated_home` points HOME at a tmp dir.
     """
-    try:
-        tokens = shlex.split(line, comments=True)
-    except ValueError:  # an unbalanced quote could hide anything: strict is strict
-        return False
-    if not tokens or script not in tokens:
-        return False
-    i = 0
-    if tokens[0] == "exec":
-        i = 1
-        while i < len(tokens) and (
-            tokens[i] == "env" or "=" in tokens[i] or tokens[i].startswith("-")
-        ):
-            i += 1
-    if i >= len(tokens) or _PYTHON.search(tokens[i]) is None:
-        return False  # the command being started is not a python interpreter
-    return script in tokens[i + 1:]  # an argument to it: this is a run
-
-
-def _path_peer_is_test_only() -> bool:
-    """True when every `pool-peer` aicomm could fall back to is one a test may run.
-
-    With `AICOMM_POOL_PEER` unset, aicomm falls back to `shutil.which("pool-peer")` and,
-    since #392, to `~/.mylinuxpool/bin/pool-peer` (HOME). One test family exercises both
-    fallbacks for real; that is allowed only when each candidate that exists is a shell
-    wrapper that really execs the fake script as an argument to its python interpreter -
-    never the real `pool-peer` a worker has on PATH or in its own home, and not a file
-    that merely mentions the fake inside a comment or an exec line (#393 low-3). The tests (and the repo's
-    `isolated_home` fixture) always point HOME at a tmp dir, so a real install bin is
-    out of reach either way.
-    """
-    script = os.environ.get("FAKE_PEER_SCRIPT")
-    if not script:
-        return False
-    candidates = [shutil.which("pool-peer")]
-    try:
-        # Broken like cli sees it (#394): a `Path.home()` that raises means there is no
-        # install bin to reach, i.e. one candidate the guard never has to check.
-        in_bin = Path.home() / ".mylinuxpool" / "bin" / "pool-peer"
-        if in_bin.is_file() and os.access(in_bin, os.X_OK):
-            candidates.append(str(in_bin))
-    except (OSError, RuntimeError):
-        pass
-    for found in candidates:
-        if found is None:
-            continue
+    override = os.environ.get("AICOMM_SIDECAR_LINK")
+    if override:
         try:
-            text = Path(found).read_text(encoding="utf-8")
-        except OSError:
+            target = Path(override)
+            if not target.is_absolute():
+                return True  # the reader treats it as no directory: nothing real to read
+            return target.resolve().is_relative_to(Path(tempfile.gettempdir()).resolve())
+        except (OSError, RuntimeError):
             return False
-        lines = text.splitlines()
-        if not lines or not _SHELL_SHEBANG.match(lines[0].strip()):
-            return False  # not a shell wrapper at all
-        # A run line. `_wrapper_line_runs` drops comments itself (shlex
-        # `comments=True`), so a mention in a comment has nothing left to match, while
-        # a `#` inside a path token stays part of the path - the old `#` split ate
-        # those into truncated tokens and blocked legal wrappers (#396 low-5).
-        if not any(_wrapper_line_runs(line, script) for line in lines[1:]):
-            return False
-    return True
+    try:
+        return not (Path.home() / ".mylinuxpool" / "sidecar-link").exists()
+    except (OSError, RuntimeError):  # no home to look under: nothing to reach
+        return True
 
 
 def run_aicomm(argv: list[str], monkeypatch, capsys, stdin: str | None = None) -> Result:
-    """Run `aicomm.cli.main` in-process. Fails when the fake sidecar/peer is not set (guard)."""
+    """Run `aicomm.cli.main` in-process. Fails when the fake sidecar/link are not set (guard)."""
     assert os.environ.get("AICOMM_SIDECAR"), (
         "AICOMM_SIDECAR is not set: a test must point aicomm at its own fake sidecar"
     )
-    assert os.environ.get("AICOMM_POOL_PEER") or _path_peer_is_test_only(), (
-        "AICOMM_POOL_PEER is not set and neither PATH nor `~/.mylinuxpool/bin` (HOME) "
-        "has a test `pool-peer`: a test must point aicomm at its own fake `pool-peer` "
-        "(the hook, or a wrapper that runs the fake script, which is what the "
-        "PATH/HOME-fallback families do) - never at the real one a worker has on PATH "
-        "or in its own home"
+    assert _link_is_test_only(), (
+        "AICOMM_SIDECAR_LINK is not set and the default sidecar-link directory under HOME "
+        "exists: a test must point aicomm at its own fake directory - never at the real "
+        "`~/.mylinuxpool/sidecar-link` a worker has"
     )
     from aicomm import cli
 
@@ -412,19 +344,17 @@ def run_aicomm(argv: list[str], monkeypatch, capsys, stdin: str | None = None) -
 
 @pytest.fixture
 def aicomm_world(tmp_path, monkeypatch):
-    """A fake `angareion` first on PATH plus a fake loopback sidecar; both are ours alone.
+    """A fake `angareion` first on PATH, a fake loopback sidecar and a fake sidecar-link dir.
 
     The environment is cleaned first, so nothing from the shell (a real AICOMM_SIDECAR, a
-    real identity, FAKE_ANG_*/FAKE_PEER_* leftovers) leaks into a test. The fake
-    `pool-peer` is there too, but `AICOMM_POOL_PEER` points at a path that does not exist
-    until a test calls `use_peer()`: the peer fallback is then off. The fallback family
-    instead deletes the hook and puts a wrapper that runs the fake script on PATH or in
-    HOME's `~/.mylinuxpool/bin`; the `run_aicomm` guard allows such wrappers (and nothing
-    else) as the peer. No test ever runs a real `pool-peer`. The test modules import this
-    as `world`.
+    real AICOMM_SIDECAR_LINK, a real identity, FAKE_ANG_* leftovers) leaks into a test. The
+    link starts healthy with an empty port list: a recipient the local sidecar does not
+    know is `peer-unavailable`, the same as a machine without the link. `add_peer()` starts
+    one loopback peer sidecar and publishes its port; no test ever reads a real link. The
+    test modules import this as `world`.
     """
     for name in list(os.environ):
-        if name.startswith(("FAKE_ANG_", "FAKE_PEER_", "AICOMM_")):
+        if name.startswith(("FAKE_ANG_", "AICOMM_")):
             monkeypatch.delenv(name)
     bin_dir = tmp_path / "bin"
     install_fake_angareion(bin_dir)
@@ -436,29 +366,36 @@ def aicomm_world(tmp_path, monkeypatch):
     assert shutil.which("angareion") == str(bin_dir / "angareion")
     sidecar = FakeSidecar()
     monkeypatch.setenv("AICOMM_SIDECAR", sidecar.url)
-    fake_peer = tmp_path / "fake-pool-peer"
-    install_fake_pool_peer(fake_peer)
-    peer_log = tmp_path / "pool-peer-calls.jsonl"
-    peer_scenario = tmp_path / "pool-peer-scenario.json"
-    monkeypatch.setenv("FAKE_PEER_LOG", str(peer_log))
-    monkeypatch.setenv("FAKE_PEER_SCENARIO", str(peer_scenario))
-    # What the PATH-fallback guard checks a wrapper against (its content names this script).
-    monkeypatch.setenv("FAKE_PEER_SCRIPT", str(fake_peer))
-    monkeypatch.setenv("AICOMM_POOL_PEER", "/nonexistent/pool-peer")
+    link = LinkDir(tmp_path / "link")
+    monkeypatch.setenv("AICOMM_SIDECAR_LINK", str(link.root))
+    link.fresh()  # a live heartbeat and no ports to try
+    peers: list[FakeSidecar] = []
+
+    def add_peer(state: str = "idle", name: str | None = "demo-pm-t1") -> FakeSidecar:
+        """A peer sidecar that knows `name`, with its port published in the link's list."""
+        peer = FakeSidecar()
+        if name is not None:
+            peer.agents[name] = {"id": name, "state": state}
+        peers.append(peer)
+        link.fresh(*[peer.port for peer in peers])
+        return peer
     try:
         yield SimpleNamespace(
             sidecar=sidecar,
+            link=link,
             calls=lambda: angareion_calls(log),
             sender=SENDER,
             setenv=monkeypatch.setenv,
-            peer_calls=lambda: pool_peer_calls(peer_log),
-            peers=lambda scenario: peer_scenario.write_text(json.dumps(scenario), encoding="utf-8"),
-            use_fake_peer=lambda: monkeypatch.setenv("AICOMM_POOL_PEER", str(fake_peer)),
-            fake_peer=fake_peer,
+            delenv=monkeypatch.delenv,
+            add_peer=add_peer,
+            peer_ports=lambda: [one.port for one in peers],
         )
     finally:
         sidecar.close()
-    # The sidecar is only ever looked up or poked, whatever the test did.
+        for peer in peers:
+            peer.close()
+    # The local sidecar is only ever looked up or poked, whatever the test did.
     assert sidecar.foreign_requests() == []
-    # And `pool-peer` was only ever asked to find one id or to poke one sidecar.
-    assert_only_pool_peer_calls(peer_log)
+    # And every peer sidecar saw nothing but those same two requests.
+    for peer in peers:
+        assert peer.foreign_requests() == []

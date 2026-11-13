@@ -1,198 +1,99 @@
-"""The `run_aicomm` peer guard on its own: only a wrapper that runs the fake passes."""
+"""The `run_aicomm` sidecar-link guard on its own: only a directory a test owns passes."""
 
 from __future__ import annotations
 
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from _aicomm_fakes import _path_peer_is_test_only, run_aicomm
+from _aicomm_fakes import _link_is_test_only, run_aicomm
+
+REPO = Path(__file__).resolve().parent.parent.parent
 
 
-def setup_env(tmp_path, monkeypatch, script=True):
-    """A clean room: PATH (empty bin) and HOME (no install bin) in tmp, no leftovers.
-
-    The guard reads PATH, HOME and `FAKE_PEER_SCRIPT` from the environment; each test
-    sets what it needs on top of this, and never runs the real `pool-peer`.
-    """
-    monkeypatch.delenv("FAKE_PEER_SCRIPT", raising=False)
+def setup_env(tmp_path, monkeypatch):
+    """A clean room: HOME in tmp and the hook unset, so the default link dir is absent."""
+    monkeypatch.delenv("AICOMM_SIDECAR_LINK", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    empty = tmp_path / "empty-bin"
-    empty.mkdir()
-    monkeypatch.setenv("PATH", str(empty))
-    if script:
-        monkeypatch.setenv("FAKE_PEER_SCRIPT", str(tmp_path / "fake-pool-peer"))
 
 
-def install(bin_dir: Path, body: str) -> Path:
-    """A `pool-peer` in `bin_dir`, executable like the fallback family writes one."""
-    peer = bin_dir / "pool-peer"
-    peer.parent.mkdir(parents=True, exist_ok=True)
-    peer.write_text(body, encoding="utf-8")
-    peer.chmod(0o755)
-    return peer
-
-
-def test_a_peer_that_only_mentions_the_fake_in_a_comment_is_rejected(tmp_path, monkeypatch):
-    # (1) #393 low-3: a decoy whose text contains the fake path inside a comment - what
-    # the old substring check read as a pass - must not be accepted.
+def test_no_default_directory_is_test_only(tmp_path, monkeypatch):
+    # `isolated_home` points HOME at a tmp dir: the real ~/.mylinuxpool/sidecar-link is out
+    # of reach, so a run without the hook cannot read a real link.
     setup_env(tmp_path, monkeypatch)
-    bin_dir = tmp_path / "bin"
-    fake = os.environ["FAKE_PEER_SCRIPT"]
-    install(bin_dir, f'#!/bin/sh\n# decoy; the fake one would be: "{fake}"\n'
-                     'echo decoy runs nobody\nexit 1\n')
-    monkeypatch.setenv("PATH", str(bin_dir))
-    assert _path_peer_is_test_only() is False
+    assert _link_is_test_only() is True
 
 
-def test_a_wrapper_that_really_execs_the_fake_is_accepted(tmp_path, monkeypatch):
-    # (2) the real thing the PATH/HOME-fallback family puts in place: `exec <python>
-    # <fake>`.
+def test_a_default_directory_that_exists_is_refused(tmp_path, monkeypatch):
+    # (1) a default link dir under HOME and no hook: a test could read it, refuse instead.
     setup_env(tmp_path, monkeypatch)
-    bin_dir = tmp_path / "bin"
-    fake = os.environ["FAKE_PEER_SCRIPT"]
-    install(bin_dir, f'#!/bin/sh\nexec "{sys.executable}" "{fake}" "$@"\n')
-    monkeypatch.setenv("PATH", str(bin_dir))
-    assert _path_peer_is_test_only() is True
+    (tmp_path / "home" / ".mylinuxpool" / "sidecar-link").mkdir(parents=True)
+    assert _link_is_test_only() is False
 
 
-def test_a_wrapper_that_execs_the_fake_through_env_is_accepted(tmp_path, monkeypatch):
-    # (2b) the #392 decoy shape: `exec env VAR=... <python> <fake>` - an exec chain that
-    # ends in the fake is a run, not a mention.
+def test_the_hook_counts_even_with_a_default_directory(tmp_path, monkeypatch):
+    # (2) the fixture's shape: the hook names the test's own directory.
     setup_env(tmp_path, monkeypatch)
-    bin_dir = tmp_path / "bin"
-    fake = os.environ["FAKE_PEER_SCRIPT"]
-    install(bin_dir, f'#!/bin/sh\nexec env FAKE_PEER_SCENARIO="/no/such" '
-                     f'"{sys.executable}" "{fake}" "$@"\n')
-    monkeypatch.setenv("PATH", str(bin_dir))
-    assert _path_peer_is_test_only() is True
+    (tmp_path / "home" / ".mylinuxpool" / "sidecar-link").mkdir(parents=True)
+    monkeypatch.setenv("AICOMM_SIDECAR_LINK", str(tmp_path / "link"))
+    assert _link_is_test_only() is True
 
 
-def test_a_home_bin_peer_without_the_fake_is_rejected(tmp_path, monkeypatch):
-    # (3) the HOME fallback with a peer that is not a fake wrapper: rejected, so a test
-    # that forgot its fake fails instead of running whatever that peer is.
+def test_a_hook_outside_the_temp_directory_is_refused(tmp_path, monkeypatch):
+    # L-3: an AICOMM_SIDECAR_LINK exported in the shell (a real directory) must not pass,
+    # even though it is an absolute path.
     setup_env(tmp_path, monkeypatch)
-    install(tmp_path / "home" / ".mylinuxpool" / "bin",
-            '#!/bin/sh\necho peerish, no fake though\nexit 1\n')
-    assert _path_peer_is_test_only() is False
+    monkeypatch.setenv("AICOMM_SIDECAR_LINK", "/etc")
+    assert _link_is_test_only() is False
 
 
-def test_a_home_bin_peer_mentioning_the_fake_in_a_comment_is_rejected(tmp_path, monkeypatch):
-    # (3b) same through the HOME candidate, and again only as a comment.
+def test_a_relative_hook_can_reach_nothing_real(tmp_path, monkeypatch):
+    # a relative override is "no directory" for the reader, so it is safe to allow
     setup_env(tmp_path, monkeypatch)
-    fake = os.environ["FAKE_PEER_SCRIPT"]
-    install(tmp_path / "home" / ".mylinuxpool" / "bin",
-            f'#!/bin/sh\n# the fake one is at "{fake}"\nexit 1\n')
-    assert _path_peer_is_test_only() is False
+    monkeypatch.setenv("AICOMM_SIDECAR_LINK", "link")
+    assert _link_is_test_only() is True
 
 
-def test_no_pool_peer_anywhere_is_test_only_vacuously(tmp_path, monkeypatch):
-    # (4) nothing on PATH (the fake `angareion` dir only), nothing in the install bin:
-    # no candidate can be the real peer, so the guard allows the fallback run.
+def test_run_aicomm_refuses_without_a_fake_sidecar(tmp_path, monkeypatch, capsys):
+    # (3) the composed guard: no AICOMM_SIDECAR, nothing to run against.
+    monkeypatch.delenv("AICOMM_SIDECAR", raising=False)
+    monkeypatch.setenv("AICOMM_SIDECAR_LINK", str(tmp_path / "link"))
+    with pytest.raises(AssertionError, match="AICOMM_SIDECAR"):
+        run_aicomm(["send", "--channel", "c", "--body", "x"], monkeypatch, capsys)
+
+
+def test_run_aicomm_refuses_a_default_link_it_could_read(tmp_path, monkeypatch, capsys):
+    # (4) the composed guard: the default directory exists and there is no hook.
     setup_env(tmp_path, monkeypatch)
-    assert _path_peer_is_test_only() is True
-
-
-def test_without_the_fake_script_known_the_guard_refuses(tmp_path, monkeypatch):
-    # (5) when `FAKE_PEER_SCRIPT` is unset the guard cannot recognise a wrapper at all:
-    # refuse, instead of running anything it cannot name.
-    setup_env(tmp_path, monkeypatch, script=False)
-    assert "FAKE_PEER_SCRIPT" not in os.environ
-    assert _path_peer_is_test_only() is False
-
-
-def test_a_python_shebang_peer_with_an_exec_line_is_rejected(tmp_path, monkeypatch):
-    # (6) #396 mid-2: a candidate that is not a shell wrapper at all (`#!/usr/bin/
-    # python3`) stays rejected even when one of its lines execs the fake - the shebang
-    # check has to hold on its own, not fall out of the line rules.
-    setup_env(tmp_path, monkeypatch)
-    fake = os.environ["FAKE_PEER_SCRIPT"]
-    install(tmp_path / "bin",
-            f'#!/usr/bin/python3\nexec "{sys.executable}" "{fake}"\n')
-    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
-    assert _path_peer_is_test_only() is False
-
-
-def test_a_wrapper_that_execs_cat_on_the_fake_is_rejected(tmp_path, monkeypatch):
-    # (7) #396 mid-1: passing the fake to something that is not python is a mention in
-    # an exec position, not a run - `exec cat <fake>` just reads the script text out.
-    setup_env(tmp_path, monkeypatch)
-    fake = os.environ["FAKE_PEER_SCRIPT"]
-    install(tmp_path / "bin", f'#!/bin/sh\nexec cat "{fake}"\n')
-    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
-    assert _path_peer_is_test_only() is False
-
-
-def test_a_wrapper_that_execs_a_real_peer_with_the_fake_as_argument_is_rejected(
-        tmp_path, monkeypatch):
-    # (8) #396 mid-1: the real danger - `exec <real pool-peer> <fake> "$@"` runs the
-    # actual peer and hands the fake to it as a harmless-looking extra argument; the
-    # command exec'd here is not our python running the fake, so reject.
-    setup_env(tmp_path, monkeypatch)
-    fake = os.environ["FAKE_PEER_SCRIPT"]
-    install(tmp_path / "bin",
-            f'#!/bin/sh\nexec /usr/local/bin/pool-peer "{fake}" "$@"\n')
-    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
-    assert _path_peer_is_test_only() is False
-
-
-def test_a_wrapper_that_execs_the_fake_through_env_with_assignments_is_accepted(
-        tmp_path, monkeypatch):
-    # (8b) #396 mid-2 (d): the whole accepted `exec env` shape - `env`, then plain
-    # `KEY=V` assignments, then the python, then the fake as its argument.
-    setup_env(tmp_path, monkeypatch)
-    bin_dir = tmp_path / "bin"
-    fake = os.environ["FAKE_PEER_SCRIPT"]
-    install(bin_dir, f'#!/bin/sh\nexec env KEY=V "{sys.executable}" "{fake}" "$@"\n')
-    monkeypatch.setenv("PATH", str(bin_dir))
-    assert _path_peer_is_test_only() is True
-
-
-def test_a_dash_shebang_wrapper_is_accepted(tmp_path, monkeypatch):
-    # (8c) #396 low-4: `dash` after the path must count as a shell shebang, so the
-    # fallback family's dash wrappers are not blocked wholesale.
-    setup_env(tmp_path, monkeypatch)
-    bin_dir = tmp_path / "bin"
-    fake = os.environ["FAKE_PEER_SCRIPT"]
-    install(bin_dir, f'#!/bin/dash\nexec "{sys.executable}" "{fake}" "$@"\n')
-    monkeypatch.setenv("PATH", str(bin_dir))
-    assert _path_peer_is_test_only() is True
-
-
-def test_an_env_s_flag_shebang_wrapper_is_accepted(tmp_path, monkeypatch):
-    # (8d) #396 low-4: env options between the interpreter and the shell (`-S` for
-    # splitting the command string) must not hide the bash behind them.
-    setup_env(tmp_path, monkeypatch)
-    bin_dir = tmp_path / "bin"
-    fake = os.environ["FAKE_PEER_SCRIPT"]
-    install(bin_dir, f'#!/usr/bin/env -S bash -eu\nexec "{sys.executable}" "{fake}" "$@"\n')
-    monkeypatch.setenv("PATH", str(bin_dir))
-    assert _path_peer_is_test_only() is True
-
-
-def test_a_wrapper_with_a_hash_in_the_fake_path_is_accepted(tmp_path, monkeypatch):
-    # (8e) #396 low-5: a fake path containing `#` - shlex only drops comments that
-    # start a line/token, it keeps `#` inside a token - must not be cut short.
-    setup_env(tmp_path, monkeypatch)
-    bin_dir = tmp_path / "bin"
-    fake = str(tmp_path / "a#b" / "fake-pool-peer")
-    monkeypatch.setenv("FAKE_PEER_SCRIPT", fake)
-    install(bin_dir, f'#!/bin/sh\nexec "{sys.executable}" "{fake}" "$@"\n')
-    monkeypatch.setenv("PATH", str(bin_dir))
-    assert _path_peer_is_test_only() is True
-
-
-def test_run_aicomm_refuses_a_path_peer_without_the_fake(tmp_path, monkeypatch, capsys):
-    # (9) #396 low-3: the composed guard - with a `pool-peer` on PATH that does not run
-    # the fake and `AICOMM_POOL_PEER` unset, `run_aicomm` itself must refuse, asserting
-    # before anything like the real peer gets executed.
-    setup_env(tmp_path, monkeypatch)
-    install(tmp_path / "bin", '#!/bin/sh\necho real peer passed off as a fake\n')
-    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    (tmp_path / "home" / ".mylinuxpool" / "sidecar-link").mkdir(parents=True)
     monkeypatch.setenv("AICOMM_SIDECAR", "http://127.0.0.1:9")  # never contacted here
-    with pytest.raises(AssertionError):
-        run_aicomm(["wake", "demo"], monkeypatch, capsys)
+    with pytest.raises(AssertionError, match="sidecar-link"):
+        run_aicomm(["send", "--channel", "c", "--body", "x"], monkeypatch, capsys)
+
+
+# --- C-17: `sidecar_link` must not depend on cli, and must not have an HTTP client --------
+
+
+def test_c17_importing_sidecar_link_does_not_import_cli():
+    script = (
+        "import sys\n"
+        "import aicomm.sidecar_link\n"
+        "print(','.join(sorted(n for n in sys.modules if n.startswith('aicomm'))))\n"
+    )
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                          cwd=str(REPO), env=env, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert "aicomm.sidecar_link" in done.stdout
+    assert "aicomm.cli" not in done.stdout
+
+
+def test_c17_sidecar_link_has_no_http_client_and_no_cli():
+    source = (REPO / "src" / "aicomm" / "sidecar_link.py").read_text(encoding="utf-8")
+    for forbidden in ("urllib", "http.client", "aicomm.cli"):
+        assert forbidden not in source, forbidden
