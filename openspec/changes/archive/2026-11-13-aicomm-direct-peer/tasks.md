@@ -40,11 +40,14 @@
 
 ## 3. 驗收（不是 PR；原 §2 的 PR-2 已併入 §1，編號 3／4 保留讓舊引用不失效）
 
-- [ ] 3.1 真機：**從 sidecar 開的 agent 裡**（不是人的 shell）戳另一台（或反過來），`wake:` 行是 `woken peer:<port>`，用 `curl -s 127.0.0.1:<port>/pokes/<id>` 查得到同一筆；`ports` 裡的本機埠沒有被戳第二次；同一個 agent 內心跳新鮮的判斷為真（`wake:` 不是 `peer-unavailable`，且 `ports` 上的埠真的被查過）。後兩點是 `design.md` §2.1 的 A-1／A-2 假設的唯一驗法：人的 shell 驗不到 agent 的 `HOME`／pid namespace／network namespace。
+- [x] 3.1 真機：**從 sidecar 開的 agent 裡**（不是人的 shell）戳另一台（或反過來），`wake:` 行是 `woken peer:<port>`，用 `curl -s 127.0.0.1:<port>/pokes/<id>` 查得到同一筆；`ports` 裡的本機埠沒有被戳第二次；同一個 agent 內心跳新鮮的判斷為真（`wake:` 不是 `peer-unavailable`，且 `ports` 上的埠真的被查過）。後兩點是 `design.md` §2.1 的 A-1／A-2 假設的唯一驗法：人的 shell 驗不到 agent 的 `HOME`／pid namespace／network namespace。
   - blocked by：1.x 已 merge 且已發版；MyLinuxPool 的 sidecar-link 已在各台寫 `~/.mylinuxpool/sidecar-link/{heartbeat,ports}`；本人的單次授權（經 PMO）。
-  - **未驗（2026-11-13 歸檔時）：等 sidecar-link 上線＋本人單次授權。**
-- [ ] 3.2 發版／升 pin：MyLinuxPool 等的就是 MAS 發版；在 3.1 通過前**不要**發版、不要升 pin。**merge 前 PM 仍要確認沒有機器直接從 main 安裝 aicomm**（L-2）。MLP 已回答這一問（2026-11-13，經 PMO 轉）：**沒有 worker 映像從 main 安裝 aicomm（映像釘 sha 安裝）**；**未驗：Mac／PMO 機器上 repo 外手動安裝的 aicomm**。所以 merge 前 PM 還要**問 PMO 確認 Mac／PMO 機器**有沒有那種手動安裝：都沒有就直接 merge；有任何一台有，merge 改等 sidecar-link 上線後，否則那些機器會在 merge 當下失去跨機叫醒。沒有 sidecar-link 的機器會失去跨機叫醒這個差異，由 PMO 判斷（`design.md` §6 第 1 點）。
-  - **未驗（2026-11-13 歸檔時）：等 sidecar-link 上線＋本人單次授權；本 change 只 merge，未發版、未升 pin。**
+  - **已驗（2026-11-14）**：六台 worker 與 Mac 雙向全矩陣，`wake:` 行皆為 `woken peer:<port>`（反向有 `queued` 者算送達），收件端 sidecar 的 poke 紀錄皆為 `via: aicomm-peer`、`delivered`、status 200；假 `pool-peer` 未被呼叫；空清單目錄回 `not-woken peer-unavailable`、查詢逾時回 `not-woken lookup-incomplete`。原樣輸出在 #457 的留言。
+  - **未驗**：`poke-timeout` 路徑（要戳到收了 GET 卻不回 POST 的 sidecar）。
+  - ~~未驗（2026-11-13 歸檔時）：等 sidecar-link 上線＋本人單次授權。~~（已於 2026-11-14 驗，見上）
+- [x] 3.2 發版／升 pin：MyLinuxPool 等的就是 MAS 發版；在 3.1 通過前**不要**發版、不要升 pin。**merge 前 PM 仍要確認沒有機器直接從 main 安裝 aicomm**（L-2）。MLP 已回答這一問（2026-11-13，經 PMO 轉）：**沒有 worker 映像從 main 安裝 aicomm（映像釘 sha 安裝）**；**未驗：Mac／PMO 機器上 repo 外手動安裝的 aicomm**。所以 merge 前 PM 還要**問 PMO 確認 Mac／PMO 機器**有沒有那種手動安裝：都沒有就直接 merge；有任何一台有，merge 改等 sidecar-link 上線後，否則那些機器會在 merge 當下失去跨機叫醒。沒有 sidecar-link 的機器會失去跨機叫醒這個差異，由 PMO 判斷（`design.md` §6 第 1 點）。
+  - **已完成（2026-11-14）**：本人決定現在發版；MAS 沒有 tag／版本號流程，版本即 sha `06b6be25d756a0095e751ef6228384201df53f14`（含 #459）。各機（六台 worker 與 Mac）已就地升級並驗過；映像的 pin 升級在另一個專案進行中（容器重建前靠就地升級）。
+  - ~~未驗（2026-11-13 歸檔時）：等 sidecar-link 上線＋本人單次授權；本 change 只 merge，未發版、未升 pin。~~（已於 2026-11-14 發版，見上）
 
 ## 4. 歸檔前檢查（PM 收尾，archive／sync 主 spec 之前）
 
