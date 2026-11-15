@@ -69,7 +69,7 @@ Angareion 對外 MUST 只有七個介面家族：建 channel、刪 channel、送
 - **WHEN** `angareion channel create 小明` 或 `angareion send --channel 小明 …`
 - **THEN** exit 1；什麼都沒建、沒送
 
-#### Scenario: log 是第六個介面，decision 是第七個
+#### Scenario: log 是第六個介面
 - **WHEN** `angareion --help` 印出的子指令清單、`angareion channel --help` 印出的子子指令清單，與 `angareion log --help` 印出的旗標清單（低-14：三份清單都由 WHEN 的輸出觀察）
 - **THEN** 頂層子指令恰好是 `channel`、`send`、`wait`、`read`、`log`、`decision`（由 `angareion --help` 斷言）；`decision` 下的 action 恰好是 `ask`、`update`、`withdraw`、`submit`、`list`、`snapshot`（由 `angareion decision --help` 斷言）；`channel` 下的子子指令恰好是 `create`、`delete`（由 `angareion channel --help` 斷言）；`log` 的旗標是查詢類（`--channel`、`--from`、`--to`、`--mentioned`、`--since`、`--until`、`--grep`、`--around`、`--thread`、`--before`、`--after`、`--limit`、`--json`），沒有 `--body` 等寫入旗標（log 不寫信；`--to` 在 log 是收件人的「過濾」條件，不是 `send` 的寫入）
 

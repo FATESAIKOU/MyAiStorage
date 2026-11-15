@@ -22,7 +22,7 @@
 - [x] 4.3 CLI 測試 `tests/unit/test_angareion_decision_cli.py`：C-4、C-6、C-7、C-9、C-11～C-15、C-18、C-19、C-20(e)、C-22、C-23、C-25、C-27（`list`）、C-28（CLI 與 `plan_submit` 的單元部分）、C-29（CLI 部分）；寫入的 C-4 與 C-13 另含經 `serialize_message` 讀回的假後端
 - [x] 4.4 `skills/angareion/SKILL.md` 與 `docs/angareion.md`：`decision` 各 action 的用法與輸出、`read`／`log` 的 `--json` 形狀（含 `datatype`；`decision list --json` 的形狀照 §5，不含 `datatype`）、App 寫 submit 的格式要點（R-A3）、給 PMO 的用法
 - [x] 4.5 spec delta：`specs/angareion/spec.md`（「六個介面」改成七個介面家族、「訊息格式」加 datatype），新增 `specs/angareion-pending-decision/spec.md`（每條 Requirement 附 Scenario，對應 C-編號）
-- [ ] 4.6 合併（PM 審查後）
+- [x] 4.6 合併（#474，d9e967c）
 
 ## 5. 不做
 
