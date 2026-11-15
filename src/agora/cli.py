@@ -52,7 +52,7 @@ from agora.agents.base import (NO_REPLY, Agent, AgentError, Exported, Launch, co
 
 AGENTS = ("opencode", "claude", "agy", "codex")
 TYPES = ("session",)
-EXIT_INPUT = 1       # cannot be done: unknown id, nothing to import, no ids, no --yes, has children
+EXIT_INPUT = 1       # cannot be done: unknown id, nothing to import, no ids (or a lone source that is already a merge), no --yes, has children
 EXIT_ERROR = 2       # header, Drive, agent or unexpected error (argparse usage errors are 2 too)
 EXIT_IN_OUTBOX = 3   # saved locally, not on Drive yet (N13)
 EXIT_LOCKED = 4      # this Session is being continued by another run (#54); not an input error
