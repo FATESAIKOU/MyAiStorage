@@ -4,9 +4,10 @@ The old reader is main `0577584`, pinned under `tests/fixtures/angareion-reader-
 (`messages.py` whole; `matching.py` and `output.py` are the three functions the
 old reader used, copied verbatim). The texts below are the shapes a new writer
 produces: a plain message (`datatype: message`), an `ask`, and a `submit`
-(`datatype: decision`, with the payload as a YAML body). All three texts are written
-out here by hand, because no writer exists yet (PR-2 and PR-3 add them). After PR-4,
-a test should feed the 0577584 reader the output of the real generators.
+(`datatype: decision`, with the payload as a YAML body). The plain message is the real
+output of `serialize_message` (PR-2). The `ask` and `submit` are still written out by
+hand, because their writer (PR-3) does not exist yet. After PR-4, a test should feed
+the 0577584 reader the output of the real generators.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from angareion.messages import Message, serialize_message
 
 ASKER = "mypmo-pm-m1"
 ANSWERER = "mylinuxpool-impl-w1-1"
@@ -95,13 +98,16 @@ items:
 
 
 def _plain() -> str:
-    return _text(
-        datatype="message",
-        msg_id="01JB0000000000000000000201",
-        from_=ASKER,
-        to=ANSWERER,
-        mentions=[],
-        body=PLAIN_BODY,
+    # The real writer's output, not a hand-written copy (#468 PR-2).
+    return serialize_message(
+        Message(
+            from_=ASKER,
+            to=ANSWERER,
+            channel=CHANNEL,
+            content=PLAIN_BODY,
+            id="01JB0000000000000000000201",
+            at="2026-11-15T03:00:00+00:00",
+        )
     )
 
 

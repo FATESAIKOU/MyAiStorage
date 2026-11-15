@@ -1,6 +1,6 @@
-"""Unit tests for the message `datatype` on the read side, the self-silent rule, and the protocol split (#468 PR-1).
+"""Unit tests for the message `datatype` on the read side, the self-silent rule, and the protocol split (#468 PR-1), and the writer side (#468 PR-2).
 
-C-1, C-2, C-3, C-20(a)～(c). The CLI cases (C-3 through `read`, C-21) are in
+C-1, C-2, C-3, C-5, C-20(a)～(c). The CLI cases (C-3 through `read`, C-21) are in
 test_angareion_cli.py next to the other CLI tests.
 """
 
@@ -12,6 +12,7 @@ import inspect
 from pathlib import Path
 
 import pytest
+import yaml
 
 from angareion import backend, messages
 from angareion.backend import (
@@ -31,6 +32,7 @@ from angareion.messages import (
     message_to_dict,
     parse_message,
     serialize_message,
+    split_front_matter,
 )
 from _angareion_fakes import StaticResolver, entity
 
@@ -180,10 +182,89 @@ def test_validate_refuses_a_datatype_outside_the_grammar():
         msg.validate()
 
 
-def test_serialize_refuses_a_datatype_it_does_not_write_yet():
-    # PR-1 writes no datatype, so a non-default one would read back as `message`.
-    msg = Message(from_=PM, to=ME, channel="general", content="x", datatype="decision")
+def test_serialize_refuses_a_datatype_outside_the_grammar():
+    # The read-back check (serialize_message) is the last line: a datatype the reader would
+    # not keep never leaves. validate() refuses it first, with the grammar in the message.
+    msg = Message(from_=PM, to=ME, channel="general", content="x", datatype="Decision")
     with pytest.raises(MessageValidationError, match="datatype"):
+        serialize_message(msg)
+
+
+# -- C-5 (PR-2): the writer writes `datatype`, in a fixed key order ------------
+
+C5_ID = "01JB0000000000000000000501"
+C5_AT = "2026-11-15T03:00:00+00:00"
+FULL_ORDER = ["angareion", "datatype", "id", "at", "from", "to", "mentions", "in_reply_to", "channel", "urgency", "attachments"]
+BROADCAST_ORDER = ["angareion", "datatype", "id", "at", "from", "channel", "urgency", "attachments"]
+
+
+def _front_matter_keys(text: str) -> list[str]:
+    """The front matter keys in the order a YAML reader sees them (not the line numbers)."""
+    raw_yaml, _ = split_front_matter(text)
+    return list(yaml.safe_load(raw_yaml).keys())
+
+
+def test_c5_send_writes_datatype_message_after_angareion():
+    text = serialize_message(Message(from_=PM, to=ME, channel="general", content="hi", id=C5_ID, at=C5_AT))
+    data = yaml.safe_load(split_front_matter(text)[0])
+    assert data["datatype"] == "message"
+    assert "datatype: message\n" in text
+
+
+def test_c5_key_order_with_every_optional_key_present():
+    msg = Message(
+        from_=PM,
+        to=ME,
+        channel="general",
+        content="hi",
+        id=C5_ID,
+        at=C5_AT,
+        mentions=[ME],
+        in_reply_to=C5_ID,
+        attachments=[{"name": "a.txt", "inline": "x"}],
+    )
+    assert _front_matter_keys(serialize_message(msg)) == FULL_ORDER
+
+
+def test_c5_key_order_for_a_broadcast_without_to_or_mentions_or_in_reply_to():
+    msg = Message(from_=PM, to=None, channel="general", content="hi", id=C5_ID, at=C5_AT)
+    assert _front_matter_keys(serialize_message(msg)) == BROADCAST_ORDER
+
+
+def test_c5_key_order_with_mentions_but_no_to():
+    msg = Message(from_=PM, to=None, channel="general", content="hi", id=C5_ID, at=C5_AT, mentions=[ME])
+    assert _front_matter_keys(serialize_message(msg)) == BROADCAST_ORDER[:5] + ["mentions", "channel", "urgency", "attachments"]
+
+
+def test_c5_key_order_with_in_reply_to_only():
+    msg = Message(from_=PM, to=ME, channel="general", content="hi", id=C5_ID, at=C5_AT, in_reply_to=C5_ID)
+    assert _front_matter_keys(serialize_message(msg)) == [k for k in FULL_ORDER if k != "mentions"]
+
+
+# -- decision datatype: the writer writes it, and it reads back (hand-built Message, no CLI) --
+
+def test_decision_datatype_serializes_and_reads_back():
+    msg = Message(from_=PM, to=ME, channel="general", content="x", id=C5_ID, at=C5_AT, datatype="decision")
+    text = serialize_message(msg)
+    assert "datatype: decision\n" in text
+    back = parse_message(text, strict=True)
+    assert back is not None
+    assert back.datatype == "decision"
+    assert message_to_dict(back) == message_to_dict(msg)
+
+
+def test_serialize_refuses_a_decision_that_reads_back_as_message(monkeypatch):
+    # The read-back check covers `datatype`: a reader that loses it must stop the send.
+    msg = Message(from_=PM, to=ME, channel="general", content="x", id=C5_ID, at=C5_AT, datatype="decision")
+    real = messages.parse_message
+
+    def loses_datatype(text, *, strict=False):
+        back = real(text, strict=strict)
+        back.datatype = "message"
+        return back
+
+    monkeypatch.setattr(messages, "parse_message", loses_datatype)
+    with pytest.raises(MessageValidationError, match="different fields"):
         serialize_message(msg)
 
 
