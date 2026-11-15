@@ -23,6 +23,7 @@ from angareion.channel_config import BACKENDS_PATH, CHANNELS_PATH, ChannelStore
 from angareion.cli import build_parser, main
 from angareion.config import Config, save_config
 from angareion.github import HttpResponse
+from angareion.log_cache import log_cache_path
 from angareion.messages import Message
 from angareion.registry import Action, parse_comment
 from angareion.state import CursorStore, FileETagCache, wait_state_file_path
@@ -1666,3 +1667,52 @@ def test_human_output_shows_mentions_and_in_reply_to(cli_env, capsys):
     out = capsys.readouterr().out
     assert "mentions: mylinuxpool-impl-w1-2" in out
     assert f"in_reply_to: {ULID_X}" in out
+
+
+# -- #468 PR-1: the datatype on the CLI (C-3 through `read`, C-21) ----------
+
+def test_c3_read_without_channel_skips_own_decision_but_delivers_one_from_another(cli_env, capsys):
+    backend = cli_env["backend"]
+    backend.deliver(GENERAL, Message(from_=IDENTITY, to=IDENTITY, channel="general", content="SELF-MARK", id="01AAAA00000000000000000101", datatype="decision"))
+    backend.deliver(GENERAL, Message(from_=PM, to=IDENTITY, channel="general", content="PM-MARK", id="01AAAA00000000000000000102", datatype="decision"))
+    assert run(cli_env, ["read"]) == 0
+    out = capsys.readouterr().out
+    assert "PM-MARK" in out
+    assert "SELF-MARK" not in out
+    assert "  datatype: decision" in out
+
+
+def test_c21_version_1_log_cache_is_rebuilt_and_every_message_carries_datatype(cli_env, capsys):
+    # A `decision` (not `message`) so that the datatype must survive the cache round trip.
+    cli_env["backend"].deliver(GENERAL, Message(from_=PM, to=IDENTITY, channel="general", content="fresh", id="01AAAA00000000000000000201", datatype="decision"))
+    assert run(cli_env, ["log", "--json"]) == 0
+    capsys.readouterr()
+    path = log_cache_path(cli_env["state_dir"], IDENTITY, "general")
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 2
+
+    # Turn the file into a version 1 cache with a ghost entry (comment 999999, which the backend
+    # never returns) and no datatype key. A sync that merely overlays would keep the ghost;
+    # only a whole rebuild drops it.
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["version"] = 1
+    for item in data["messages"]:
+        item["message"].pop("datatype", None)
+    ghost = json.loads(json.dumps(data["messages"][0]))
+    ghost["comment_id"] = "999999"
+    ghost["message"]["id"] = "01AAAA00000000000000000299"
+    ghost["message"]["content"] = "GHOST"
+    data["messages"].append(ghost)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    assert run(cli_env, ["log", "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert [m["content"] for m in listed] == ["fresh"]
+    assert [m["datatype"] for m in listed] == ["decision"]
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 2
+
+
+def test_read_json_carries_datatype_message_for_a_plain_message(cli_env, capsys):
+    cli_env["backend"].deliver(GENERAL, Message(from_=PM, to=IDENTITY, channel="general", content="plain", id="01AAAA00000000000000000301"))
+    assert run(cli_env, ["read", "--channel", "general", "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert [m["datatype"] for m in listed] == ["message"]

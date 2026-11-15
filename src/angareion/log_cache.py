@@ -10,12 +10,13 @@ from pathlib import Path
 
 from datetime import timedelta
 
-from angareion.backend import format_backend_time, parse_backend_time
+from angareion.backend import EnumerableBackend, format_backend_time, parse_backend_time
 from angareion.config import channel_slug, identity_slug
-from angareion.messages import Message, message_to_dict
+from angareion.messages import DEFAULT_DATATYPE, Message, message_to_dict
 
 
-LOG_CACHE_VERSION = 1
+# 2: messages carry `datatype` (#468). A version 1 file is rebuilt whole.
+LOG_CACHE_VERSION = 2
 
 
 def log_cache_dir(state_dir, identity):
@@ -155,7 +156,7 @@ class LogCache:
             _etag_from_dict(data.get("etag")),
         )
 
-    def sync(self, backend, entity):
+    def sync(self, backend: EnumerableBackend, entity):
         ch = entity.channel
         cached_entity = {"repo": entity.repo, "issue": entity.issue}
         cached_msgs, _last_cid, last_created, etag = self.load_messages(ch, cached_entity)
@@ -213,6 +214,7 @@ class LogCache:
                 attachments=d.get("attachments", []),
                 mentions=d.get("mentions", []),
                 in_reply_to=d.get("in_reply_to"),
+                datatype=d.get("datatype", DEFAULT_DATATYPE),
             )
             setattr(msg, "received_at", m["created_at"])
             setattr(msg, "comment_id", int(m["comment_id"]))
