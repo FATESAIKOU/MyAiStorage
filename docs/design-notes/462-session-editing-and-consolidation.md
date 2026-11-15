@@ -133,7 +133,7 @@ C 的形狀（全部是既有的 merge 行為，C-1 只放寬來源數）：
 
 | # | #439 的接上點（`439-role-session-recall.md:265-269`） | 本設計 | 結論 |
 |---|---|---|---|
-| E-1 | 產物是帶 `role:R` 的 agora Session，而且是 `updated_at` 最新的一筆 | C 是 merge 當下新建的，`updated_at`＝現在；`--header tags=[role:R]` 讓 C 帶 `role:R`（C-2）。`updated_at` 只到秒（`cli.py:133-134`），所以是「不早於 S」，不是嚴格晚於。同一秒時，`--sort updated` 用 ULID 決定先後（`store.py:2840-2843`），C 的 ULID 比 S 新，排在前面（C-2 要測同秒）。「S 沒被本機鎖住」（R-9）只是 merge 開始那一刻的觀測，merge 不持有 S 的 continue 鎖，不能當作併發保證 | **在營運前提下滿足**：沿用 #439 的同角色**單一啟動者**前提，同一個 id 同時只有一個啟動方在 open，**本機的並行 open 也算在內**；跨機照 #439 Q-2（同一個 id 只在一台開）。前提被破壞時（例如 merge 期間另一個 open 接了 S 又寫回），S 會變回最新，本稿不另加鎖 |
+| E-1 | 產物是帶 `role:R` 的 agora Session，而且是 `updated_at` 最新的一筆 | C 是 merge 當下新建的，`updated_at`＝現在；`--header tags=[role:R]` 讓 C 帶 `role:R`（C-2）。`updated_at` 只到秒（`cli.py:133-134`），所以是「不早於 S」，不是嚴格晚於。同一秒時，`--sort updated` 用 ULID 決定先後（`store.py:2840-2843`）。ULID 是 48 位元的毫秒時間加 80 位元的隨機尾碼（`header.py:260-264`），C 的 ULID 用 merge 當下的毫秒（`cli.py:173`）；所以**只有 C 的生成毫秒明確晚於 S 的 ULID 毫秒（S 建立時）**，C 才必然排在前面。**同一毫秒不保證**：比的是隨機尾碼。S 是更早建立的，而且 merge 中間要叫 AI，正常不會同一毫秒，但這是前提，不是保證（C-2 要測同秒、不同毫秒）。「S 沒被本機鎖住」（R-9）只是 merge 開始那一刻的觀測，merge 不持有 S 的 continue 鎖，不能當作併發保證 | **在營運前提下滿足**：沿用 #439 的同角色**單一啟動者**前提，同一個 id 同時只有一個啟動方在 open，**本機的並行 open 也算在內**；跨機照 #439 Q-2（同一個 id 只在一台開）。前提被破壞時（例如 merge 期間另一個 open 接了 S 又寫回），S 會變回最新，本稿不另加鎖 |
 | E-2 | 產物要能被 claude／opencode 接；merge 出來的（`agent` 是 null）也算 | C 是 merge；`cli.py:422-425` 只擋 agy 目標。sidecar 的初篩要把 `agent` 是 null 的列算成接得了，這就是 #439 的 R-4 | **滿足**（依賴 R-4） |
 | E-3 | 不要在保留 `role:R` 的情況下改舊 Session 的 header | 走「完全不碰舊 Session」這條路：merge 只讀來源，不寫來源（C-3）；不摘舊 Session 的 `role:R` | **滿足** |
 | E-4 | 舊 Session 留在 Drive；`role:R` 底下多於一筆是預期內的；換線掃描要排除編輯產生的 | S 原樣留著，而且有子 Session，不能直接刪（`docs/design.md:423`，C-5）。換線掃描**不能**只看 `parents`：fork 也以來源當 `parents`、照抄 tags（`docs/design.md:387-388`）；接續途中被刪而另存的，也是 `relation: continue`、`parents` 指向原本那個、tags 不變（`docs/design.md:386`）；沉澱物被接過以後，`relation` 改成 `continue`、拿掉 `agora.merge`（`cli.py:1554-1557`），header 和前一種分不出來。所以判準改成 sidecar 自己的沉澱紀錄（R-11、R-12） | **有條件滿足**：保留成立。「排除沉澱造成的多筆」要靠 R-11 的紀錄；沒有紀錄可以對照的，判為「待確認」，回報 PM，不消音（R-12） |
@@ -255,13 +255,15 @@ C 的形狀（全部是既有的 merge 行為，C-1 只放寬來源數）：
   - A1 沉澱後接：`agora merge session S --agent <a> --header tags=[exp:462]` 得到 C，再 `continue session C --fork --header tags=[exp:462]`
   - A2 冷啟動＋交接檔：開全新的 agent，第一句叫它讀交接檔在 S 那一刻的版本
   - 三組都從同一個凍結起點 S 出發，彼此隔離（各自 fork，互不寫回）。這是「從沒沉澱過」對「沉澱一次」的因果比較。
-- **連續漂移重播（A3 組，至少三輪）**：從 N 個 S 裡挑 3 個（PM 挑），各跑一條隔離的鏈：
-  1. 第 1 輪：`merge session S` 得到 C1（`--header tags=[exp:462]`），`continue session C1`（**原地接續，不 fork**；C1 本來就只帶 `exp:462`，和正式環境的 C 走同一條路），餵入 PM 事先寫好的**固定新進度** P1（一段腳本化的 user 訊息：新的決定、更新或廢止前一個決定、新的未決項），結束。
-  2. 第 2 輪：`merge session C1 --header tags=[exp:462]` 得到 C2，原地接續 C2，餵入 P2；第 3 輪同理，得到 C3。可以再多做幾輪。
-  3. 每一輪結束後都問同一套探針題，答案表**每輪固定**（PM 事先寫好每輪的正確答案）。題型除了 §8.2 的探針，還要有：**資訊更新**（P2 把 P1 的決定改掉，問現在是哪個）、**廢止**（P3 撤回某個決定，問它還有沒有效）、**拒答**（問一件 S 和 P1～P3 都沒有的事，正確答案是「不知道」）。
-  4. 比較基準：同一條鏈的整份接版本（`continue session S --fork --header tags=[exp:462]` 得到 F，依序在 F 上餵 P1～P3，不 merge）。指標是每輪的正確率，看它是不是逐輪往下掉。
+- **連續漂移重播（A3 組，至少三輪）**：從 N 個 S 裡挑 3 個（PM 挑），各跑一條隔離的鏈。分成**主實驗鏈**（只放 S 與固定新進度，下一輪的 merge 只吃它）和**評估分支**（只放探針問答，從不回到主鏈）：
+  1. 第 1 輪：`merge session S` 得到 C1（`--header tags=[exp:462]`），`continue session C1`（**原地接續，不 fork**；C1 本來就只帶 `exp:462`，和正式環境的 C 走同一條路），餵入 PM 事先寫好的**固定新進度** P1（一段腳本化的 user 訊息：新的決定、更新或廢止前一個決定、新的未決項；P 只要求 agent 回一句收到，不提任何探針題），結束。主鏈上這一輪只多了 P1 和 agent 對它的正常回覆。
+  2. 評估：存完以後，從這一輪的 C1 **另 fork 評估分支**（`continue session C1 --fork --header tags=[exp:462]`，覆蓋 tags），探針問答與評分只留在這個分支。主鏈的 C1 不再碰。
+  3. 第 2 輪：`merge session C1 --header tags=[exp:462]`（**永遠 merge 沒被探針碰過的 Cn**）得到 C2，原地接續 C2，餵入 P2，再照第 2 步從 C2 fork 評估；第 3 輪同理，得到 C3。可以再多做幾輪。
+  4. 探針題每輪都是同一套，答案表**每輪固定**（PM 事先寫好每輪的正確答案）。題型除了 §8.2 的探針，還要有：**資訊更新**（P2 把 P1 的決定改掉，問現在是哪個）、**廢止**（P3 撤回某個決定，問它還有沒有效）、**拒答**（問一件 S 和 P1～P3 都沒有的事，正確答案是「不知道」）。答案表只給評分者，**不注入任何被評測的歷史**（主鏈、評估分支、F 都不放）。
+  5. 比較基準：同一條鏈的整份接版本（`continue session S --fork --header tags=[exp:462]` 得到 F，依序在 F 上原地餵 P1～P3，不 merge）。F 也一樣：每餵完一個 Pn，就從 F 另 fork 評估分支問探針，**探針結果不寫回 F**。
+  6. 判準有兩個，**兩個都要過**：(i) **各輪相對 F 的差距**：第 n 輪，C 鏈評估分支的正確率減 F 評估分支的正確率；(ii) **相對首輪的累積下降**：第 n 輪 C 鏈的正確率減第 1 輪 C 鏈的正確率。只看「每一輪比上一輪掉多少」會放過「每輪小幅下降、累計過線」的情況（例如每輪掉 9 個百分點，三輪累計已掉 18），所以不用逐輪差當判準。
   - C1、C2 接過以後是 `relation: continue`（`cli.py:1554-1557`），所以下一輪的 merge 會真的叫 AI 重寫（`cli.py:845-853` 只對 `relation: merge` 沿用已寫好的 parts），量到的正是正式環境的遞迴摘要。
-- **實驗衛生（必守）**：fork 會照抄 A 的使用者欄位，包含 tags（`docs/design.md:388`）。**一定要用 `--header tags=[exp:462]` 蓋掉**，否則 fork 出來的 B 帶著 `role:R`，又是最新的一筆，正式的召回會接到實驗品（E-1 反過來咬人）。merge 也一樣，不准帶 `role:R`。fork 不動 A（`docs/design.md:387`）。實驗做完由 PM 刪掉 `exp:462` 的 Session；有子 Session 的刪不掉（`docs/design.md:423`），所以**從子往父刪**（C3 → C2 → C1，fork 出來的先刪）。
+- **實驗衛生（必守）**：fork 會照抄 A 的使用者欄位，包含 tags（`docs/design.md:388`）。**一定要用 `--header tags=[exp:462]` 蓋掉**，否則 fork 出來的 B 帶著 `role:R`，又是最新的一筆，正式的召回會接到實驗品（E-1 反過來咬人）。merge 也一樣，不准帶 `role:R`。fork 不動 A（`docs/design.md:387`）。實驗做完由 PM 刪掉 `exp:462` 的 Session；有子 Session 的刪不掉（`docs/design.md:423`），所以**從子往父刪**：先刪評估分支與其他 fork 出來的，再 C3 → C2 → C1，F 的評估分支先於 F。
 - **探針**：每個 S 由 PM 依交接檔與工單寫 K＝10 題，答案都在 S 裡：目前在做哪張單、做到哪一步、最近三個決定和理由、未決項、相關檔案或 PR、下一步。連續沉澱的漂移由 A3 組量。由非作者模型或人依答案表評分：對、部分對、錯、說不知道。
 - **指標**（每組、每題）：
 
@@ -288,7 +290,7 @@ C 的形狀（全部是既有的 merge 行為，C-1 只放寬來源數）：
 
 ### 8.4 回本的算式（推論，給 PMO 填數字）
 
-記號：X＝重開時整份接的 context（token），s＝C 接上時的 context（harness＋要約），n＝到下一次重開為止的 request 數，r＝cache 讀取價對基本輸入價的倍率，w＝cache 寫入價的倍率，m＝寫要約的成本（換算成基本輸入 token；**所有嘗試加總**，最多三次，失敗的也算），k＝段內快取過期、要整段重寫的次數。
+記號：X＝重開時整份接的 context（token），s＝C 接上時的 context（harness＋要約），n＝到下一次重開為止的 request 數，r＝cache 讀取價對基本輸入價的倍率，w＝cache 寫入價的倍率，m＝寫要約的成本（換算成基本輸入 token；**所有嘗試加總**，最多三次，失敗的也算），k＝之後 n − 1 個 request 裡，段內快取過期（cache miss）、要整段重寫的次數。
 
 **假設**（每一條都要用實測替換）：同一個模型、同一種定價；兩條線之後的新內容相同，所以差額 X − s 在整段裡固定（段內的 compact 會縮小差額，實際上省得比較少）；cache 讀、寫的倍率照標準值。
 
@@ -304,11 +306,13 @@ C 的形狀（全部是既有的 merge 行為，C-1 只放寬來源數）：
 情況二：重開時快取**還沒過期**（例如剛關就重開，在 TTL 內）：整份接的第一個 request 只付讀取，沉澱後接卻要把新的 C 寫進去：
 
 ```
-第一個 request 省下 ≈ X·r − s·w   # 可能是負的
-其餘同情況一
+省下 ≈ (X·r − s·w)              # 第一個 request：整份接只讀，沉澱後接要寫；可能是負的
+      + (n − 1 − k)·(X − s)·r     # 之後快取命中的 request
+      + k·(X − s)·w               # 之後 n − 1 個 request 裡 cache miss 的那幾次
+      − m
 ```
 
-依 Anthropic 文件的**標準**倍率（cache 寫 1.25 倍、讀 0.1 倍；實際依模型為準，部分模型有例外，§9.1 的出處），假設 X＝36.8 萬、s＝1 萬：情況一的第一個 request 省下約 45 萬基本 token 的等值。寫要約的來源截在 6 萬字，三次嘗試都失敗再成功的情況，m 也大約是三份輸入加輸出；即使 m 算 30 萬，情況一在第一個 request 就回本。情況二的第一個 request 約省 3.7 萬 − 1.25 萬 ≈ 2.4 萬，回本要靠之後的 request。這是推論：X 不一定等於平均值，重開時快取過期與否看兩次開的間隔（§8.5 第 5 項），所以要用實測數字代入，並以 §8.2 的總成本指標為準。
+依 Anthropic 文件的**標準**倍率（cache 寫 1.25 倍、讀 0.1 倍；實際依模型為準，部分模型有例外，§9.1 的出處），假設 X＝36.8 萬、s＝1 萬：情況一的第一個 request 省下約 45 萬基本 token 的等值。寫要約的來源截在 6 萬字，前兩次失敗、第三次成功的情況，m 大約是三份輸入加輸出；三次都失敗時那次 merge 是 exit 2，若再人工重跑一次，m 要把前次的三次加上本次的每一次嘗試全算進去；即使 m 算 30 萬，情況一在第一個 request 就回本。情況二的第一個 request 約省 3.7 萬 − 1.25 萬 ≈ 2.4 萬，回本要靠之後的 request。這是推論：X 不一定等於平均值，重開時快取過期與否看兩次開的間隔（§8.5 第 5 項），所以要用實測數字代入，並以 §8.2 的總成本指標為準。
 
 ### 8.5 要 PMO 在 M2 補的數字
 
@@ -362,7 +366,7 @@ C 的形狀（全部是既有的 merge 行為，C-1 只放寬來源數）：
 | 每個 request 平均約 36.8 萬 token 的快取 context | 本人 11-09 的實測，引為本人所述，我沒驗 |
 | 角色 Session 的閱讀版字數、raw 大小 | **未查**：架構師不讀真資料，要量時請 PM 給匯總（§8.5 第 6 項） |
 | 重開時與段尾的 context 大小 | **未查**，要 M2（§8.5 第 4 項） |
-| merge 在真資料上的要約品質 | **未查**：正式環境沒有用過；第一次用就是 §8.2 |
+| merge 在真資料上的要約品質 | **未查**：本機索引未見 merge，正式使用情況未確認；要量就是 §8.2 |
 
 ### 9.3 ③ 方法與工具
 
@@ -374,7 +378,7 @@ C 的形狀（全部是既有的 merge 行為，C-1 只放寬來源數）：
 | 摘要 | `merge`：schema 驗證、重試 3 次、可以續做、不准用工具、不留 session（`docs/design.md:296-345`） | 只給一個來源（C-1）；claude 不能指定模型（Q-6） |
 | 凍結樣本 | `continue --fork`：A 不動（`docs/design.md:387`） | 要記得蓋掉 tags（§8.2） |
 | 取原版 | `agora show session <id>`、`--raw` | — |
-| 找出處鏈 | `agora show session <C>` 的 header 有 `parents` | `search --json` 沒有 `parents`（換線掃描要多跑一次 show；需要時另開 d 單加欄位） |
+| 找出處鏈 | `agora show session <C>` 的 header 有 `parents` | `search --json` 沒有 `parents`；只用來查出處、輔助標出「待確認」（要多跑一次 show）。`parents` 認不出沉澱（§3.3 E-4），分類沉澱靠 R-11 的紀錄，補 `parents` 欄位也解決不了 |
 | 量 token | 沒有 | Claude 的 jsonl 每則 assistant 訊息帶 usage（輸入、cache 寫、cache 讀、輸出）——**推論，本 repo 程式沒有讀它**，只讀 `-p` 輸出的 `modelUsage`（`agents/claude.py:1182-1184`）；opencode 匯出的 JSON 也有每則訊息的 token（推論）。量測工具屬 M2，不在本單 |
 | 評估 | 沒有 | 探針題與評分表由 PM 寫（§8.2）；不寫新工具 |
 
@@ -388,7 +392,7 @@ C 的形狀（全部是既有的 merge 行為，C-1 只放寬來源數）：
 | sidecar 照 §6 做、失敗不換線 | S-6～S-13（sidecar 側） | 待 MLP |
 | context 變短、成本變低 | §8.2 離線重播（因果）；§8.3 線上 ABAB（只量已採用後的邊際效益） | 待做；要 M2 的數字 |
 | 品質沒有明顯變差 | 探針正確率、A3 連續重播（更新、廢止、拒答）、退回次數 | 待做 |
-| 門檻 | 建議：A1 的**總成本**（§8.2，含寫要約的每一次嘗試、失敗與之後按需 `show` 增加的 request）低於 A0；token／request ≤ A0 的 30% 只當輔助指標；探針正確率掉不超過 10 個百分點；A3 的正確率沒有逐輪下降超過同一門檻；退回次數不增加；C／S 字數比照 §2 第 1 點 | **門檻由 PM／本人定**（建議值，不是決定） |
+| 門檻 | 建議：A1 的**總成本**（§8.2，含寫要約的每一次嘗試、失敗與之後按需 `show` 增加的 request）低於 A0；token／request ≤ A0 的 30% 只當輔助指標；探針正確率掉不超過 10 個百分點；A3 每一輪都要同時過兩個判準（§8.2）：相對 F 的差距、相對首輪的累積下降，都不超過 10 個百分點（不用逐輪差當判準）；退回次數不增加；C／S 字數比照 §2 第 1 點 | **門檻由 PM／本人定**（建議值，不是決定） |
 
 ## 10. 介面與模組切割
 
@@ -418,7 +422,7 @@ agora 不認識 sidecar，只用 exit code、stdout 第一欄的 id、`search --
 | # | 輸入 → 輸出或錯誤 | 測試層 | 新／既有 |
 |---|---|---|---|
 | C-1 | 前提：S 不是 merge、要約快取（`merge-sections`）是空的、假 agent 第一次就回合格的 JSON、假 rclone 上傳成功。`merge session <S> --agent claude\|opencode`（一個 id）→ exit 0；stdout 第一欄是新的 id C；C 的 `relation: merge`、`parents` 恰好是 `[S]`、`sections.json` 恰好一節、內文恰好一個「### 「S 的標題」」節；假 agent 的 summarize 恰好被叫一次。變體：(a) 要約快取已有 S → summarize 被叫 0 次；(b) 假 agent 前兩次不合格、第三次合格 → 被叫 3 次、exit 0；三次都不合格 → exit 2（要約失敗，`docs/design.md:238`）、不存檔；(c) 上傳沒完成（假 rclone 失敗）→ exit 3，C 在本機 outbox。拒絕：沒給 id → exit 1。**一個 id 而且 S 是 `relation: merge`**（還沒被接過的要約）→ exit 1（`InputError`，說它已經是要約），不叫 AI、不存檔；這是**新增的拒絕規則**，不只是把 `len(ids) < 2` 改成 `< 1`：要在檢查來源數的地方讀 S 的 header（同步之後），多一個分支。agy 來源、`--agent codex`／`agy` 的拒絕不變 | unit（假 agent、假 rclone） | **新**（放寬 `cli.py:827-828`，加一條拒絕） |
-| C-2 | `merge session <S> --agent a --header tags=[role:R]` → C 的 `tags` 恰好是 `["role:R"]`；之後 `search --filter tags=role:R --sort updated --json` 的第一筆是 C，S 在後面。變體：固定時鐘讓 S 的 `updated_at` 和 C 同一秒（`updated_at` 只到秒）→ 仍是 C 在前（同秒用 ULID 排，`store.py:2840-2843`） | unit | 既有行為，新測試 |
+| C-2 | `merge session <S> --agent a --header tags=[role:R]` → C 的 `tags` 恰好是 `["role:R"]`；之後 `search --filter tags=role:R --sort updated --json` 的第一筆是 C，S 在後面。變體（同秒）：控制時鐘，讓 C 的生成毫秒**明確晚於** S 的 ULID 毫秒，只讓格式化後的 `updated_at` 相同（`updated_at` 只到秒）→ 仍是 C 在前（同秒用 ULID 排，`store.py:2840-2843`）。**不要**把整個時鐘固定在同一毫秒：那時比的是 ULID 的隨機尾碼（`header.py:260-264`），C 在前不保證，測試會隨機失敗；這種情況不在契約內 | unit | 既有行為，新測試 |
 | C-3 | 前提：測試開始時 outbox 裡沒有 S 的項目。C-1 前後，S 的 header（含 `agora.updated_at`）位元組相同，outbox 裡沒有 S 的新版本 | unit | 既有行為，新測試 |
 | C-4 | 對 C（一個來源的 merge）`continue --agent claude\|opencode --add-tag role:R`，假 agent 加了新內容 → 寫回 C（同一個 id）；`relation` 變成 `continue`、沒有 `agora.merge`、沒有 `status: draft`；`parents` 仍是 `[S]`；`tags` 裡恰好一個 `role:R`；載入的前兩則是 MERGE_NOTE＋要約與 MERGE_READY（`cli.py:2515-2517`）；S 不變 | unit（假 agent） | 既有行為，新測試（一個來源的變體） |
 | C-5 | C 存在時 `delete session S --yes` → exit 1，訊息列出 C；S 還在 | unit | 既有行為，新測試 |
@@ -546,7 +550,7 @@ sequenceDiagram
       SC->>AG: continue session S --add-tag role:R
     else 可以沉澱
       SC->>AG: merge session S --agent a --header tags=[role:R]
-      AG->>SM: 閱讀版（超過 6 萬字時截斷頭尾），只輸出 JSON（不合格時重試，最多三次）
+      AG->>SM: 閱讀版（超過 6 萬字時保留頭尾、截去中段），只輸出 JSON（不合格時重試，最多三次）
       SM-->>AG: 一節要約
       alt merge 是 0 或 3
         AG-->>SC: stdout 第一欄 C
@@ -594,7 +598,7 @@ flowchart TB
 | PR-2 | §8.2 的離線重播（PM 手動跑，用 PR-1 的 merge、`continue --fork`、`exp:462` tag）；結果報告不進 repo | — | 不會：不碰正式的召回（守 §8.2 的實驗衛生） |
 | PR-3 | sidecar 的 R-8～R-12，預設「整份接」；S-6～S-13 | sidecar 的 repo | 不會：預設行為和 #439 相同 |
 | PR-4 | PM harness 的隊員規矩（Q-5 定案後） | MAS（atelier，由 PMO／PM 照 harness 流程） | 不會：只換 open 的取值；(b) 只多存 Session |
-| PR-5 | 依 §8.3 的結果，決定要不要把預設改成沉澱後接（sidecar 的預設值） | sidecar 的 repo | 要有實驗數字才做；由本人決定 |
+| PR-5 | §8.2 的配對（A0／A1／A2）與 A3 通過，加上 §8.3 線上無退步，才決定要不要把預設改成沉澱後接（sidecar 的預設值）；只有 §8.3 的數字不夠（carryover） | sidecar 的 repo | 要有實驗數字才做；由本人決定 |
 
 順序：PR-1 → PR-2 →（本人看結果）→ PR-3 → PR-5；PR-4 獨立，Q-5 定了就可以做。
 
