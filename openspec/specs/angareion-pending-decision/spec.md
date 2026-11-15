@@ -1,7 +1,7 @@
 # angareion-pending-decision Specification
 
 ## Purpose
-待決（pending decision）：提問者出題、作答者回答、提問者更新或撤回，全部都是在頻道裡 append 的一則 `datatype: decision` 訊息；Angareion 把整串紀錄匯總成每一題目前的狀態。匯總規則只有一份，放在 Angareion；App 與 PMO 只讀 `angareion decision list --json`。後端只用「append 一則」與「依序讀回」兩種能力（設計見 `design.md`，C-編號對照見 §15）。
+待決（pending decision）：提問者出題、作答者回答、提問者更新或撤回，全部都是在頻道裡 append 的一則 `datatype: decision` 訊息；Angareion 把整串紀錄匯總成每一題目前的狀態。匯總規則只有一份，放在 Angareion；App 與 PMO 只讀 `angareion decision list --json`。後端只用「append 一則」與「依序讀回」兩種能力（設計見 `openspec/changes/archive/2026-11-15-angareion-pending-decision/design.md`，C-編號對照見 §15）。
 
 ## Requirements
 
@@ -72,7 +72,7 @@
 - **THEN** 後端被呼叫的方法只有 `send` 與經由 log 快取同步的列舉（C-20(e)）
 
 ### Requirement: 列出待決（list）
-`list` 預設只列 open 的題目；`--all` 列出本機鏡像裡頻道的全部歷史（open、answered、withdrawn），MUST 從頭完整匯總，MUST NOT 使用 snapshot。`--json` 的輸出 MUST 是 `{"decisions": [...], "ignored": [...]}`，欄位與設計 §5 相同，沒有 `draft` 欄位。排序 MUST 是 `(asked_at, channel, id)`。`--channel` 指定未登記的頻道 MUST exit 1；同步失敗 MUST exit 2、stdout 是空的。
+`list` 預設只列 open 的題目；`--all` 列出本機鏡像裡頻道的全部歷史（open、answered、withdrawn），MUST 從頭完整匯總，MUST NOT 使用 snapshot。`--json` 的輸出 MUST 是 `{"decisions": [...], "ignored": [...]}`，欄位與設計（`openspec/changes/archive/2026-11-15-angareion-pending-decision/design.md`）§5 相同，沒有 `draft` 欄位。排序 MUST 是 `(asked_at, channel, id)`。`--channel` 指定未登記的頻道 MUST exit 1；同步失敗 MUST exit 2、stdout 是空的。
 
 #### Scenario: 預設與 --all
 - **WHEN** 頻道有一題 answered、一題 withdrawn、一題 open

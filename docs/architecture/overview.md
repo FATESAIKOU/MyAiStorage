@@ -157,7 +157,7 @@ schema／I/O：_io → errors；_jsonutil → errors；_lock → errors；paths 
 
 ## angareion（#468；待決 datatype，PR-1～PR-4）
 
-設計全文在 `openspec/changes/archive/2026-11-15-angareion-pending-decision/design.md`（§19 是分 PR 切法）；決定見 decisions D-30。本節寫 PR-1～PR-4 在 `src/angareion` 實作的部分。PR-4（本分支，未 merge）加入 `decision_cli.py` 與 `angareion decision` 子指令。
+設計全文在 `openspec/changes/archive/2026-11-15-angareion-pending-decision/design.md`（§19 是分 PR 切法）；決定見 decisions D-30。本節寫 PR-1～PR-4 在 `src/angareion` 實作的部分。PR-4（#474）加入 `decision_cli.py` 與 `angareion decision` 子指令。
 
 - **`messages.py`**：`Message.datatype`（預設 `message`）。讀取寬鬆：沒有這個鍵、不是字串、或不符 `[a-z][a-z0-9-]{0,31}` 的值都讀成 `message`；合法但不認得的值（例如 `poll`）照原字串保留。寫入嚴格：`Message.validate` 拒絕不符文法的值。常數 `DEFAULT_DATATYPE`、`SELF_SILENT_DATATYPES`（`frozenset({"decision"})`，「寫的人自己不收」的 datatype 表，格式層擁有）。`message_to_dict` 多了 `"datatype"` 鍵，所以 `read --json`、`log --json` 也多這一鍵。PR-2 起 `serialize_message` 把 `datatype` 寫在 `angareion` 之後，`send` 寫 `datatype: message`。
 - **`backend.py`**：`recipient_matches`、`mention_matches` 多一條：讀者自己寫的、datatype 在 `messages.SELF_SILENT_DATATYPES` 裡的訊息不算寄給讀者。表在每次呼叫時從 `messages` 模組讀，遞送層本身不認得任何 datatype 的名字。`ChannelBackend` 的六個方法不變。新增協定 `EnumerableBackend`（`@runtime_checkable`，只有 `enumerate_conditional`），`FakeBackend` 與 `GitHubIssuesBackend` 都符合。
