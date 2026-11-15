@@ -317,12 +317,13 @@ def serialize_message(msg: Message) -> str:
     A broadcast (no `to`) omits the `to` field entirely. `mentions` is written
     as one flow-style line (`mentions: [a, b]`; the TS side's hand-written
     parser relies on it) and left out when empty; `in_reply_to` is left out
-    when unset.
+    when unset. `datatype` is written right after `angareion` (#468, design 4.1).
     """
     msg.validate()
 
     head: dict[str, Any] = {
         "angareion": msg.angareion,
+        "datatype": msg.datatype,
         "id": msg.id,
         "at": msg.at,
         "from": msg.from_,
@@ -364,9 +365,9 @@ def serialize_message(msg: Message) -> str:
         raise MessageValidationError(
             f"Refusing to send: the message cannot be read back from what would be sent ({e})"
         ) from e
-    # `datatype` is not written yet (#468 PR-1: the writer side is PR-2), so a
-    # message of any other datatype reads back as `message` and is refused here.
-    # The TS writer sends content as it is (`serialize`, messages.ts:208) and
+    # `datatype` is written and read back, so a datatype this reader would not
+    # keep (outside the grammar, or read as `message`) is refused here too. The
+    # TS writer sends content as it is (`serialize`, messages.ts:208) and
     # every reader turns `\r\n` into `\n`, so that is what reads back (#232).
     before, after = message_to_dict(msg), message_to_dict(back)
     before["content"] = before["content"].replace("\r\n", "\n")
