@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, TypedDict
 import re
 import yaml
 
@@ -34,6 +34,56 @@ QUESTION_FIELDS = (
 )
 
 
+# Element shapes of the views below. They are documentation for readers and
+# type checkers only: at run time these are plain dicts (the JSON shape of §5).
+Option = TypedDict("Option", {"key": str, "text": str})
+Submitted = TypedDict(
+    "Submitted",
+    {
+        "record": str,
+        "from": str,
+        "base": str,
+        "choice": str | None,
+        "note": str | None,
+        "submitted_at": str | None,
+    },
+)
+Withdrawn = TypedDict("Withdrawn", {"record": str, "reason": str | None})
+Decision = TypedDict(
+    "Decision",
+    {
+        "id": str,
+        "channel": str,
+        "asker": str,
+        "answerer": str,
+        "status": str,
+        "version": str,
+        "revisions": int,
+        "title": str,
+        "background": str,
+        "body": str,
+        "options": list[Option],
+        "recommended": str,
+        "reason": str,
+        "asked_at": str | None,
+        "updated_at": str | None,
+        "submitted": Submitted | None,
+        "withdrawn": Withdrawn | None,
+    },
+)
+Ignored = TypedDict(
+    "Ignored",
+    {
+        "record": str,
+        "channel": str,
+        "op": str | None,
+        "ref": str | None,
+        "item": int | None,
+        "code": str,
+    },
+)
+
+
 @dataclass(frozen=True)
 class Record:
     message: Message
@@ -41,10 +91,10 @@ class Record:
     received_at: str | None
 
 
-@dataclass
+@dataclass(frozen=True)
 class FoldResult:
-    decisions: list[dict]
-    ignored: list[dict]
+    decisions: list[Decision]  # read-only for callers
+    ignored: list[Ignored]  # read-only for callers
     seen: dict[str, frozenset[str]]
     closed: frozenset[str]
     snapshot_used: dict[str, str | None]
@@ -54,7 +104,7 @@ class FoldResult:
     snapshot_closed: dict[str, list[str]] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(frozen=True)
 class SubmitPlan:
     batches: list[tuple[str, str, list[dict]]]
     skipped: list[str]
@@ -67,7 +117,9 @@ class PayloadError(MessageValidationError):
 
 
 class SubmitRejected(MessageValidationError):
-    def __init__(self, problems: list[tuple[str, str]]):
+    # Each problem is (ref, code). `ref` is whatever the entry held: a string, None when
+    # the entry had no ref, or another YAML value that is not a string (L-A5).
+    def __init__(self, problems: list[tuple[Any, str]]):
         self.problems = problems
         super().__init__(str(problems))
 
@@ -107,6 +159,42 @@ def _question(p: dict) -> None:
         keys.append(option["key"])
     if len(set(keys)) != len(keys) or p.get("recommended") not in keys:
         _fail()
+
+
+def _question_fields(p: Mapping) -> dict:
+    """The question fields of a validated payload, as the views hold them (§5).
+
+    Options are cut to `key` and `text`: an unknown option key is read and then
+    dropped, so no value a writer put there reaches `list --json` or a snapshot.
+    """
+    q = {k: p[k] for k in QUESTION_FIELDS}
+    q["options"] = [{"key": option["key"], "text": option["text"]} for option in p["options"]]
+    return q
+
+
+def _utf8_text(value: Any) -> bool:
+    """False if any string in the parsed payload cannot be encoded as UTF-8 (a lone surrogate, YAML `\\ud800`).
+
+    Walks iteratively and skips containers already seen: a YAML alias can make the
+    parsed value contain itself.
+    """
+    seen: set[int] = set()
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            try:
+                item.encode("utf-8")
+            except UnicodeEncodeError:
+                return False
+        elif isinstance(item, (dict, list)) and id(item) not in seen:
+            seen.add(id(item))
+            if isinstance(item, dict):
+                pending.extend(item.keys())
+                pending.extend(item.values())
+            else:
+                pending.extend(item)
+    return True
 
 
 def _answer(
@@ -236,6 +324,9 @@ def parse_payload(message: Message) -> dict:
             type(p.get("decision")) is not int or p.get("decision") != 1
         ):
             raise PayloadError("unsupported_version")
+        if not _utf8_text(p):
+            # Such a record cannot be written out as UTF-8 text, so no view may carry it (R2-2).
+            raise PayloadError("bad_payload")
         _validate(p, strict=False)
         return p
     except PayloadError:
@@ -259,6 +350,12 @@ def build_payload(op: str, **fields: Any) -> str:
         _validate(p, strict=True)
     except (TypeError, KeyError, ValueError) as exc:
         raise MessageValidationError(str(exc)) from exc
+    if not _utf8_text(p):
+        # The reader drops such a record as bad_payload (R2-2); refuse it here so the writer never sends it (R3-4).
+        raise MessageValidationError(
+            "a string holds a character that cannot be encoded as UTF-8 (a lone surrogate, "
+            "or a JSON escape of an emoji): write the character literally in YAML, or use json.dumps(..., ensure_ascii=False)"
+        )
     try:
         result = yaml.safe_dump(p, allow_unicode=True, sort_keys=False)
         if yaml.safe_load(result) != p:
@@ -331,7 +428,7 @@ def fold(records: Sequence[Record], *, use_snapshot: bool) -> FoldResult:
             snapshot_closed[asker] = list(p["closed"])
             cutoff[asker] = records[found[0]].position
             for x in p["items"]:
-                q = {k: x[k] for k in QUESTION_FIELDS}
+                q = _question_fields(x)
                 q.update(
                     id=x["id"],
                     channel=m.channel,
@@ -396,7 +493,7 @@ def fold(records: Sequence[Record], *, use_snapshot: bool) -> FoldResult:
             if m.id in decisions or m.id in closed:
                 ignore(m, op, "duplicate_id")
                 continue
-            q = {k: p[k] for k in QUESTION_FIELDS}
+            q = _question_fields(p)
             q.update(
                 id=m.id,
                 channel=m.channel,
@@ -430,7 +527,7 @@ def fold(records: Sequence[Record], *, use_snapshot: bool) -> FoldResult:
                 ignore(m, op, code, ref)
                 continue
             if op == "update":
-                q.update({k: p[k] for k in QUESTION_FIELDS})
+                q.update(_question_fields(p))
                 q.update(
                     version=m.id, revisions=q["revisions"] + 1, updated_at=r.received_at
                 )
@@ -471,7 +568,8 @@ def fold(records: Sequence[Record], *, use_snapshot: bool) -> FoldResult:
                 if isinstance(ref, str):
                     refs.add(ref)
                 if code:
-                    ignore(m, op, code, ref, index)
+                    # `ref` is the schema's str | None; a foreign value that is not a string is not echoed.
+                    ignore(m, op, code, ref if isinstance(ref, str) else None, index)
                     continue
                 q["status"] = "answered"
                 q["submitted"] = {
@@ -489,14 +587,14 @@ def fold(records: Sequence[Record], *, use_snapshot: bool) -> FoldResult:
     if use_snapshot:
         ordered = [q for q in ordered if q["status"] == "open"]
     return FoldResult(
-        ordered,
-        ignored,
-        {k: frozenset(v) for k, v in versions.items() if k not in closed},
-        frozenset(closed),
-        used,
-        folded,
-        not use_snapshot,
-        snapshot_closed,
+        decisions=ordered,
+        ignored=ignored,
+        seen={k: frozenset(v) for k, v in versions.items() if k not in closed},
+        closed=frozenset(closed),
+        snapshot_used=used,
+        folded=folded,
+        complete=not use_snapshot,
+        snapshot_closed=snapshot_closed,
     )
 
 
@@ -559,6 +657,48 @@ def snapshot_for(records: Sequence[Record], asker: str) -> str | None:
         items=items,
         closed=closed,
     )
+
+
+def related_count(records: Sequence[Record], asker: str) -> int:
+    """Records after the asker's current snapshot that belong to the asker (§7.1).
+
+    The records are external input, read as leniently as `fold` reads them: a
+    bad item is simply not counted, so nothing here may raise on it.
+    """
+    owners: dict[str, str] = {}
+    parsed: list[tuple[Record, dict]] = []
+    for r in records:
+        if r.message.datatype != "decision":
+            continue
+        try:
+            p = parse_payload(r.message)
+        except PayloadError:
+            continue
+        parsed.append((r, p))
+        if p["op"] == "ask":
+            owners.setdefault(r.message.id, p["asker"])
+
+    floor = -1
+    used = fold(list(records), use_snapshot=True).snapshot_used.get(asker)
+    if used is not None:
+        snapshot = next(r for r in records if r.message.id == used)
+        through = parse_payload(snapshot.message)["through"]
+        floor = next(r.position for r in records if r.message.id == through)
+
+    count = 0
+    for r, p in parsed:
+        if r.position <= floor or p["op"] == "snapshot":
+            continue
+        if p["op"] == "ask":
+            hit = p["asker"] == asker
+        elif p["op"] in ("update", "withdraw"):
+            hit = owners.get(p["ref"]) == asker
+        else:
+            # A submit item whose ref is not a string names no decision, so it is not counted.
+            refs = [item.get("ref") for item in p["items"] if isinstance(item, dict)]
+            hit = any(isinstance(ref, str) and owners.get(ref) == asker for ref in refs)
+        count += hit
+    return count
 
 
 def plan_submit(
@@ -637,4 +777,4 @@ def plan_submit(
                 current = trial
         if current:
             batches.append((channel, asker, current))
-    return SubmitPlan(batches, skipped)
+    return SubmitPlan(batches=batches, skipped=skipped)

@@ -5,7 +5,7 @@ description: Leave and read messages on an Angareion channel, between agents, pr
 
 # Angareion
 
-Angareion 是留言工具。你用它「送訊息給某個 agent 或整個 channel」與「讀寄給自己的訊息」；channel 是英文名，訊息由設定檔指到後端的實體（實作是 GitHub Issues 的留言）。對外只有六個指令；沒有 ack、沒有已讀回條。`angareion --version` 印出套件版本與來源 commit（例如 `angareion 0.1.0 (99db372)`），可用來確認讀者已升級；不是從 git checkout 執行時印 `unknown`。
+Angareion 是留言工具。你用它「送訊息給某個 agent 或整個 channel」與「讀寄給自己的訊息」；channel 是英文名，訊息由設定檔指到後端的實體（實作是 GitHub Issues 的留言）。對外有六個訊息指令，另有待決的 `angareion decision`（見下面「待決」一節）；沒有 ack、沒有已讀回條。`angareion --version` 印出套件版本與來源 commit（例如 `angareion 0.1.0 (99db372)`），可用來確認讀者已升級；不是從 git checkout 執行時印 `unknown`。
 
 ## 私人資訊：不要貼進訊息
 
@@ -43,6 +43,36 @@ angareion log [--channel <ch>]… [--from <AI 名>] [--to <AI 名|me>] [--mentio
 - `send` 附加檔案：`--attach NAME=PATH`（小檔內容直接進訊息）或 `--ref NAME=LOCATOR`（連結）。
 
 結束碼：0 成功（`wait` 是「有新訊息」）；1 用法或輸入錯；2 後端、網路或設定錯；3 `wait` 逾時沒有新訊息。錯誤看 stderr；stdout 只有結果。`wait` 若 exit 2（後端或網路錯）稍等一下再試，不要當成「沒有新訊息」。
+
+## 待決（`angareion decision`）
+
+提問者出題、作答者回答，都是頻道裡的一則 `datatype: decision` 訊息。**用這個指令寫，不要自己拼 YAML 寫 `datatype: decision`。**
+
+```bash
+angareion decision ask --channel <ch> --body -                     # 出題；stdout 印題目 id
+angareion decision update --channel <ch> --ref <ULID> --body -    # 改題（只有出題者；整份重給題目欄位）
+angareion decision withdraw --channel <ch> --ref <ULID> [--reason <文字>]   # 撤回（只有出題者）
+angareion decision submit [--channel <ch>]… --body -               # 作答：{items: [{ref, base, choice?, note?}]}
+angareion decision list [--channel <ch>]… [--all] [--json]         # 匯總；預設只列 open，--all 含已結束的
+angareion decision snapshot --channel <ch>                         # 手動 snapshot（通常自動寫）
+```
+
+- 題目 id 就是出題那則的 `id`；`update`、`withdraw` 的 `--ref` 與 `submit` 每一項的 `ref` 都是它。
+- **`submit` 的 `base` 必給**：從 `decision list --json` 的 `version` 取（你看到的那一版）。只送你答了的題；未答的不要放進 items。`choice` 是 base 版本的選項 key，`note` 是 1～4000 字元，兩者至少一個。
+- 寫入前會先檢查；不符 exit 1，什麼都沒送，stderr 列出 `ref` 與診斷碼（`stale_base`、`closed_ref`、`not_answerer`、`not_owner`、`bad_item`、`duplicate_ref`）。
+- `submit` 若 exit 2：stdout 已印的 id 是送出去的；**原樣重跑同一個指令**，已被接受的題會略過（stderr 印「已送出，略過」），只送剩下的。
+- 送出之後不要假設「送出就算接受」：用 `angareion decision list --all --json` 看 `submitted` 與 `ignored`。
+- 結束碼同其他指令：0 成功；1 用法或輸入錯（什麼都沒送）；2 後端錯（可能送出一部分，照上一條重跑）。
+
+## 給 App 寫 submit 的人（R-A3）
+
+App 的寫者只在使用者按「送出」時寫 `submit`；不寫 `ask`、`update`、`withdraw`、`snapshot`，也不編輯或刪除訊息。寫出的紀錄：
+
+- front matter：`datatype: decision`、`from`＝作答者、`channel`＝提問頻道、`to`＝提問者、`mentions: [提問者]`。
+- **內文是 YAML，不是 JSON**：`decision: 1`、`op: submit`、`asker`、`items`。用 `yaml.safe_dump(…, allow_unicode=True, sort_keys=False)` 寫出；**不要用 `ensure_ascii=True` 的 JSON**——含 emoji 經 YAML 讀回會壞。寫完用 `yaml.safe_load` 讀回驗證。
+- 每一項：`ref`、`base`（作答時 `list --json` 給的 `version`）、`title`（抄一份，匯總不當依據）、`choice`／`note`（至少一個）。
+- 只放已答的題；按（頻道, 提問者）分組，超過 65536 字元就分塊。
+- 送出之後照 `decision list --json` 顯示結果，不能假設寫出就等於被接受。
 
 ## 建與刪 channel：有落地時間差
 
@@ -86,5 +116,6 @@ angareion wait --timeout 600
 - 不要在等待迴圈裡反覆問模型「有沒有新訊息」——那是 `wait` 的工作。
 - 不要用 `read --since` 去重複讀已處理過的訊息；本機游標會自己記。
 - 不要手改 `config/angareion/channels.json`（那是重建 workflow 的產物）。
+- 不要手寫 `datatype: decision` 的訊息；待決一律用 `angareion decision`。
 
 - log 的結果不是『這則現在還在』的證據（快取不解後端的刪除）。

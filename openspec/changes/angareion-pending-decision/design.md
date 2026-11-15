@@ -195,9 +195,11 @@ payload 放在內文而不是 front matter，有兩個原因：
 - **`note`**：有給就是 1～`NOTE_MAX`（4000）字元的字串，空字串不合法。設上限是為了讓任何一題的 submit 項單獨一則一定放得下（§9.1 的分塊靠這一點）。
 - **`submit.items[].title`**：只是抄一份給人看，匯總時不當依據。
 - **整則長度**：整則序列化文字（含 front matter）不得超過 `MAX_MESSAGE_LENGTH`，即 65536 字元（L-9）。
+- **字串要能以 UTF-8 編碼**：payload 解析之後的任何字串（含 mapping 的鍵、巢狀的值）都不得含無法以 UTF-8 編碼的字元（孤立的代理字元，例如 YAML 的 `"\ud800"`；`json.dumps` 預設 `ensure_ascii=True` 把 emoji 寫成一對 `\uXXXX`，YAML 讀回也是兩個代理字元）。寫入端（`build_payload`，六個 action 共用）一律拒送，exit 1（PR-4 審查 R3-4）。
 - **讀取時**：
   - 不認得的 `decision` 版本：整則紀錄略過，診斷 `unsupported_version`。內文讀得出 YAML mapping、但 `decision` 不是整數 1（含**沒有這個鍵**、不是整數）都算這一類：這個讀者看不懂，不斷定是寫壞了；兩者一樣是整則略過，只差診斷碼。讀不出 YAML 或不是 mapping 才是 `bad_payload`。
-  - payload 裡多出來的鍵：略過不理。
+  - payload 裡多出來的鍵：略過不理。**例外**：payload 裡任何字串（包括只出現在多出來的鍵、或巢狀的值裡）無法以 UTF-8 編碼時，整則 `bad_payload`，不只丟掉那個鍵——這種紀錄寫不成 UTF-8 文字，不能讓它進任何視圖（`list` 的文字與 JSON、snapshot）。判斷用的函式與寫入端是同一個（`decision._utf8_text`），所以寫入端送得出的，讀取端一定不會因為這條判壞（PR-4 審查 R2-2、R3-1、R3-4）。
+  - `options` 每一項多出來的鍵（`key`、`text` 以外）：讀進來之後丟掉，視圖（`list --json`、snapshot 的 `items`）的 `options` 每一項恰好是 `{key, text}`（PR-4 審查 R2-1）。
   - submit 的某一項不合上面的答案規則：只略過那一項，診斷 `bad_item`（§6.2）。
 
 範例（`ask` 的內文）：
@@ -297,7 +299,7 @@ items:
 - `ignored` 每一筆是一個不被接受的單位：
   - 整則不接受時一筆，`item` 是 `null`；
   - `submit` 逐項判時，每個不被接受的項目各一筆，`item` 是它在 `items` 裡的索引（從 0 起），`ref` 是那一項的 `ref`；
-  - `ref` 讀不出來（例如 `bad_payload`）時是 `null`。
+  - `ref` 讀不出來（例如 `bad_payload`），或那一項的 `ref` 不是字串（外部寫者寫成 list、mapping、數字）時是 `null`：`ignored` 的 `ref` 只會是字串或 `null`，不原樣回填外部的非字串值（PR-4 審查 H1、R2-4）。
 - 不給 `--all` 時，`ignored` 只涵蓋實際被匯總的紀錄（snapshot 的 `through` 之後的，加上壞掉的 snapshot 本身）；要看全部用 `--all`。
 - 排序：`(asked_at, channel, id)`，由舊到新，跟 `log` 跨頻道的排序鍵同一套（`spec.md:312`）。
   - `asked_at` 是後端給的原字串，照字串比，和 `log` 的實作相同（`log_query.py:127` 的 `(m.received_at or "", m.channel, m.id)`）。前提是同一個後端寫出的時刻格式一致（GitHub 一律 `…Z`）；混用 `Z` 和 `+00:00` 會排錯。將來的後端若格式不一，在後端層正規化，`log` 和待決一起改，不在 `decision.py` 另做一套。
@@ -391,6 +393,7 @@ items:
 - 每個（頻道, 提問者）各自有 snapshot，**只能由那位提問者寫**（`from`＝`asker`）。這樣跟「只有出題者能改題目」是同一條權限線。
 - **自動觸發**：出題者的 `ask`／`update`／`withdraw` 寫成功之後，若該（頻道, 提問者）在目前有效 snapshot 的 `through` 之後的相關紀錄已經 ≥ `SNAPSHOT_EVERY`（200 則），就再寫一則 snapshot。
   - 「相關紀錄」指：該提問者的 ask，以及 ref 指向該提問者題目的 update、withdraw、submit 項。
+  - 計數是 `decision.related_count(records, asker)`（純函式，讀取寬鬆：讀不了的紀錄、`ref` 不是字串的 submit 項都不算，不丟例外）；「目前有效 snapshot」與 `fold(use_snapshot=True)` 選的是同一則。
   - 自動寫失敗只在 stderr 警告一次，結束碼和 stdout 不變（原本那筆寫入已經成功）。
   - 自動寫出的 snapshot id **不印**在 stdout（stdout 仍只有原本那筆的 id）。
 - **手動**：`angareion decision snapshot --channel <ch>`，不看門檻。
@@ -647,8 +650,8 @@ closed: [<題目 id>, …]     # 已結束（answered／withdrawn）題目的 id
 | 模組 | 職責 | 不做什麼 |
 |---|---|---|
 | `angareion/messages.py`（改） | `Message` 加 `datatype` 欄位（預設 `message`）；寫入時嚴格、讀取時寬鬆；`message_to_dict` 加這個鍵；常數 `SELF_SILENT_DATATYPES = frozenset({"decision"})`（「寫的人自己不收」的 datatype 表，格式層擁有） | 不解析 decision 的 payload |
-| `angareion/decision.py`（新） | 純函式：payload 的結構與驗證（寫入嚴格、讀取寬鬆）；`fold(records, *, use_snapshot) -> FoldResult`；`snapshot_for(...)`；`plan_submit(...)` | 不碰後端、不碰快取、不碰 CLI、不碰時鐘 |
-| `angareion/decision_cli.py`（新） | `angareion decision <action>` 的處理函式：同步 log 快取 → 匯總 → 預檢 → 組 `Message` → `backend.send`。選哪一種匯總：預設 `list` 與 `ask`／`update`／`withdraw` 用 `use_snapshot=True`；`list --all` 與 `submit` 用 `use_snapshot=False` | 不實作匯總規則 |
+| `angareion/decision.py`（新） | 純函式：payload 的結構與驗證（寫入嚴格、讀取寬鬆；兩邊共用 `_utf8_text`，視圖的題目欄位一律經 `_question_fields` 投影）；`fold(records, *, use_snapshot) -> FoldResult`；`snapshot_for(...)`；`related_count(...)`（§7.1 的計數）；`plan_submit(...)` | 不碰後端、不碰快取、不碰 CLI、不碰時鐘 |
+| `angareion/decision_cli.py`（新） | `angareion decision <action>` 的處理函式：同步 log 快取 → 匯總 → 預檢 → 組 `Message` → `backend.send`。選哪一種匯總：預設 `list` 與 `update`／`withdraw` 的預檢用 `use_snapshot=True`（`ask` 只同步、不需匯總）；`list --all` 與 `submit` 用 `use_snapshot=False`。自動 snapshot：`decision.related_count(...) >= decision.SNAPSHOT_EVERY` 才呼叫 `snapshot_for` | 不實作匯總規則，也不自己解讀歷史（數相關紀錄、找 snapshot 的 through 都在 `decision.py`） |
 | `angareion/cli.py`（改） | 註冊 `decision` 子指令並轉交；`_format_message` 在 `datatype` 不是 `message` 時多印一行 `datatype: …` | 不含待決的邏輯 |
 | `angareion/backend.py`（改） | `recipient_matches`／`mention_matches` 加一條：`message.datatype in messages.SELF_SILENT_DATATYPES` 而且 `from` 是讀者自己時不算。**以模組屬性讀這張表**（`from angareion import messages` 再讀 `messages.SELF_SILENT_DATATYPES`，不用 `from … import SELF_SILENT_DATATYPES` 把名字複製進來），C-3 的 monkeypatch 才換得到。新增協定 `EnumerableBackend`（只有 `enumerate_conditional` 一個方法，簽名照現有實作，`@runtime_checkable`） | `ChannelBackend` 的方法不變；不認得任何特定 datatype 的名字 |
 | `angareion/log_cache.py`（改） | `LOG_CACHE_VERSION` 升到 2；還原 `Message` 時帶 `datatype`；`sync` 的 `backend` 參數標成 `EnumerableBackend` | — |
@@ -679,6 +682,16 @@ SNAPSHOT_EVERY = 200
 NOTE_MAX = 4000
 STABLE_WINDOW_SECONDS = 60.0   # A-1；與 CURSOR_SEEN_MARGIN_SECONDS 同值
 OPS = ("ask", "update", "withdraw", "submit", "snapshot")   # 寫進 payload 的 op；list 不寫紀錄
+QUESTION_FIELDS = ("answerer", "title", "background", "body", "options", "recommended", "reason")
+                         # ask／update 的題目欄位；decision_cli 用它當 --body 允許的鍵（PR-4 起有呼叫端，故為公開名）
+
+# 視圖元素的形狀（PR-4 加）：TypedDict，只給讀者與型別檢查用，執行期仍是 dict（§5 的 JSON 形狀）。
+# 鍵如下，型別見原始碼；含 "from" 鍵，所以用函式寫法 TypedDict("Name", {...})。
+#   Option     key, text（視圖的 options 每一項恰好這兩鍵，§4.3）
+#   Submitted  record, from, base, choice, note, submitted_at
+#   Withdrawn  record, reason
+#   Decision   §5 decisions 的一個元素
+#   Ignored    record, channel, op, ref（str | None）, item, code
 
 @dataclass(frozen=True)
 class Record:            # 頻道裡的一則訊息（任何 datatype，含一般訊息）加上它的位置資訊。
@@ -688,10 +701,10 @@ class Record:            # 頻道裡的一則訊息（任何 datatype，含一�
     position: int             # 到達位置（log 快取的排序鍵）；只用來排序與數 covered，不出現在 payload
     received_at: str | None   # 後端時刻；後端給不出時為 None
 
-@dataclass
+@dataclass(frozen=True)  # PR-4 起 frozen，decision.py 一律用關鍵字建構
 class FoldResult:
-    decisions: list[dict]     # §5 list --json 的 decisions 元素
-    ignored: list[dict]       # {"record", "channel", "op", "ref", "item", "code"}
+    decisions: list[Decision] # §5 list --json 的 decisions 元素
+    ignored: list[Ignored]    # {"record", "channel", "op", "ref", "item", "code"}
     seen: dict[str, frozenset[str]]  # 每一題 open 題目的版本 id（§6.4）；不輸出到 JSON，給 C-16 比對
     closed: frozenset[str]    # 已結束題目的 id
     snapshot_used: dict[str, str | None]  # 每位提問者實際用到的 snapshot id；None＝從頭匯總。不輸出到 JSON，給測試用
@@ -705,8 +718,9 @@ class FoldResult:
                               # 「snapshot 帶進來、但歷史裡沒有對應題目」的墓碑要靠它才知道歸誰，才能照 §7.2
                               # 「fold(P) 的投影」傳進下一則 snapshot。不輸出到 JSON；decision_cli 不讀它（PR-3 結構審加）
 # FoldResult、SubmitPlan 由 decision.py 建構，呼叫端當唯讀用：不改它們的欄位，也不改 decisions／ignored 裡的 dict。
+# frozen 只擋「換掉欄位」，擋不住改 list／dict 的內容；後者仍靠這條契約。
 
-@dataclass
+@dataclass(frozen=True)  # PR-4 起
 class SubmitPlan:
     batches: list[tuple[str, str, list[dict]]]  # (channel, asker, items)，已依 §9.1 分組、分塊、排好送的順序
     skipped: list[str]                          # 照「重跑略過」略過的題目 id
@@ -715,7 +729,7 @@ class PayloadError(MessageValidationError):     # parse_payload 讀不了；code
     code: str
 
 class SubmitRejected(MessageValidationError):   # 預檢不過；帶每一個不過的項
-    problems: list[tuple[str, str]]             # (ref, §6.2 的診斷碼)
+    problems: list[tuple[Any, str]]             # (ref, §6.2 的診斷碼)；ref 照項目原樣：字串、缺 ref 時 None，或其他非字串的 YAML 值（PR-4 結構審 L-A5）
 
 def parse_payload(message: Message) -> dict            # 寬鬆讀；不合法時丟 PayloadError（帶診斷碼）
 def build_payload(op: str, **fields) -> str           # 嚴格寫；回傳內文 YAML；不合法時丟 MessageValidationError
@@ -726,6 +740,11 @@ def fold(records: Sequence[Record], *, use_snapshot: bool) -> FoldResult
 def snapshot_for(records, asker) -> str | None
     # 要寫的 snapshot 內文：先依 §7.4 選 through，再對「位置 ≤ through 的前綴」做 fold(use_snapshot=True) 取投影
     # 找不到 through 或後端給不出時刻時回 None
+def related_count(records: Sequence[Record], asker: str) -> int
+    # §7.1 的「相關紀錄」數：asker 目前有效 snapshot（同 fold(use_snapshot=True) 選的那則）的 through 之後，
+    # asker 的 ask，以及 ref 指向 asker 題目的 update、withdraw、submit 項。讀取寬鬆（壞紀錄、非字串 ref 不算、不丟例外）。
+    # 門檻比較（>= SNAPSHOT_EVERY）留在 decision_cli。PR-4 結構審 M-A1：原本寫在 decision_cli._related_count，
+    # 屬於歷史解讀規則，已原樣移到這裡（§13.1「decision_cli 不實作匯總規則」）；decision_cli 不再呼叫 parse_payload
 def plan_submit(results: Mapping[str, FoldResult], answerer: str, entries: Sequence[dict], *, render) -> SubmitPlan
     # results 是 {頻道: 那個頻道的 fold(use_snapshot=False)}，涵蓋 --channel 的範圍（§5）。
     # 每一份都必須是完整匯總（§9.1）：任何一份的 complete 是 False 時丟 ValueError
@@ -747,7 +766,7 @@ def plan_submit(results: Mapping[str, FoldResult], answerer: str, entries: Seque
   - 所以 O 是「部分符合」：遞送層（`backend.py`）對新增 datatype 封閉；格式層對「自己不收」這一種政策開一個常數的口。
 - **L**：`Message` 加了一個有預設值的欄位，現有的建構呼叫照樣成立；`FakeBackend` 和 GitHub 後端的列舉行為一致（`spec.md:219-222`）。符合。
 - **I**：後端協定沒有因為待決而變寬；`decision.py` 只拿到排好序的 `Record`，不知道快取的存在。列舉另立 `EnumerableBackend`，`ChannelBackend` 不變寬；`log_cache` 和 `decision_cli` 只依賴它們真正用到的那個協定。符合。
-- **D**：`decision_cli` 依賴的是 `ChannelBackend`／`EnumerableBackend` 協定和 `LogCache`，不依賴 GitHub 的實作。符合。
+- **D**：`decision_cli` 依賴的是後端協定和 `LogCache`，不依賴 GitHub 的實作。符合。PR-4 的實作在 `decision_cli.py` 宣告 `DecisionBackend`（`send`＋`enumerate_conditional`，即 C-20(e) 允許的兩個方法），由使用端擁有的窄協定；它繼承 `backend.EnumerableBackend`、自己只宣告 `send`，列舉的簽名只有 `backend.py` 一份（PR-4 結構審 L-A1）。
 - **遞送層不認得 datatype 的名字**：前一版（第 0 輪）讓 `backend.recipient_matches` 直接認得 `"decision"` 這個字；第 1 輪起改成讀 `messages.SELF_SILENT_DATATYPES`，`backend.py` 不出現任何特定 datatype 的名字（C-3 斷言）。符合。
 
 ---
@@ -920,7 +939,7 @@ stateDiagram-v2
 | PR-1 | 讀取端：`Message.datatype`（讀取寬鬆、預設 `message`）、`message_to_dict`、log 快取升到 v2、`_format_message` 標出 datatype、`SELF_SILENT_DATATYPES` 與 C-3 的遞送規則、`EnumerableBackend` 協定。`send` **還不寫** `datatype`。測 C-1～C-3、C-20(a)～(c)、C-21、C-24 | 不會。舊訊息照舊；還沒有人寫 decision；快取重建一次 |
 | PR-2 | 寫入端：`send` 寫 `datatype: message`。測 C-5。**閘門：Q-5（R-A1）——已通過** | 不會（R-A1 已答） |
 | PR-3 | `decision.py` 純函式（格式、匯總、去重、snapshot、submit 的預檢與分組分塊），沒有接上 CLI。測 C-6（單元部分）、C-8、C-9（單元部分）、C-10、C-11（單元部分）、C-15～C-17、C-19（through 的選法與一般訊息推進 cutoff）、C-20(d)、C-26、C-27（單元部分）、C-28、C-29（`plan_submit` 的部分） | 不會。沒有人呼叫它 |
-| PR-4 | `decision_cli.py` 和 `cli.py` 的 `decision` 子指令（6 個 action，含自動 snapshot）；`skills/angareion/SKILL.md` 和 `docs/angareion.md` 的說明（含 App 寫 submit 的格式要點，給 R-A3）；由 PM 寫 spec delta：`angareion` 的「六個介面」改成七個介面家族、「訊息格式」加 datatype，新增 `angareion-pending-decision` capability。測 C-4、C-6、C-7、C-9、C-11～C-14、C-15（`list`）、C-18、C-19、C-20(e)、C-22、C-23、C-25、C-27（`list`）、C-28、C-29（CLI 部分）。**閘門：Q-5（R-A1）——已通過** | 不會。新指令只在有人呼叫時才寫入；需要 PR-1（遞送規則）先合，否則提問者自己寫的 snapshot 會遞送給自己（只是雜訊）；需要 PR-2（寫入端）先合，否則 `serialize_message` 的讀回比對會拒送每一則 `datatype: decision`（真後端每個寫入 action 都失敗；`FakeBackend.send` 不經序列化，所以靠 C-4／C-13 經序列化的那一案抓） |
+| PR-4 | `decision_cli.py` 和 `cli.py` 的 `decision` 子指令（6 個 action，含自動 snapshot）；`skills/angareion/SKILL.md` 和 `docs/angareion.md` 的說明（含 App 寫 submit 的格式要點，給 R-A3）；由 PM 寫 spec delta：`angareion` 的「六個介面」改成七個介面家族、「訊息格式」加 datatype，新增 `angareion-pending-decision` capability。**實作時另動 `decision.py`**（PR-4 審查與 PR-3 結構審帶進來的，與上面的出入）：`FoldResult`／`SubmitPlan` 改 `frozen`、關鍵字建構、視圖的 `TypedDict`（§13.3）；視圖的 `options` 投影成 `{key, text}`（`_question_fields`，R2-1）；讀寫兩邊共用的 UTF-8 檢查（`_utf8_text`，R2-2／R3-4，§4.3）；`ignored.ref` 非字串改 `null`（H1，§5）；`related_count` 從 `decision_cli` 移入（PR-4 結構審 M-A1）。測 C-4、C-6、C-7、C-9、C-11～C-14、C-15（`list`）、C-18、C-19、C-20(e)、C-22、C-23、C-25、C-27（`list`）、C-28、C-29（CLI 部分）。**閘門：Q-5（R-A1）——已通過** | 不會。新指令只在有人呼叫時才寫入；需要 PR-1（遞送規則）先合，否則提問者自己寫的 snapshot 會遞送給自己（只是雜訊）；需要 PR-2（寫入端）先合，否則 `serialize_message` 的讀回比對會拒送每一則 `datatype: decision`（真後端每個寫入 action 都失敗；`FakeBackend.send` 不經序列化，所以靠 C-4／C-13 經序列化的那一案抓） |
 | PR-5（Q-7 照建議不做） | `pmo` 的事件標籤 | — |
 
 依賴：PR-1 → PR-2、PR-1 → PR-3，PR-2 與 PR-3 → PR-4。**合併順序：PR-1 → PR-2 → PR-3 → PR-4。** PR-2 和 PR-3 可以並行開發，但 PR-4 要等兩個都合。PR-4 依賴 PR-2：PR-1 起 `message_to_dict` 帶 `datatype`，`serialize_message` 讀回比對時包含它，而 front matter 要到 PR-2 才寫出 `datatype`；PR-2 沒合，PR-4 寫的每一則 decision 都會讀回成 `message` 而被拒送（失敗得很大聲，不會靜默送出沒有 `datatype` 的紀錄）。`FakeBackend.send` 不經序列化，所以 PR-4 的 CLI 測試要含經 `serialize_message` 的那一案（C-4、C-13）。PR-2 和 PR-4 都受 Q-5 的閘門控制；本人裁定時閘門已通過（R-A1 已答）。

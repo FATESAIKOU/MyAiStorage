@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from angareion.decision import (Record, fold, snapshot_for, plan_submit, build_payload,
-                                parse_payload, PayloadError, SubmitRejected)
+                                parse_payload, PayloadError, SubmitRejected, related_count)
 from angareion.messages import Message, MessageValidationError
 
 P = 'mystore-pm-w1'
@@ -665,3 +665,36 @@ def test_snapshot_for_survives_same_id_earlier_record(kind):
     assert out['through'] == uid(7) and out['covered'] == 4
     assert [i['id'] for i in out['items']] == [uid(7)]
     assert out['closed'] == [uid(90)]
+
+
+def test_related_count_counts_own_asks_and_owned_updates():
+    records = [rec(1, 'ask', sender=H2, **question()), update(2, 1), ask(3)]
+    assert related_count(records, P) == 1
+    assert related_count(records, H2) == 2
+
+
+def test_related_count_submit_item_counts_only_when_ref_is_mine():
+    records = [ask(1), submit(5, 1), rec(7, 'submit', sender=H, asker=P,
+                                         items=[dict(ref=uid(99), base=uid(99), title='t')])]
+    assert related_count(records, P) == 2
+
+
+def test_related_count_skips_non_string_submit_ref_without_raising():
+    records = [ask(1), rec(8, 'submit', sender=H, asker=P, items=[dict(ref=[1], base=uid(1))]),
+               rec(9, 'submit', sender=H, asker=P, items=['not a mapping', dict(ref=None, base=uid(1))])]
+    assert related_count(records, P) == 1
+
+
+@pytest.mark.parametrize('content', ['[broken', "decision: 2\nop: ask\n"])
+def test_related_count_skips_unreadable_payloads_without_raising(content):
+    bad = ask(2)
+    bad.message.content = content
+    assert related_count([ask(1), bad], P) == 1
+
+
+def test_related_count_starts_after_the_current_snapshot():
+    initial = [ask(1), ask(3), normal(4)]
+    records = initial + [snap(initial), ask(10)]
+    assert related_count([ask(1), ask(3), ask(10)], P) == 3
+    assert related_count(records, P) == 1
+    assert related_count(initial + [snap(initial)], P) == 0
