@@ -212,7 +212,7 @@ agora <動作> <型態> [session_id] [選項]
 
 agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync | --strict]
 agora import   session --external-session-id <id>[,<id>...] [--external-session-id <id>...] --agent opencode|claude|agy|codex [--header-file F] [--header K=V]... [--add-tag T]... [--as-new]
-agora merge    session <id>, <id>, ... --agent opencode|claude [--header-file F] [--header K=V]...
+agora merge    session <id> ... --agent opencode|claude [--header-file F] [--header K=V]...
 agora continue session <id> --agent opencode|claude [--dir <專案目錄>] [--fork] [--sync-period <分鐘>] [--headless [--headless-port <埠>]] [--harness-file <檔>] [--agent-arg=<參數>]... [--header-file F] [--header K=V]... [--add-tag T]... [-- <參數>...]
 agora delete   session <id>, <id>, ... --yes [--force]
 agora edit     session <id> [--header-file F] [--header K=V]... [--add-tag T]...
@@ -235,7 +235,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 - **轉傳參數（#204 PR1）**：`continue` 的 `--agent-arg=<參數>`（只收 `=` 形式與完整名稱，可重複；`--agent-ar`／`--agent-a` 這類縮寫（不帶 `=`）會被當成帶空白值的 `--agent-arg`，一律 exit 1 並說明；寫成 `--agent-a=值` 則照 argparse 的縮寫規則可用）與 `--` 之後的參數合成同一份清單，原樣接在 agora 自己的旗標之後放進 agent 的 argv（`--` 放最後，動作文法不變）。**目前只有 claude 吃**：opencode（headless 是 `serve`）與 agy（接續不帶旗標）收到就 exit 1，不是 TypeError，也不會先同步、看鎖、寫 pending 或開 agent。禁用的旗標（`--resume`／`-r`、`--session-id`、`--fork-session`、`--worktree`／`-w`、`--no-session-persistence`、`--from-pr`、`--continue`／`-c`、`-p`／`--print`、`--input-format`、`--output-format`、`--settings`、`--append-system-prompt-file`、`--system-prompt-snapshot`，含 `=` 形式）一律 exit 1：它們會讓 agent 的 session id、工作目錄、串流或設定和 agora 要寫回的那份對不上（清單在 `cli.py` 的 `AGENT_ARG_DENIED`，一個 const；`--worktree`／`-w`、`--no-session-persistence`、`--from-pr` 是推論，未用真 claude 驗）。**合併或黏值的短旗標**（`-pc`、`-cp`、`-r<id>` 這種以單 `-` 開頭、長度大於 2 的 token）不猜 claude 會怎麼拆（推論），一律 exit 1 並說明「請分開寫或用長旗標」；單字元的 `-x` 照上面的黑名單走。**裸值**（claude 的位置參數＝開場 prompt，推論）在 PR1 先擋，兩種形式（`--agent-arg=` 與 `--`）用同一個檢查、看的是合併後的整份清單：緊接在旗標後面的值算那個旗標的值（例如 `--agent-arg=--effort` 後面的 `--agent-arg=medium`），不算裸值；多值旗標（`--add-dir a b`）的第二個值仍會被擋，錯誤訊息會請人改用 `--flag=值` 形式、每個值一個。待本人確認要不要放行位置參數。
 - **一次處理多個**（2026-10-03 使用者決定）：import、delete、merge、pull、push 都吃 id 清單；逐一在 **stderr** 印一行 `k/N` 進度，**stdout 只放 agora id**（可以接管線）。被 Ctrl-C 中斷後重跑同一個指令會接著做：import 略過已匯入、delete 略過已刪、merge 沿用已寫好的要約、pull 略過已快取（5.2、5.3、5.6、5.10）。
 - `cache`／`sync` 拿掉了，改成 `pull`／`push`，而且**只吃給的 id**（5.10）。
-- 所有寫入指令的輸出第一欄都是 agora id。exit code：0 成功；1 做不到（找不到 id、沒有訊息、merge 少於兩個、delete 沒加 `--yes`、有子 Session、delete 有正在接續的而跳過——全部都被鎖住也是，訊息說明沒有刪除任何東西；背景上傳器起不來時仍是 3）；2 錯誤（包含要約失敗：agent 錯誤、逾時、空的回覆，這時不存檔）；3 已存進 outbox、還沒上傳；4 這個 Session 正在接續中（同一台機器的另一個 `continue`），stderr 在說明之前先印一行 `agora-locked <agora id>`（#54）；5 `continue` 的 agent 子行程死掉（`returncode != 0`，130／143／-2／-15、轉送過 SIGTERM／SIGHUP 之後的結束除外），stderr 印一行 `agora-agent-failed rc=<原碼>`，寫回成功回 5、寫回失敗回 3（#76；舊行為是只看寫回結果，agent 死掉又沒新內容時回 0；第一版回 agent 原碼會與 1／2／3／4 撞碼，故改固定 5）。
+- 所有寫入指令的輸出第一欄都是 agora id。exit code：0 成功；1 做不到（找不到 id、沒有訊息、merge 沒有給 Session，或只給一個而且它已經是 merge、delete 沒加 `--yes`、有子 Session、delete 有正在接續的而跳過——全部都被鎖住也是，訊息說明沒有刪除任何東西；背景上傳器起不來時仍是 3）；2 錯誤（包含要約失敗：agent 錯誤、逾時、空的回覆，這時不存檔）；3 已存進 outbox、還沒上傳；4 這個 Session 正在接續中（同一台機器的另一個 `continue`），stderr 在說明之前先印一行 `agora-locked <agora id>`（#54）；5 `continue` 的 agent 子行程死掉（`returncode != 0`，130／143／-2／-15、轉送過 SIGTERM／SIGHUP 之後的結束除外），stderr 印一行 `agora-agent-failed rc=<原碼>`，寫回成功回 5、寫回失敗回 3（#76；舊行為是只看寫回結果，agent 死掉又沒新內容時回 0；第一版回 agent 原碼會與 1／2／3／4 撞碼，故改固定 5）。
 
 ### 5.1 search
 
@@ -293,7 +293,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 
 **merge ＝ 把每個來源各自的要約，照順序接起來。** 要約的內容由 AI 寫，但格式是確定的：AI 只產生 JSON，程式用 JSON Schema 驗證，接起來和排版全部由程式做。沒有跨來源的內容（例如「整體下一步」）。
 
-- `agora merge session id1 id2 … --agent opencode|claude`：`--agent` 必填，指定**誰寫要約**。id 用空白或逗號分隔都可以；同一個 id 給兩次是錯誤（X4）。`--agent agy` 第一版直接拒絕；**來源有任何一個是 agy 匯入的 Session 也拒絕**（exit 1，見 5 的 `--agent`）。
+- `agora merge session id1 [id2 …] --agent opencode|claude`：`--agent` 必填，指定**誰寫要約**。可以只給**一個** Session（#462 方向 B 的沉澱用：把一段 Session 寫成一份要約）；id 用空白或逗號分隔都可以；同一個 id 給兩次是錯誤（X4）。**只給一個、而且它已經是 merge（`relation: merge`）時拒絕**（exit 1，說它已經是要約；要接它請用 `continue`）：要約不是拿來再 merge 一次的。`--agent agy` 第一版直接拒絕；**來源有任何一個是 agy 匯入的 Session 也拒絕**（exit 1，見 5 的 `--agent`）。
 - 產生一個新的 Session：`relation: merge`、`parents` 依給的順序。它的 raw 是 `sections.json`（每個來源一節的結構化要約，見下）；`session.md` 的內文由程式從這份 JSON 排出來。
 - **中斷後重跑會接著做**（2026-10-03 使用者決定）：每寫好一個來源的要約就**先存在本機** `<state>/merge-sections/<key>.json`，鍵是「agent ＋提示詞版本 ＋模型設定（`AGORA_OPENCODE_MODEL` 之類）＋來源 id ＋實際送出的那段文字（截斷之後）」的雜湊。重跑時同樣的來源**沿用**已寫好的要約（沿用前再用 JSON Schema 驗一次），只寫還沒寫的；任何一項不同就重寫。
 - **每個直接來源一節**：
