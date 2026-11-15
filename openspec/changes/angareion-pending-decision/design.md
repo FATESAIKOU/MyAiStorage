@@ -8,6 +8,11 @@
   - 拿掉 `answer` action 與通訊層的作答草稿（X-12：草稿只存 App）。
   - submit 直接帶答案。
   - 帶入第 2 輪審查 REVIEW-468-r2 的 L2-1～L2-3。
+- 第 3 輪修正：回應非作者審查 REVIEW-468-r3（不改本人裁定）。
+  - H3-1：`submit` 的規劃一律用完整匯總（`use_snapshot=False`），snapshot 不帶回已結束題目的答案（§7.5、§9.1、§13.3、C-28）。
+  - M3-1：重跑略過的相等判斷含 `base`，缺省正規化成 null；先驗重複 `ref` 再略過（§9.1、C-29）。
+  - M3-2：C-16 的交錯案例改用唯一標記當 `through`；C-26 改成比 open＋`seen`＋`closed`，已結束答案另以完整匯總驗。
+  - L3-1：被拒項重送的說明（§6.4）；L-13 補 JSON／YAML 的界線與 TS 寫者的回讀驗證（R-A3）。
 
 ---
 
@@ -30,7 +35,7 @@
    - 寫什麼時候：紀錄數超過門檻時自動寫，也可以手動寫。
    - 存什麼：「到 `through` 為止的完整前綴」匯總出來的 open 題目（含去重需要的版本 id），以及所有已結束題目的 id（墓碑）。
    - 怎麼讀：找最新一則有效的 snapshot，從它記的 `through` 之後往下匯總。snapshot 壞掉、找不到，或發現 `through` 之前有晚到的紀錄時，退回上一則有效的 snapshot 或從頭匯總。
-   - **`list --all`（看已結束的題目與答案）一律從頭完整匯總，不用 snapshot**，所以 PMO 確認答案的路徑不受 snapshot 影響。
+   - **`list --all`（看已結束的題目與答案）和 `submit` 的規劃一律從頭完整匯總，不用 snapshot**，所以 PMO 確認答案的路徑、以及「重跑略過」要比對的已送答案，都不受 snapshot 影響。
 
 **本人的裁定（2026-11-15，#469，決定檔 MyPMO#402；細節見 §17）**
 
@@ -53,7 +58,7 @@
 | 5 | 用 datatype 區分；介面是 `angareion <datatype> <action>`；歷史匯總成目前狀態；太長時寫 snapshot，從 snapshot 往後匯總 | §4.1、§5、§6、§7、C-7～C-17 |
 | 已定 | 目前只有 PMO 出題，格式仍保留「提問頻道＋提問者」 | 格式保留：§4.3（欄位保留；v1 限定相等）。「只有 PMO 出題」：本人裁定由 App 端過濾（Q-2、R-A5），Angareion 允許任何身分出題（§10） |
 | 已定 | 一題一題作答，不是點了就送 | 由 **App 本地草稿**達成（本人裁定 X-12；R-A4）。Angareion 不存草稿，只收 `submit`（§9）。CLI 作答者一次給齊答案再送（§5 `submit`） |
-| 已定 | 按送出時，已答的一次送出、未答的留著 | §9、C-12、C-13、C-14 |
+| 已定 | 按送出時，已答的一次送出、未答的留著 | §9、C-12、C-13、C-14、C-28、C-29 |
 | 已定 | 答案回到提問頻道，並 mention 提問者 | §4.3 `submit`（`channel`＝提問頻道，`to`／`mentions`＝提問者）、C-13、C-27 |
 | 已定 | 待決內容是選擇題：背景、內文、選項、推薦選項、理由 | §4.3 `ask` 欄位（`background`、`body`、`options`、`recommended`、`reason`） |
 | 已定 | App 只讀 Angareion 的匯總，不能反過來影響 Angareion | §12 R-A2～R-A4（App 只寫 `submit`，結果仍由 Angareion 的匯總判定） |
@@ -95,7 +100,9 @@
   - `messages.py:342-343`：「The TS side (MyAiEntry 801013c) only checks field by field and does not read it back」。
   - TS 讀者遇到未知欄位會怎樣，前一版列為 R-A1。本人裁定時 R-A1 已答（§12、§17 Q-5），本文沒有自己驗。
 - **L-12：PMO 的收信輪。** `src/pmo/round.py:66-71`：team 階段收的是「不是秘書、也不是 PMO 自己寄的」訊息（`return sender != ctx.config.pmo_identity`）。讀 JSON 用的是 `data.get(...)`，多出來的欄位不影響。
-- **L-13：PyYAML 不一定讀得懂 JSON 的轉義。** 本輪實測（`uv run --with pyyaml`，探針在 `/tmp` 下、只跑 `yaml.safe_load`）：含 emoji 的 payload 用 `json.dumps(ensure_ascii=True)` 寫出後，`yaml.safe_load` 讀回來和原值不相等；用 `ensure_ascii=False` 寫出就相等。所以 TS 寫者寫 submit 的內文時，**一律寫 YAML**，不拿「JSON 也是 YAML」當捷徑（R-A3）。
+- **L-13：PyYAML 不一定讀得懂 JSON 的轉義。** 本輪實測（`uv run --with pyyaml`，探針在 `/tmp` 下、只跑 `yaml.safe_load`）：含 emoji 的 payload 用 `json.dumps(ensure_ascii=True)` 寫出後，`yaml.safe_load` 讀回來和原值不相等；用 `ensure_ascii=False` 寫出就相等。
+  - 原因：`ensure_ascii=True` 的 JSON 把 emoji 寫成一對 `\uXXXX` 代理字元，經 YAML 讀回會變成**兩個 surrogate 字元**；`ensure_ascii=False` 沒有這個問題（第 3 輪審查 REVIEW-468-r3 的 P-5 在隔離行程重驗，結果相同）。
+  - 所以不是「所有 JSON 都不相容」，而是「JSON 的某些轉義寫法和 YAML 的讀法不一致」。為了不讓 TS 寫者去判斷哪些寫法安全，TS 寫者寫 submit 的內文時**一律寫 YAML**，並用 py 的 `yaml.safe_load` 回讀含 emoji、控制字元的案例驗證（R-A3）。
 
 ---
 
@@ -361,7 +368,9 @@ items:
 - **已知題目 id**＝目前所有題目（open 和已結束）的 id。`ask` 的 id 在裡面 → `duplicate_id`，先到的那題不變；不論兩則內容是否相同（id 衝突也是先到者勝）。
 - **每題的版本 id**＝這一題的 id，加上被接受的 `update` 的 id。`update` 的 id 在 ref 指向那題的版本 id 裡 → `duplicate_id`，題目不變。
 - **submit 不另外記 id**：一項被接受，題目就結束了；同一則 submit 重送，那些項都判 `closed_ref`。
-  - 同一則裡被拒的項（例如 `stale_base`），重送時照當下的狀態重判，結果還是被拒，因為它的 `base` 已經不是目前版本。
+  - 同一則裡被拒的項，重送時照當下的狀態重判（不記被拒紀錄）。結果不一定相同：
+    - 舊版的 `base` 不會因為一般的後續更新而自動變成有效：題目之後再被 `update`，目前版本只會更新，不會回到舊版，所以這種項重送仍判 `stale_base`。
+    - 引用「當時還沒到達的版本或題目」的項（例如 submit 的 `base` 指向一則晚到的 `update`，或 `ref` 指向一則晚到的 `ask`），那一版或那一題到達之後重送，可能被接受。
 - **已結束的題目**：任何引用它的 `update`／`withdraw`／`submit` 項都是 `closed_ref`，所以已結束題目的重送不必另記 id。
 - **被拒的紀錄不留痕跡**：它重送時照當下的狀態重新判。
   - 例：`withdraw Q` 先到（題目還沒出現，`unknown_ref`），之後 `ask Q`，再來同一則 withdraw 重送 → 這次接受，Q 變 withdrawn。
@@ -411,7 +420,8 @@ closed: [<題目 id>, …]     # 已結束（answered／withdrawn）題目的 id
   - `items` 和 `closed` **等於** `fold(P)` 裡屬於這位提問者的題目的投影：open 的題目進 `items`（帶上表的全部欄位），已結束的題目只留 id 進 `closed`。
   - **不是**用「目前的匯總結果」去抄，`through` 之後的紀錄一筆都不能影響 snapshot 的內容（C-16 的交錯案例）。
 - 去重只要 `versions` 和 `closed` 兩個集合（§6.4）。submit 不另記 id，所以 snapshot 也不帶答案或 submit 的 id。
-- `closed` 只留 id，答案與撤回理由不放：snapshot 只服務「目前還 open 的題目」這個視圖。已結束題目的內容由 `list --all` 從頭匯總取得（§7.6）。
+- `closed` 只留 id，答案與撤回理由不放：snapshot 只服務「目前還 open 的題目」這個視圖。已結束題目的內容由完整匯總取得：`list --all`（§7.6）和 `submit` 的規劃（§9.1）都不用 snapshot。
+  - **不得**為了讓 submit 用 snapshot，而把已結束題目的答案放回 snapshot：那會讓 snapshot 隨已結束題目的數量線性長大，破壞下面的容量估算。
 - snapshot 本身也是一則 append 的 decision 訊息，同樣受 65536 字元的上限（L-9）。
   - 超過就不寫：手動觸發時 exit 1；自動觸發時 stderr 警告，匯總照舊從上一則有效 snapshot 算起。snapshot 只是加速，寫不出來不影響正確性。
   - 容量的粗估：`closed` 一項約 30 字元（26 字的 id 加 YAML 符號），約 2000 題以上才會因為墓碑寫不出來；open 題目多時會更早滿。到那時候要再設計（分段 snapshot 或修剪），列為已知限制。**不得**用丟掉最舊墓碑的方式擠進上限，那會讓已結束的題目復活。
@@ -453,10 +463,10 @@ closed: [<題目 id>, …]     # 已結束（answered／withdrawn）題目的 id
 
 在「只能依序讀回」的限制下，全新的讀者第一次還是要把整串讀一遍（log 快取的全量同步），snapshot 省不掉這一步。它省的是：
 
-1. 預設的 `list`（只看 open）、寫入前的預檢（含 `submit` 的預檢與分組），匯總時不必從頭走過所有歷史；
+1. 預設的 `list`（只看 open）、出題端（`ask`／`update`／`withdraw`）寫入前的預檢，匯總時不必從頭走過所有歷史；
 2. 很久以前的壞紀錄不再出現在預設 `list` 的 `ignored` 裡。
 
-它**不**省 `list --all` 的匯總（§7.6）。將來 log 快取要不要修剪 snapshot 以前的紀錄，不在本單範圍；`list --all`、`covered` 檢查和退回從頭匯總都需要完整前綴，所以在另有設計之前**不能**修剪。
+它**不**省 `list --all` 的匯總（§7.6），也**不**省 `submit` 的規劃：submit 要分辨「已經送過的同一個答案」和「別的結束方式」，需要已結束題目的答案，所以一律完整匯總（§9.1，第 3 輪的裁決）。代價是一次對本機鏡像的純記憶體匯總；鏡像本來就要完整讀一遍（上一段），不多一次後端讀取。將來 log 快取要不要修剪 snapshot 以前的紀錄，不在本單範圍；`list --all`、`covered` 檢查和退回從頭匯總都需要完整前綴，所以在另有設計之前**不能**修剪。
 
 ### 7.6 `list --all` 與 PMO 確認答案的路徑
 
@@ -518,16 +528,28 @@ closed: [<題目 id>, …]     # 已結束（answered／withdrawn）題目的 id
 
 - **長度單位**：65536 字元，算整則序列化文字（含 front matter），即 `messages.py:336` 的 `len(text)`（L-9）。
 - **單題一定放得下**：`title` ≤ 120 字元、`note` ≤ `NOTE_MAX`（4000）字元（§4.3），所以只含一項的 submit 一定不超長。這是寫入 `submit` 時逐項檢查的。
-- **重跑略過**：輸入裡的某一題，若已經 answered，而且 `submitted` 的 `from` 是我、`choice` 和 `note` 都和這次的輸入相同，這一項就略過（stderr 一行「已送出，略過」），不算錯。這讓「部分失敗之後原樣重跑」只送剩下的。
-  - 其他已結束的情況（withdrawn，或 answered 但答案不同、或不是我答的）仍是預檢錯誤，exit 1。
-- **整批預檢**：
-  - 先檢查輸入的每一項（`ref` 重複、題目存在、open、我是作答者、`base`＝目前版本、答案合 §4.3）；任何一項不過 → exit 1，**什麼都沒送**，stderr 列出每一個不過的項（`ref` 和診斷碼，同 §6.2 的碼）。
-  - 再算出所有組、所有分塊、每一則完整的訊息文字（含序列化與讀回檢查，L-10），全部成功才開始送。任何一則組不出來 → exit 1，**什麼都沒送**。
+- **用哪一份匯總**：`submit` 的規劃一律用**完整匯總**（`fold(use_snapshot=False)`，同 `list --all`），不用 snapshot（第 3 輪裁決，H3-1）。
+  - 理由：snapshot 對已結束的題目只留 id（墓碑，§7.2），不知道它是 answered 還是 withdrawn、誰答的、答了什麼、`base` 是哪一版。重跑略過要的正是這些。
+  - 被捨棄的做法：「只在輸入的 `ref` 碰到墓碑時才回放那幾題的完整歷史」。它省的只是本機的一次純記憶體匯總，卻多一條要和完整匯總保持一致的路徑；「snapshot 帶回所有已結束題目的答案」則破壞 snapshot 的容量設計（§7.2）。兩者都否決（§16）。
+  - 附帶的好處：假 snapshot（§10）不影響 submit 的分組與預檢。
+- **檢查的順序**（`plan_submit` 照這個順序，一次列出全部不過的項）：
+  1. **重複 `ref`**：輸入裡同一個 `ref` 第二次以後的出現判 `duplicate_ref`（同 §6.2 第 1 條；第一次出現的那項照下面的步驟判，一起列出）。**先驗這條，再做重跑略過**：重複的 `ref` 即使全部已經送過，也是輸入錯，exit 1。
+  2. **重跑略過**：輸入裡的某一題，若已經 answered，而且下面四個值都和 `submitted` 相同，這一項就略過（stderr 一行「已送出，略過」），不算錯。這讓「部分失敗之後原樣重跑」只送剩下的。
+     - 比較的四個值：`from`（＝我）、`base`、`choice`、`note`。
+     - 比較前先正規化：輸入裡沒給的 `choice`／`note`、和 `null`，都當成 `null`；`submitted` 裡沒給的也是 `null`（§5）。
+     - 不比 `title`（只是抄一份給人看，§4.3）。
+     - 任何一個值不同就**不**略過，照下一步判（通常是 `closed_ref`）。例：題目從 V1 更新成 U2，我對 U2 送了 A 而被接受；另一個裝置還拿著 `base=V1` 的 A 再送 → `base` 不同，不略過，`closed_ref`，exit 1。不能回報「已送出」，因為 V1 那一版的答案從來沒有被接受。
+  3. **其他前置條件**（剩下的項，照 §6.2 逐項的第 2～7 條）：題目存在、open、我是作答者、`asker` 對得上、`base`＝目前版本、答案合 §4.3。
+     - 其他已結束的情況（withdrawn；answered 但答案或 `base` 不同；不是我答的）都在這裡判 `closed_ref`，exit 1。
+  - 任何一項不過 → exit 1，**什麼都沒送**，stderr 列出每一個不過的項（`ref` 和診斷碼，同 §6.2 的碼）。
+- **整批組裝**：
+  - 算出所有組、所有分塊、每一則完整的訊息文字（含序列化與讀回檢查，L-10），全部成功才開始送。任何一則組不出來 → exit 1，**什麼都沒送**。
 - **分塊**：每組的項目依 (`asked_at`, `ref`) 排好，從頭依序裝進目前這一則；再加一項會超長時，這一則就結束，從下一項開一則新的。每一則各自完整（自己的 `to`、`mentions`、`asker`），項目逐項判（§6.2），所以分成幾則不改語意。
 - **送的順序**：組依 (`channel`, `asker`)，組內依分塊的順序，一則一則送。
 - **部分失敗**：第 k 則送出時後端錯 → 立刻停，不送後面的；stdout 是前 k−1 則的 id（一行一個），stderr 說明哪一則失敗；exit 2。
-- **重送**：原樣重跑 `submit`，從匯總重算。
+- **重送**：原樣重跑 `submit`，從完整匯總重算。
   - 已被接受的項照「重跑略過」不再送；剩下的照上面的規則重新分組、分塊。
+  - 中間有人（提問者）寫了 snapshot，把已送的題收成墓碑也一樣：submit 不用 snapshot，所以照樣認得出已送的答案（C-28）。
   - 後端其實收到了、但回應失敗的那一則：同步之後它在列表裡，它的項已經結束，略過。
   - 同步還看不到它（A-1 的時窗內）的話，重跑可能再送一次。這時後到的那則逐項判 `closed_ref`，**不會產生第二個答案**（C-11）。
 - **沒有可送的**（全部略過）：exit 0、stdout 空、stderr 一行說明。
@@ -548,7 +570,7 @@ closed: [<題目 id>, …]     # 已結束（answered／withdrawn）題目的 id
 - **不防冒名**：spec 明寫「不做嚴格的身分認證（任何人可以用任何名字送）」（`spec.md:125`）。這裡的權限擋的是**誤用**，例如別的 AI 在頻道看到題目、自作主張去作答。題目指定 `answerer`，就是為了擋這種事。
 - **snapshot 也可以被冒名**：任何人都能用提問者的名字寫一則 snapshot，`items` 寫成假的內容（語法合法、`covered` 也對得上）。
   - 有效的條件（§7.3）只檢查形狀、`from` 和位置，**檢查不出內容是錯的**。
-  - 後果是預設 `list`、預檢和 `submit` 分組看到假的 open 狀態。
+  - 後果是預設 `list` 和出題端（`ask`／`update`／`withdraw`）的預檢看到假的 open 狀態。`submit` 用完整匯總（§9.1），不受影響。
   - `list --all` 不用 snapshot，不受影響，所以 PMO 照 R-P2 確認答案的路徑仍然可信（在「不防冒名」的前提下，指的是不受假 snapshot 影響）。
   - 這和題目、答案本身可以被冒名是同一類，不另外防。
 - 不接受的紀錄**留在後端**，因為不能刪也不能改。`list --json` 的 `ignored` 列出它們，留給人追查。
@@ -585,8 +607,9 @@ closed: [<題目 id>, …]     # 已結束（answered／withdrawn）題目的 id
 - **R-A2**：待決的清單和狀態只來自 `angareion decision list --json`（或將來由 Angareion 提供的同一份匯總）。App 不自己匯總（本人裁定 X-13），也不對待決訊息做任何後端操作。
 - **R-A3**：App 的 TS 寫者**只在本人按「送出」時寫 `submit`**；不得寫 `ask`、`update`、`withdraw`、`snapshot`，也不得編輯或刪除任何訊息。寫出的 submit 必須照：
   - §4.3 的格式：front matter `datatype: decision`、`from`＝Q-1 的作答者名、`channel`＝提問頻道、`to`＝提問者、`mentions: [提問者]`；內文是 YAML（不用 JSON，L-13），`decision: 1`、`op: submit`、`asker`、`items`。
+  - TS 的 YAML 寫者要用 py 的 `yaml.safe_load` 回讀驗證：內文含 emoji、控制字元（例如 tab、`\u0007`）、多行 `note` 的案例，讀回的值要和寫入前相同（L-13）。
   - 每一項的答案規則（§4.3）與長度上限（L-9）；
-  - §9 的分組與 §9.1 的分塊、重跑略過。
+  - §9 的分組與 §9.1 的分塊、重跑略過。重跑略過要比對已結束題目的 `submitted`，所以 App 要讀 `list --all --json`（預設 `list` 不含已結束的題）；比較的值與正規化照 §9.1（`from`、`base`、`choice`、`note`，缺省當 `null`）。
   - App 寄件匣的重送（客戶端 id 冪等）可以照舊用：同一則重送只會被判 `closed_ref`（§6.4），不會產生第二個答案。
   - 寫錯的 submit 不會改 Angareion 的狀態，只會進 `ignored`；App 要照 `list --json` 顯示結果，不能假設送出就等於被接受。
 - **R-A4**：App 本地草稿（目前選的是哪一題、還沒送出的選擇與文字、選了又取消）**只留在 App 裡，不寫進 Angareion**，也不改變 Angareion 的行為。
@@ -614,7 +637,7 @@ closed: [<題目 id>, …]     # 已結束（answered／withdrawn）題目的 id
 |---|---|---|
 | `angareion/messages.py`（改） | `Message` 加 `datatype` 欄位（預設 `message`）；寫入時嚴格、讀取時寬鬆；`message_to_dict` 加這個鍵；常數 `SELF_SILENT_DATATYPES = frozenset({"decision"})`（「寫的人自己不收」的 datatype 表，格式層擁有） | 不解析 decision 的 payload |
 | `angareion/decision.py`（新） | 純函式：payload 的結構與驗證（寫入嚴格、讀取寬鬆）；`fold(records, *, use_snapshot) -> FoldResult`；`snapshot_for(...)`；`plan_submit(...)` | 不碰後端、不碰快取、不碰 CLI、不碰時鐘 |
-| `angareion/decision_cli.py`（新） | `angareion decision <action>` 的處理函式：同步 log 快取 → 匯總 → 預檢 → 組 `Message` → `backend.send` | 不實作匯總規則 |
+| `angareion/decision_cli.py`（新） | `angareion decision <action>` 的處理函式：同步 log 快取 → 匯總 → 預檢 → 組 `Message` → `backend.send`。選哪一種匯總：預設 `list` 與 `ask`／`update`／`withdraw` 用 `use_snapshot=True`；`list --all` 與 `submit` 用 `use_snapshot=False` | 不實作匯總規則 |
 | `angareion/cli.py`（改） | 註冊 `decision` 子指令並轉交；`_format_message` 在 `datatype` 不是 `message` 時多印一行 `datatype: …` | 不含待決的邏輯 |
 | `angareion/backend.py`（改） | `recipient_matches`／`mention_matches` 加一條：`message.datatype in messages.SELF_SILENT_DATATYPES` 而且 `from` 是讀者自己時不算。**以模組屬性讀這張表**（`from angareion import messages` 再讀 `messages.SELF_SILENT_DATATYPES`，不用 `from … import SELF_SILENT_DATATYPES` 把名字複製進來），C-3 的 monkeypatch 才換得到。新增協定 `EnumerableBackend`（只有 `enumerate_conditional` 一個方法，簽名照現有實作，`@runtime_checkable`） | `ChannelBackend` 的方法不變；不認得任何特定 datatype 的名字 |
 | `angareion/log_cache.py`（改） | `LOG_CACHE_VERSION` 升到 2；還原 `Message` 時帶 `datatype`；`sync` 的 `backend` 參數標成 `EnumerableBackend` | — |
@@ -675,13 +698,18 @@ def parse_payload(message: Message) -> dict            # 寬鬆讀；不合法�
 def build_payload(op: str, **fields) -> str           # 嚴格寫；回傳內文 YAML；不合法時丟 MessageValidationError
 def fold(records: Sequence[Record], *, use_snapshot: bool) -> FoldResult
     # records 是一個頻道裡依到達位置排好的「所有」訊息（見 Record 的註解）；純函式
-    # use_snapshot=False 給 list --all；True 給預設 list、預檢、submit
+    # use_snapshot=False 給 list --all 與 submit；True 給預設 list 與 ask/update/withdraw 的預檢
+    # use_snapshot=True 時，已結束的題目可能只剩墓碑（closed 裡有 id，decisions 裡沒有它的答案）
 def snapshot_for(records, asker) -> str | None
     # 要寫的 snapshot 內文：先依 §7.4 選 through，再對「位置 ≤ through 的前綴」做 fold(use_snapshot=True) 取投影
     # 找不到 through 或後端給不出時刻時回 None
-def plan_submit(result: FoldResult, answerer: str, entries: Sequence[dict], *, render) -> SubmitPlan
-    # entries 是 submit --body 的 items（ref、base、choice、note）。依 §9.1：逐項預檢（不過就丟 SubmitRejected，
-    # 一次列出全部不過的項）、重跑略過、分組、分塊。render(channel, asker, items) -> str 回傳整則文字，用來量長度；
+def plan_submit(results: Mapping[str, FoldResult], answerer: str, entries: Sequence[dict], *, render) -> SubmitPlan
+    # results 是 {頻道: 那個頻道的 fold(use_snapshot=False)}，涵蓋 --channel 的範圍（§5）。
+    # 每一份都必須是完整匯總（§9.1）：任何一份的 snapshot_used 有不是 None 的值時丟 ValueError
+    # （呼叫端的程式錯誤，不是使用者輸入錯）。snapshot_used 全是 None 時，兩種 use_snapshot 的結果相同，所以只查這一項。
+    # entries 是 submit --body 的 items（ref、base、choice、note）。依 §9.1 的順序：重複 ref → 重跑略過
+    # （比 from、base、choice、note，缺省當 None）→ 其餘前置條件；不過就丟 SubmitRejected，一次列出全部不過的項。
+    # 之後分組、分塊。render(channel, asker, items) -> str 回傳整則文字，用來量長度；
     # 單項就放不下時丟 MessageValidationError（照 NOTE_MAX 不該發生）
 ```
 
@@ -714,7 +742,7 @@ flowchart TD
   M --> R[read / wait / log：只看位址]
   D --> R2[read / wait：只看位址，但自己寫的 decision 不算寄給自己 C-3；log：全部]
   D --> F[decision.fold]
-  F --> A2{list --all?}
+  F --> A2{list --all 或 submit?}
   A2 -- 是 --> S2
   A2 -- 否 --> S{該提問者有有效 snapshot? covered 對得上?}
   S -- 有 --> S1[以 snapshot.items 為起點，套用 through 之後的紀錄]
@@ -792,7 +820,7 @@ stateDiagram-v2
 | C-13 | 兩個頻道 X、Y：輸入有 X 的 Q1、Q2 和 Y 的 Q3 的答案，X 另有 Q4 不在輸入裡 → `submit` 寫出 2 則：X 一則（`items`＝Q1、Q2，每項帶輸入的 `base`／`choice`／`note` 和匯總抄來的 `title`，`to`＝`mentions[0]`＝提問者，`channel`＝X）、Y 一則；Q4 仍是 open；stdout 有兩行 id，順序是 X、Y | CLI |
 | C-14 | FakeBackend 在寫第 2 則 submit 時注入錯誤 → exit 2，stdout 恰好有第 1 則的 id，stderr 指出第 2 則失敗，第 3 則以後沒有送；**原樣重跑** `submit` → 第 1 則的題照「重跑略過」不重送（stderr 有「已送出，略過」），只寫出剩下的；FakeBackend 注入「已收下但回應失敗」→ exit 2；重跑時同步看得到它 → 那幾題略過；以 FakeBackend 讓它暫時不出現在列舉裡再重跑 → 會再送一則，那一則的項全部判 `closed_ref`，`list --all` 每題只有一個答案；全部略過 → exit 0、stdout 空、stderr 有說明 | CLI |
 | C-15 | 匯總：壞掉的 YAML、`decision: 2`、未知的 `op` → 各自進 `ignored`（`bad_payload`／`unsupported_version`／`bad_payload`，`ref` 是 `null`、`item` 是 `null`），其他紀錄照常匯總，結束碼 0；一則 submit 有 3 項、第 2 項 `stale_base` → `ignored` 恰好一筆，`item=1`、`ref`＝那題、`op=submit`；submit 的 `to` 不是 `asker`，或 `mentions` 沒有 `asker` → 整則 `bad_payload`、`item` 是 `null`，各項都不被接受 | 單元＋CLI（`list`） |
-| C-16 | **等價性**（性質測試，seed 固定）：隨機產生一串合法和不合法的紀錄（含重複投遞、id 衝突、各種 op 與各種 submit 項，後端時刻遞增，A-1 成立），在隨機位置用 `snapshot_for` 產生 snapshot 插入 → (a) `fold(use_snapshot=True)` 的 `decisions`＝`fold(use_snapshot=False)` 的 `decisions` 裡 status 是 open 的那幾項（逐鍵相同，含 `version`、`revisions`、`answerer`、`asked_at`、`updated_at`）；(b) 兩者的 `seen`（open 題目的版本 id）相同；(c) 前者的 `closed` ＝後者已結束題目的 id 集合；`ignored` 不比；(d) 用 snapshot 的那一次，`snapshot_used` 指到插入的 snapshot，`folded` ＝ `through` 之後的 decision 紀錄則數（確認 `through` 之前的紀錄沒有被匯總）。**固定交錯案例**（逐一寫成測試）：ask Q、update U1 在 cutoff 前，之後是 update U2／submit Q（`base=U1`）／withdraw Q／U1 重送 其中之一，再寫 snapshot（`through`＝U1 那則）→ snapshot 的 `items` 裡 Q 的 `version` 是 U1、`revisions`＝2、`versions`＝[Q, U1]、不在 `closed` 裡（**前綴投影**，不受 `through` 之後影響），而且 (a)～(d) 成立；把那一則改放到 snapshot 之後，(a)～(d) 同樣成立；H1 的序列（ask、submit、61 秒後的一般訊息、snapshot）→ `list --all` 有 Q answered、答案是 submit 的那一項，預設 `list` 沒有 Q | 單元 |
+| C-16 | **等價性**（性質測試，seed 固定）：隨機產生一串合法和不合法的紀錄（含重複投遞、id 衝突、各種 op 與各種 submit 項，後端時刻遞增，A-1 成立），在隨機位置用 `snapshot_for` 產生 snapshot 插入 → (a) `fold(use_snapshot=True)` 的 `decisions`＝`fold(use_snapshot=False)` 的 `decisions` 裡 status 是 open 的那幾項（逐鍵相同，含 `version`、`revisions`、`answerer`、`asked_at`、`updated_at`）；(b) 兩者的 `seen`（open 題目的版本 id）相同；(c) 前者的 `closed` ＝後者已結束題目的 id 集合；`ignored` 不比；(d) 用 snapshot 的那一次，`snapshot_used` 指到插入的 snapshot，`folded` ＝ `through` 之後的 decision 紀錄則數（確認 `through` 之前的紀錄沒有被匯總）。**固定交錯案例**（逐一寫成測試）：ask Q、update U1、標記 M（另一題的 `ask`，整串只出現一次）在 cutoff 前，之後是 update U2／submit Q（`base=U1`）／withdraw Q／U1 重送 其中之一，再寫 snapshot（`through`＝M，**不用 U1**：U1 重送的那一案 U1 會在列表裡出現兩次，`through`＝U1 的 snapshot 依 §7.3 無效）→ snapshot 的 `items` 裡 Q 的 `version` 是 U1、`revisions`＝2、`versions`＝[Q, U1]、不在 `closed` 裡（**前綴投影**，不受 `through` 之後影響），而且 (a)～(d) 成立；把那一則改放到 snapshot 之後，(a)～(d) 同樣成立；**回退分支另測**：U1 重送那一案若把 `through` 設成 U1 → `ignored` 有 `bad_snapshot`，`snapshot_used` 是 `None`，(a)～(c) 仍成立（等於從頭匯總）；H1 的序列（ask、submit、61 秒後的一般訊息、snapshot）→ `list --all` 有 Q answered、答案是 submit 的那一項，預設 `list` 沒有 Q | 單元 |
 | C-17 | snapshot 無效的情況：`through` 指不到、`through` 在列表裡出現兩次、`through` 排在 snapshot 之後、`from`≠`asker`、YAML 壞掉 → `bad_snapshot`；`covered` 和列表對不上 → `snapshot_stale`；以上都改用前一則有效的；全部無效 → 結果等於從頭匯總，`snapshot_used` 是 `None`。**A-1 失效**：先寫 snapshot S（`through`＝位置 5，`covered`＝5），之後用 FakeBackend 的 `deliver` 補一則位置 3 的 withdraw Q（後端時刻落在 log 增量同步的 `since` 窗內，確保鏡像收得到）→ 預設 `list` 判 S 為 `snapshot_stale`，Q 是 withdrawn（等於從頭匯總），不是 open | 單元 |
 | C-18 | 每一個 `decision` action（含寫入）跑完之後，游標檔逐位元相同；`wait` 的 ETag 狀態檔不被讀寫 | CLI |
 | C-19 | 自動 snapshot：`SNAPSHOT_EVERY` 用 monkeypatch 設成 3，出題者連寫 4 則相關紀錄之後再一次 `ask` → 多寫一則 snapshot（只涵蓋整個前綴都過了穩定窗的部分，§7.4），stdout 只有 `ask` 的 id；snapshot 超過 65536 字元 → stderr 警告、`ask` 仍然 exit 0；手動 `snapshot`，但沒有可涵蓋的 → exit 0、stdout 空；手動 `snapshot` 超過 65536 字元 → exit 1；**through 的選法**：位置 1、2、3 的時刻是 t、t+90、t+10，最新時刻 t+100（cutoff＝t+40）→ `through` 是位置 1，不是位置 3（位置 3 本身早於 cutoff，但它的前綴裡有位置 2 晚於 cutoff）；**一般訊息推進 cutoff**：最後一則 decision 在 t，之後只有一則 t+61 的一般訊息 → 傳給 `snapshot_for` 的 `records` 含這則一般訊息時，`through` 是那則 decision；只傳 decision 時找不到 `through`（說明呼叫端不能先濾） | 單元＋CLI |
@@ -802,8 +830,10 @@ stateDiagram-v2
 | C-23 | `list` 的預設只列 open；`--all` 包含 answered 和 withdrawn，範圍是本機鏡像裡頻道的全部歷史，而且不用 snapshot（把一則有效 snapshot 的 `items` 竄改成假的 open 題目 → 預設 `list` 受影響、`--all` 不受影響）；`--json` 的鍵恰好是 §5 列的（含 `submitted` 的 `record`、`from`、`base`、`choice`、`note`、`submitted_at`，以及 `ignored` 的 `op`、`ref`、`item`），沒有 `draft` 鍵；排序是 `(asked_at, channel, id)`；`--channel` 指定未登記的頻道 → exit 1；同步失敗 → exit 2，stdout 空（同 `spec.md:404`） | CLI |
 | C-24 | 舊讀者相容：把新寫出的 (1) 一般訊息（含 `datatype: message`）、(2) `ask`、(3) `submit`（含 `mentions`）的文字，交給 main `0577584` 的 `parse_message`、`recipient_matches`、`mention_matches`、`_format_message`（以那個 commit 的程式碼釘成測試資料，或在測試裡從 git 取出）→ 三則都解析成功、`content` 原樣保留；`ask` 只對作答者算「寄給我的」；`submit` 對提問者算「寄給我的」和「@ 我」；第三者兩者都不算 | 單元 |
 | C-25 | **submit 容量**（§9.1）：同一組 100 題、每題 `note` 1000 字元 → 寫出 ≥ 2 則，每則整則序列化文字 ≤ 65536 字元，每則都有自己的 `to`／`mentions`＝提問者，所有則的 `items` 合起來恰好是那 100 題、沒有重複，順序依 (`asked_at`, `ref`)；`list --all` 100 題都 answered。跨組：X 組要 2 則、Y 組 1 則 → 預檢全過才送，stdout 3 行，順序 X1、X2、Y1。預檢失敗（monkeypatch `render` 讓 Y 組丟 `MessageValidationError`）→ exit 1，FakeBackend 一則都沒多。第 2 則（X2）注入後端錯 → exit 2，stdout 只有 X1；原樣重跑 → X1 的題略過，只送 X2 的題和 Y 組 | CLI |
-| C-26 | **去重與不復活**（§6.4）。每一案都分別在兩種擺法下跑：(i) 沒有 snapshot；(ii) 重複那則在 snapshot 之後、原本那則在 `through` 之前。兩種擺法的 `decisions`（open 與已結束）和 `closed` 相同。**(ii) 的 `through` 用一則只出現一次的標記紀錄**（例如另一題 M 的 `ask`，放在原本那則之後、snapshot 之前），不用會被重送的那則，否則 `through` 在列表裡出現兩次、snapshot 判 `bad_snapshot`，測試會退回從頭匯總而空過。(ii) 還要斷言 `snapshot_used`＝那則 snapshot、`folded` 不含 `through` 之前的紀錄。案例：(1) ask Q、withdraw Q、[snapshot]、ask Q 原樣重送（相同 id）→ Q 仍 withdrawn，重送判 `duplicate_id`；(2) 同 (1) 但 withdraw 換成 submit → Q 仍 answered，答案不變；(3) ask Q、update U1、update U2、[snapshot]、U1 重送 → `version`＝U2、`revisions`＝3，U1 重送判 `duplicate_id`；(4) ask Q、submit S、[snapshot]、S 重送 → 每項 `closed_ref`，答案不變；(5) 兩則 ask 不同內容、相同 id → 先到者勝，後者 `duplicate_id`；(6) withdraw Q 先到（`unknown_ref`）、ask Q、[snapshot]、withdraw 重送 → 接受，Q withdrawn | 單元 |
+| C-26 | **去重與不復活**（§6.4）。每一案都分別在兩種擺法下跑：(i) 沒有 snapshot；(ii) 重複那則在 snapshot 之後、原本那則在 `through` 之前。兩種擺法用 `fold(use_snapshot=True)` 比，**open 的 `decisions`、`seen`、`closed` 相同**（同 C-16 的 (a)～(c)；snapshot 路徑上已結束的題目只剩墓碑，不比它們的內容）。已結束題目的狀態與答案（下面各案寫的「仍 withdrawn」「答案不變」）另以 `fold(use_snapshot=False)`（＝`list --all`）在兩種擺法的列表上各驗一次。**(ii) 的 `through` 用一則只出現一次的標記紀錄**（例如另一題 M 的 `ask`，放在原本那則之後、snapshot 之前），不用會被重送的那則，否則 `through` 在列表裡出現兩次、snapshot 判 `bad_snapshot`，測試會退回從頭匯總而空過。(ii) 還要斷言 `snapshot_used`＝那則 snapshot、`folded` 不含 `through` 之前的紀錄。案例：(1) ask Q、withdraw Q、[snapshot]、ask Q 原樣重送（相同 id）→ Q 仍 withdrawn，重送判 `duplicate_id`；(2) 同 (1) 但 withdraw 換成 submit → Q 仍 answered，答案不變；(3) ask Q、update U1、update U2、[snapshot]、U1 重送 → `version`＝U2、`revisions`＝3，U1 重送判 `duplicate_id`；(4) ask Q、submit S、[snapshot]、S 重送 → 每項 `closed_ref`，答案不變；(5) 兩則 ask 不同內容、相同 id → 先到者勝，後者 `duplicate_id`；(6) withdraw Q 先到（`unknown_ref`）、ask Q、[snapshot]、withdraw 重送 → 接受，Q withdrawn | 單元 |
 | C-27 | **App 寫的 submit（匯總端）**：用直接 deliver 放進手工組的 submit（模擬 App 的 TS 寫者，不經 CLI 預檢）→ 每一案只看 `list --all --json`：合法的一項（`choice` 在 `options` 裡、`base`＝目前版本、`from`＝作答者）→ 該題 answered，`submitted` 的值等於那一項；`choice` 不在 `options` 裡 → `bad_item`；`note` 4001 字元 → `bad_item`；`note: ""` → `bad_item`；`choice` 和 `note` 都沒有 → `bad_item`；`choice: null` 加 `note` → 接受（等同只給 note）；同一個 `ref` 兩次 → 第二項 `duplicate_ref`；`base` 不符 → `stale_base`；`from` 不是作答者 → `not_answerer`；`asker` 不是那題的提問者 → `binding_mismatch`；題目已結束之後再送 → `closed_ref`。以上被拒的項都不改題目的狀態，其他項照常判 | 單元＋CLI（`list`） |
+| C-28 | **submit 用完整匯總，snapshot 收成墓碑之後重跑仍正確**（§9.1，H3-1）。共同的前置：頻道 X 有 ask Q、頻道 Y 有 ask R（提問者 P、作答者都是 H），所以 Q、R 是兩組、自然寫成兩則；M 是 X 裡另一題的 ask，整串只出現一次，用作 `through`。(a) **主序列**：H 的輸入是 Q、R；第 2 則（Y 組）注入後端錯 → exit 2，stdout 只有 X 那則，Q 被接受；之後 X 裡依序是 M、一則後端時刻晚 61 秒的一般訊息，P 在 X 寫 snapshot（`through`＝M）→ 斷言對 X 的紀錄做 `fold(use_snapshot=True)` 時 `snapshot_used`＝那則 snapshot、Q 在它的 `closed` 裡（墓碑）；**原樣重跑** → stderr 有 Q「已送出，略過」，只送一則、`items` 恰好是 R，exit 0；`list --all` 的 Q、R 都 answered，Q 只有一個答案。下面四案各自建一份列表：Q 照各案的方式結束 → M → 晚 61 秒的一般訊息 → 提問者寫 snapshot（`through`＝M）；R 都還 open。每一案的輸入都是 Q（`choice=A`、`base`＝Q 目前版本）加 R，由 H 送出；每一案都斷言對 X 的紀錄做 `fold(use_snapshot=True)` 時 `snapshot_used`＝那則 snapshot、Q 在它的 `closed` 裡，再斷言 submit 的結果：(b) Q 被 **withdraw** → exit 1，stderr 有 `ref`＝Q、`closed_ref`，什麼都沒送（R 也沒送）；(c) Q 已由 H 以**不同的答案**（`choice=B`）送出 → exit 1，`closed_ref`；(d) Q 是**別人答的**：update 把 Q 的作答者換成 H2（輸入的 `base` 用這一版），H2 以 `choice=A` 送出並被接受 → H 的輸入不略過（`from` 不同），exit 1，`closed_ref`；(e) Q 已由 H 以**相同的答案**（同 `base`、`choice=A`、沒有 `note`）送出 → Q 略過，只送一則、`items` 恰好是 R，exit 0。另外（單元）：`plan_submit` 收到 `fold(use_snapshot=True)` 而且有用到 snapshot 的結果 → `ValueError` | 單元＋CLI |
+| C-29 | **重跑略過的相等判斷與檢查順序**（§9.1，M3-1）。每一案都斷言 exit 碼、FakeBackend 多了幾則、stderr 的 `ref` 與診斷碼：(a) **`base` 不同**：Q 從 V1 更新成 U2，H 以 `base=U2, choice=A` 送出並被接受；輸入 `base=V1, choice=A` → 不略過，`closed_ref`，exit 1，什麼都沒送；反方向：已接受的是 `base=V1` 的 A（之後沒有 update），輸入 `base=<另一個 ULID>, choice=A` → 不略過，`closed_ref`，exit 1；(b) **缺省正規化**：已接受的是 `choice=A`、沒有 `note`；輸入 `choice: A, note: null` → 略過；輸入 `choice: A`（沒有 `note` 鍵）→ 略過；已接受的是只有 `note: x`，輸入 `choice: null, note: x` → 略過；輸入 `note: y` → `closed_ref`；(c) **重複 `ref` 全部已送**：Q 已以相同答案被接受，輸入裡 Q 出現兩次（答案也相同）→ exit 1、`duplicate_ref`（第二項），什麼都沒送，**不**回報「已送出」；(d) **混合**：輸入是 Q（已送、相同）、R（未送）、R（重複）→ exit 1，stderr 有 R 的 `duplicate_ref`，什麼都沒送（R 的第一項也沒送）；(e) 輸入是 Q（已送、相同）、R（未送）、沒有重複 → Q 略過，送一則、`items`＝R，exit 0 | 單元＋CLI |
 
 ---
 
@@ -818,6 +848,8 @@ stateDiagram-v2
   - 本人 2026-11-15 裁定作答草稿只存 App（X-12）。否決。
   - 換來的好處：通訊層少一個 action、少一種紀錄和一組去重 id（snapshot 不必帶草稿與作答 id），作答過程不會吵到任何人。
   - 代價：換裝置就看不到還沒送的選擇；CLI 作答者要一次給齊答案。
+- **snapshot 帶回所有已結束題目的答案**（讓 `submit` 也能用 snapshot）：snapshot 會隨已結束題目的數量線性長大，`closed` 只留 id 的容量設計（§7.2）就失效。否決（第 3 輪，H3-1）。
+- **submit 用 snapshot，只在輸入的 `ref` 碰到墓碑時回放那幾題的完整歷史**：結果和完整匯總相同，但多一條要保持一致、要另外測的路徑；省下的只是一次本機的純記憶體匯總（鏡像本來就完整讀過，§7.5）。否決，`submit` 一律完整匯總（§9.1）。
 - **CLI `submit` 替作答者填目前版本當 `base`**：題目在作答之後被更新的話，答案會默默套到沒看過的新版本上。否決，`base` 必給（§5）。
 - **App 寫的 submit 改走 CLI**（App 呼叫 `angareion decision submit`）：本人裁定 X-12 時，App 要保留自己的送出路徑（寄件匣）。所以改成 App 照 §4.3／§9.1 直接寫，由匯總判定（R-A3）。CLI 的 `submit` 留給 CLI 作答者。否決作為唯一路徑。
 - **submit 拆成「decision 紀錄＋一則一般訊息」兩次寫入**：兩次寫入不是原子的，中間失敗就要對帳。改成 submit 本身就是寄給提問者的那一則。否決。
@@ -849,10 +881,10 @@ stateDiagram-v2
 
 ## §18 測試策略
 
-- **單元**：`decision.py` 是純函式，測 C-6（匯總部分）、C-8、C-9（匯總部分）、C-10、C-11、C-15、C-16、C-17、C-19（through 的選法與一般訊息推進 cutoff）、C-20、C-26、C-27。C-16 用 seed 固定的隨機產生器（不新增依賴）。
-- **CLI**：用 FakeBackend（`backend.py:421-441` 的 `deliver` 可以指定到達位置和時刻，用來造同一秒、亂序、晚到、重複投遞、競態、App 寫的 submit 的情況），跑 C-3、C-4、C-6、C-7、C-9、C-11～C-14、C-15（`list`）、C-18、C-19、C-21～C-23、C-25、C-27（`list`）。
+- **單元**：`decision.py` 是純函式，測 C-6（匯總部分）、C-8、C-9（匯總部分）、C-10、C-11、C-15、C-16、C-17、C-19（through 的選法與一般訊息推進 cutoff）、C-20、C-26、C-27、C-28（`plan_submit` 的部分與 `ValueError`）、C-29（`plan_submit` 的部分）。C-16 用 seed 固定的隨機產生器（不新增依賴）。
+- **CLI**：用 FakeBackend（`backend.py:421-441` 的 `deliver` 可以指定到達位置和時刻，用來造同一秒、亂序、晚到、重複投遞、競態、App 寫的 submit 的情況），跑 C-3、C-4、C-6、C-7、C-9、C-11～C-14、C-15（`list`）、C-18、C-19、C-21～C-23、C-25、C-27（`list`）、C-28、C-29。
 - **相容**：C-1、C-2、C-5、C-24 在 `messages` 的單元層。
-- **不測**：真的 GitHub、真的 TS 讀者與 TS 寫者。TS 那邊交給 MyAiEntry（R-A1 已答；R-A3 的寫者由 MyAiEntry 照 C-27 的案例自驗，建議用同一組案例資料）。
+- **不測**：真的 GitHub、真的 TS 讀者與 TS 寫者。TS 那邊交給 MyAiEntry（R-A1 已答；R-A3 的寫者由 MyAiEntry 照 C-27 的案例自驗，建議用同一組案例資料；YAML 寫出另以 py `yaml.safe_load` 回讀含 emoji、控制字元的案例，L-13）。
 - 驗收門檻由 PM 定。
 
 ---
@@ -863,13 +895,13 @@ stateDiagram-v2
 |---|---|---|
 | PR-1 | 讀取端：`Message.datatype`（讀取寬鬆、預設 `message`）、`message_to_dict`、log 快取升到 v2、`_format_message` 標出 datatype、`SELF_SILENT_DATATYPES` 與 C-3 的遞送規則、`EnumerableBackend` 協定。`send` **還不寫** `datatype`。測 C-1～C-3、C-20(a)～(c)、C-21、C-24 | 不會。舊訊息照舊；還沒有人寫 decision；快取重建一次 |
 | PR-2 | 寫入端：`send` 寫 `datatype: message`。測 C-5。**閘門：Q-5（R-A1）——已通過** | 不會（R-A1 已答） |
-| PR-3 | `decision.py` 純函式（格式、匯總、去重、snapshot、submit 的預檢與分組分塊），沒有接上 CLI。測 C-6（單元部分）、C-8、C-9（單元部分）、C-10、C-11（單元部分）、C-15～C-17、C-19（through 的選法與一般訊息推進 cutoff）、C-20(d)、C-26、C-27（單元部分） | 不會。沒有人呼叫它 |
-| PR-4 | `decision_cli.py` 和 `cli.py` 的 `decision` 子指令（6 個 action，含自動 snapshot）；`skills/angareion/SKILL.md` 和 `docs/angareion.md` 的說明（含 App 寫 submit 的格式要點，給 R-A3）；由 PM 寫 spec delta：`angareion` 的「六個介面」改成七個介面家族、「訊息格式」加 datatype，新增 `angareion-pending-decision` capability。測 C-4、C-6、C-7、C-9、C-11～C-14、C-15（`list`）、C-18、C-19、C-20(e)、C-22、C-23、C-25、C-27（`list`）。**閘門：Q-5（R-A1）——已通過** | 不會。新指令只在有人呼叫時才寫入；需要 PR-1（遞送規則）先合，否則提問者自己寫的 snapshot 會遞送給自己（只是雜訊） |
+| PR-3 | `decision.py` 純函式（格式、匯總、去重、snapshot、submit 的預檢與分組分塊），沒有接上 CLI。測 C-6（單元部分）、C-8、C-9（單元部分）、C-10、C-11（單元部分）、C-15～C-17、C-19（through 的選法與一般訊息推進 cutoff）、C-20(d)、C-26、C-27（單元部分）、C-28、C-29（`plan_submit` 的部分） | 不會。沒有人呼叫它 |
+| PR-4 | `decision_cli.py` 和 `cli.py` 的 `decision` 子指令（6 個 action，含自動 snapshot）；`skills/angareion/SKILL.md` 和 `docs/angareion.md` 的說明（含 App 寫 submit 的格式要點，給 R-A3）；由 PM 寫 spec delta：`angareion` 的「六個介面」改成七個介面家族、「訊息格式」加 datatype，新增 `angareion-pending-decision` capability。測 C-4、C-6、C-7、C-9、C-11～C-14、C-15（`list`）、C-18、C-19、C-20(e)、C-22、C-23、C-25、C-27（`list`）、C-28、C-29（CLI 部分）。**閘門：Q-5（R-A1）——已通過** | 不會。新指令只在有人呼叫時才寫入；需要 PR-1（遞送規則）先合，否則提問者自己寫的 snapshot 會遞送給自己（只是雜訊） |
 | PR-5（Q-7 照建議不做） | `pmo` 的事件標籤 | — |
 
 依賴：PR-1 → PR-3 → PR-4。PR-2 可以和 PR-3、PR-4 並行。PR-2 和 PR-4 都受 Q-5 的閘門控制；本人裁定時閘門已通過（R-A1 已答），仍照依賴順序合。PR-4 不依賴 PR-2 的程式碼。
 
-C-編號與 PR 的對照（每條至少在一個 PR 測）：C-1～C-3、C-21、C-24 → PR-1；C-5 → PR-2；C-8、C-10、C-16、C-17、C-26 → PR-3；C-4、C-7、C-12～C-14、C-18、C-22、C-23、C-25 → PR-4；C-6、C-9、C-11、C-15、C-19、C-27 → PR-3（單元）＋PR-4（CLI）；C-20 → PR-1(a)～(c)、PR-3(d)、PR-4(e)。
+C-編號與 PR 的對照（每條至少在一個 PR 測）：C-1～C-3、C-21、C-24 → PR-1；C-5 → PR-2；C-8、C-10、C-16、C-17、C-26 → PR-3；C-4、C-7、C-12～C-14、C-18、C-22、C-23、C-25 → PR-4；C-6、C-9、C-11、C-15、C-19、C-27、C-28、C-29 → PR-3（單元）＋PR-4（CLI）；C-20 → PR-1(a)～(c)、PR-3(d)、PR-4(e)。
 
 架構總圖（`docs/architecture/overview.md`）和決策清單（`docs/architecture/decisions.md`）：本單照 brief 只交 design.md。核准之後，在 PR-1 的同一個 PR 補上總圖的 `angareion` 一節，以及決策 D-30「待決＝append-only 的 decision datatype；匯總在 Angareion；後端只用 append 和依序讀回；作答草稿只存 App」。
 
