@@ -1,6 +1,6 @@
 # Angareion
 
-Angareion 是讓 agent、程式或人「留言、讀留言」的獨立工具。對外只有六個介面：建 channel、刪 channel、送訊息、確認有沒有新訊息（`wait`）、讀訊息、查詢訊息（`log`）。現在的後端實作是 GitHub API＋Issues（channel 名經設定檔指向某個 repo 的某個 issue，訊息＝留言）；換後端時指令與訊息格式不變。`angareion --version` 印出套件版本與來源 commit（例如 `angareion 0.1.0 (99db372)`），可用來確認讀者已升級；不是從 git checkout 執行時印 `unknown`。
+Angareion 是讓 agent、程式或人「留言、讀留言」的獨立工具。對外有六個訊息介面：建 channel、刪 channel、送訊息、確認有沒有新訊息（`wait`）、讀訊息、查詢訊息（`log`）；另有待決（`decision`，見下面「待決（decision）」一節），共七個介面家族。現在的後端實作是 GitHub API＋Issues（channel 名經設定檔指向某個 repo 的某個 issue，訊息＝留言）；換後端時指令與訊息格式不變。`angareion --version` 印出套件版本與來源 commit（例如 `angareion 0.1.0 (99db372)`），可用來確認讀者已升級；不是從 git checkout 執行時印 `unknown`。
 
 指令叫 `angareion`；沒有 ack、已讀回條，也沒有內建限流。介面（參數、輸出、錯誤訊息）不出現 GitHub repo／issue 的概念——channel 就是一個英文名。
 
@@ -17,6 +17,7 @@ channel 的訊息存在 GitHub（channel 對應的 repo）上，AI 之間的對�
 | `angareion send --channel <ch> [--to <AI 名>] [--mention <AI 名>]… [--in-reply-to <ULID>] [--urgency N] [--attach NAME=PATH]… [--ref NAME=LOCATOR]… (--body <文字> \| --body -)` | 送一則訊息；stdout 只印訊息 id |
 | `angareion wait [--channel <ch> \| --mentioned] [--timeout <秒>]` | 確認有沒有新訊息；有新訊息 exit 0，逾時沒有 exit 3；stdout 不印東西 |
 | `angareion read [--channel <ch> \| --mentioned] [--since <時刻>] [--json]` | 讀新訊息（由舊到新），並把本機游標往前推 |
+| `angareion decision <action> …` | 待決：`ask`、`update`、`withdraw`、`submit`、`list`、`snapshot`（見「待決（decision）」）；寫入只 append 一則 `datatype: decision` 的訊息 |
 | `angareion log [--channel <ch>]… [--from <AI 名>] [--to <AI 名\|me>] [--mentioned] [--since <時刻>] [--until <時刻>] [--grep <字串>] [--around <ULID> [--before N] [--after N]] [--thread <ULID>] [--limit N] [--json]` | 唯讀查詢（不動游標）；過濾、前後文、串 |
 
 - **channel 名**只能是非空的 ASCII 字母、數字、`-`、`_`（例如 `general`、`phase-1`）；其他字元（如中文）exit 1。
@@ -77,6 +78,7 @@ delete **不等待**落地（送出註銷即 exit 0）；重跑安全（再關�
 ```markdown
 ---
 angareion: 1
+datatype: message
 id: 01JX2M3N4P5Q6R7S8T9V0W1XYZ
 at: '2026-10-12T03:00:00.123456+00:00'
 from: mylinuxpool-impl-w1-1
@@ -93,6 +95,7 @@ attachments: []
 ```markdown
 ---
 angareion: 1
+datatype: message
 id: 01JX2M3N4P5Q6R7S8T9V0W1XYZ
 at: '2026-10-12T03:00:00.123456+00:00'
 from: mylinuxpool-impl-w1-1
@@ -104,6 +107,7 @@ attachments: []
 ```
 
 - `angareion: 1` 是格式版本，解析器不認得的版本會忽略（當成不是訊息）。v0（`from`／`to` 是 `{repo, role}` 物件）的舊留言在 v5 讀不到，會被當成非訊息忽略。
+- **`datatype`**（#468）：單行純量，文法 `^[a-z][a-z0-9-]{0,31}$`。`send` 寫 `message`，`angareion decision …` 寫 `decision`；沒有這個欄位的舊訊息讀成 `message`，值不合文法也讀成 `message`（整則照收）。值合法但不認得的（例如將來的 `poll`）照原字串保留，照位址遞送，待決的匯總不理它。`angareion: 1` 不升版；舊讀者會略過這個欄位。`read --json` 與 `log --json` 的每則都帶 `datatype`，人看的輸出在 `datatype` 不是 `message` 時多印一行 `datatype: …`。
 - `id` 是寄件者產生的 ULID；`at` 是含時區的 ISO 8601。這兩個只用來辨識與顯示——**新舊不是用它們判斷的**（見游標）：寄件者的時鐘、時區、ULID 順序都不會讓訊息漏掉或重複。
 - `urgency` 是 0～9 的整數，預設 5。
 - **`mentions`（選填）**：AI 名的清單，`to` 之外再叫的人。序列化固定寫成**一行 flow 形式** `mentions: [mypmo-pm-m1, mylinuxpool-impl-w1-1]`（不是區塊清單；TS 端手寫的解析器靠這個），清單空就整行省略。**送嚴讀寬**：送出時每個都要是當前文法的 AI 名、不能重複；讀取時舊文法的名字也收（跟 `from`／`to` 一樣），型別不對就當沒有、壞的項目與重複的丟掉，整則訊息照收。
@@ -138,6 +142,115 @@ attachments: []
 - 下列情況用完整查詢、不留 ETag：回應有下一頁、第 1 頁已滿 100 筆（可能還有第 2 頁）、這次查到新訊息、狀態檔壞掉／版本不認得／記錄對不上、游標前進或刪掉。掃描視窗（`scan_since`）仍然只在單次 `wait` 行程的記憶體裡（跨行程沿用會放大複寫延遲的漏訊息風險）。
 - `wait` 不動游標；`read` 不讀 ETag 狀態檔，也不會被 304 跳過。狀態檔寫不進去（唯讀、磁碟滿）時印一次警告、`wait` 照常（下次重啟用完整查詢）。
 - 刪掉游標檔就等於從頭讀（「寄給我的」受上一條的廣播規則限制：寄給自己的從頭讀、舊廣播要 `--since`）；刪掉 ETag 狀態檔只是下一次完整查詢（兩者互不影響，刪哪個都不會掉訊息）。游標檔壞掉（不是合法 JSON）時也當成沒有游標，也就是新身分：寄給自己的從頭讀，尚未讀的舊廣播會被略過（要自己用 `--since` 補讀）。
+
+## 待決（decision）
+
+待決就是頻道裡的一則訊息，只是 front matter 是 `datatype: decision`，內文是固定格式的 YAML（§4.3 的 payload 版本 1）。新增、更新、撤回、作答、snapshot 都是 **append 一則**新訊息；已送出的訊息永遠不改、不刪。Angareion 讀回整串，照到達順序**匯總**出每一題目前的狀態。匯總只有一份規則，放在 Angareion；App 與 PMO 只讀 `angareion decision list --json`，不自己匯總。
+
+### 指令
+
+```bash
+angareion decision ask --channel <ch> (--body <YAML> | --body -)                  # stdout：題目 id
+angareion decision update --channel <ch> --ref <ULID> (--body <YAML> | --body -) # stdout：這則紀錄的 id
+angareion decision withdraw --channel <ch> --ref <ULID> [--reason <文字>]          # stdout：這則紀錄的 id
+angareion decision submit [--channel <ch>]… (--body <YAML> | --body -)            # stdout：每則 submit 的 id，一行一個
+angareion decision list [--channel <ch>]… [--all] [--json]                       # 匯總；預設只列 open
+angareion decision snapshot --channel <ch>                                         # 手動 snapshot（通常自動寫）
+```
+
+- **題目 id** 就是出題那則 `ask` 的 `id`。`update`、`withdraw` 的 `--ref` 與 `submit` 每一項的 `ref` 都是它。
+- `ask`、`update` 的 `--body` 是題目欄位的 YAML mapping：`answerer`、`title`（單行，1～120 字）、`background`、`body`（不得為空）、`options`（2～9 個 `{key: A, text: …}`，key 是大寫字母且不重複）、`recommended`（必須是其中一個 key）、`reason`。`update` 要整份重給，不是 patch。body 裡出現 `ask_channel`、`asker`、`op`、`decision`、`ref` 或其他的鍵 → exit 1。
+- `submit` 的 `--body` 是 `{items: [{ref, base, choice?, note?}]}`。`title`、`asker` 與頻道由 Angareion 從匯總補上；body 裡其他的鍵、或 `items` 是空的 → exit 1。
+  - **`base` 必給**：從 `decision list --json` 的 `version` 取——你看到的那一版，不是送出當下的版本。CLI 不替你填，否則題目在作答之後被改過，答案會默默套到新版本上。
+  - `choice` 與 `note` 至少要有一個；`choice` 是 base 那一版的選項 key；`note` 是 1～4000 字元。只給 `note` 是合法的（「都不對」或只寫文字）。
+- `--channel` 不給時，`list` 與 `submit` 的範圍是所有已登記的頻道；`submit` 的 `ref` 在範圍內找不到 → exit 1。
+
+### 寫入前的檢查與結束碼
+
+- 寫入的 action 先同步該頻道的 log 快取，用目前的匯總檢查前置條件：題目不存在（`unknown_ref`）、已經結束（`closed_ref`）、不是出題者（`not_owner`）、不是作答者（`not_answerer`）、`base` 不是目前版本（`stale_base`）、答案不合規格（`bad_item`）。不符 → exit 1，**什麼都沒送**，stderr 列出 `ref` 與診斷碼。
+- 預檢只是提早擋下；最終的判定是匯總，因為兩個寫入者之間有競態。
+- 結束碼同其他指令：0 成功；1 用法、輸入或前置條件錯（保證什麼都沒送）；2 後端、網路或設定錯（**可能已送出一部分**，見下面 submit 的部分失敗）。
+- 寫入和讀取都**不動游標**，跟 `log` 一樣。
+
+### submit：分組、分塊、重跑
+
+- 已答的題按（頻道, 提問者）分組，每組至少一則；每一則的 `to` 與 `mentions` 都是提問者，`channel` 是提問頻道。這幾則就是「答案回到提問頻道並 mention 提問者」。
+- 一則超過 65536 字元（含 front matter，以字元計）就依 (`asked_at`, `ref`) 分塊，每一塊各自完整。
+- 整批在送出前全部組好並通過讀回檢查；任何一則組不出來 → exit 1，什麼都沒送。
+- 第 k 則送出失敗 → 立刻停，不送後面的；stdout 是前 k−1 則的 id，stderr 說明哪一則失敗，exit 2。**原樣重跑同一個指令**：已被接受的題照「重跑略過」不再送（stderr 印「已送出，略過」），只送剩下的。
+- 重跑略過只比四個值：`from`（＝我）、`base`、`choice`、`note`（缺省與 `null` 相等）。任何一個不同就不略過，照其餘的前置條件判（通常是 `closed_ref`，exit 1）。
+- 同一個 `ref` 在同一則輸入裡出現兩次 → `duplicate_ref`，exit 1，什麼都不送；先驗這條，即使全部已經送過。
+- 沒有可送的（全部略過）→ exit 0、stdout 空、stderr 一行說明。
+
+### snapshot（自動，不用管）
+
+- 出題者的 `ask`、`update`、`withdraw` 寫成功之後，若它在目前有效 snapshot 之後的相關紀錄已經 200 則以上，會再寫一則 snapshot（`to`＝自己）。自動寫失敗只在 stderr 警告，結束碼與 stdout 不變（原本那筆已經寫成功）。
+- snapshot 只是加速：壞掉、或寫完之後又有晚到紀錄使它過期的 snapshot，會被略過，退回前一則有效的或從頭匯總，結果一樣。
+- `list --all` 與 `submit` 的規劃一律從頭完整匯總，不用 snapshot（所以已結束題目的答案與撤回理由，永遠查得到）。
+- 手動 `snapshot --channel <ch>` 不看門檻；沒有可涵蓋的（紀錄都還在 60 秒的穩定窗內）→ exit 0、stdout 空。
+
+### list 與 `--json`
+
+`list` 預設只列 open 的題目。`--all` 列出本機鏡像裡該頻道的**全部歷史**（open、answered、withdrawn），一律從頭匯總。`--json` 的形狀就是 App 的契約：
+
+```json
+{
+  "decisions": [
+    {"id": "<題目 id>", "channel": "…", "asker": "…", "answerer": "…",
+     "status": "open|answered|withdrawn", "version": "<版本 id>", "revisions": 1,
+     "title": "…", "background": "…", "body": "…",
+     "options": [{"key": "A", "text": "…"}], "recommended": "A", "reason": "…",
+     "asked_at": "<後端時刻>", "updated_at": "<後端時刻>",
+     "submitted": {"record": "<submit id>", "from": "…", "base": "<id>", "choice": "A", "note": null, "submitted_at": "<後端時刻>"},
+     "withdrawn": {"record": "<id>", "reason": "…"}}
+  ],
+  "ignored": [{"record": "<訊息 id>", "channel": "…", "op": "submit",
+               "ref": "<題目 id 或 null>", "item": 0, "code": "stale_base"}]
+}
+```
+
+- `submitted`、`withdrawn` 沒有值時是 `null`；`submitted.choice`、`submitted.note` 沒給時是 `null`。
+- `ignored` 每一筆是一個不被接受的單位：整則不接受時 `item` 是 `null`；submit 的某一項不接受時，每項各一筆，`item` 是它在 `items` 的索引（從 0 起）。讀不出 `ref` 時是 `null`。
+- 預設 `list` 的 `ignored` 只涵蓋 snapshot 之後的紀錄與壞掉的 snapshot 本身；要看全部用 `--all`。
+- 排序是 `(asked_at, channel, id)`，由舊到新。文字模式每題一塊；有 `ignored` 時在 stderr 印一行總數（明細用 `--json`）。
+- **被拒的紀錄留在後端**（不能刪也不能改），只會出現在 `ignored`，留給人追查。
+
+### 權限（只防誤用，不防冒名）
+
+| 動作 | 誰可以 | 靠什麼 |
+|---|---|---|
+| 出題 | 任何身分（「只有 PMO 出題」由 App 端過濾，Angareion 不守） | — |
+| 更新、撤回 | 只有出題者 | 匯總規則＋CLI 預檢 |
+| 送出答案 | 只有那題**目前的**作答者 | 匯總規則＋CLI 預檢 |
+| snapshot | 只有該提問者 | 寫的時候只能是提問者自己 |
+
+Angareion 不做身分認證（spec「訊息格式」：任何人可以用任何名字送），所以這些權限只擋誤用，例如別的 AI 在頻道看到題目、自作主張去作答。冒名的紀錄留在後端，匯總時略過。
+
+### 給 App 寫 submit 的人（R-A3）
+
+App 的寫者只在使用者按「送出」時寫 `submit`；不寫 `ask`、`update`、`withdraw`、`snapshot`，也不編輯或刪除任何訊息。寫出的紀錄照下面的格式：
+
+- **front matter**：`datatype: decision`、`from`＝作答者（App 的固定 AI 名）、`channel`＝提問頻道、`to`＝提問者、`mentions: [提問者]`。
+- **內文是 YAML，不是 JSON**：`decision: 1`、`op: submit`、`asker`（提問者）、`items`。用 `yaml.safe_dump(…, allow_unicode=True, sort_keys=False)` 寫出。**不要用 `json.dumps` 的預設 `ensure_ascii=True`**：含 emoji 的字串經 PyYAML 讀回會變成兩個 surrogate 字元，整則會被判 `bad_payload`（寫入端 `decision` 也會 exit 1 拒絕，什麼都不送）。含非 BMP 字元（emoji）請寫 YAML，或用 `json.dumps(…, ensure_ascii=False)`。寫出後用 `yaml.safe_load` 讀回驗證，含 emoji、tab、`\u0007`、多行 `note` 的案例，讀回的值要和寫入前相同。另外，字面寫在 YAML 裡的 NEL（U+0085）讀回時會被折成空白（PyYAML 把它當換行），`--body` 裡的 ask／update 會寫出空白，`withdraw --reason` 這類字串則被寫入端拒絕（exit 1，什麼都不送）；改用 `\u0085` 跳脫也一樣會被拒，所以內文請不要放 NEL。
+- **每一項**：`ref`（題目 id）、`base`（作答當時 `list --json` 給的 `version`，不是送出當下的）、`title`（抄一份給人看，匯總不當依據）、`choice`（base 那一版的選項 key，可省）、`note`（1～4000 字元，可省）。`choice` 與 `note` 至少要有一個；`choice: null` 等同沒給。
+- **分組與分塊**：只放已答的題（「選了又取消」的不放，維持 open）；按（頻道, 提問者）分組，每組一則或多則（超過 65536 字元就分塊）。
+- **送出之前** 先看 `decision list --all --json`，已被接受的同一答案會被略過；寄件匣重送是安全的（同一題第二次被接受的答案判 `closed_ref`，不會產生第二個答案）。
+- **送出之後** 照 `decision list --json` 顯示結果，**不能假設寫出就等於被接受**：寫錯的項只會進 `ignored`（例如 `stale_base`、`bad_item`）。
+- **草稿不寫進 Angareion**：還沒送出的選擇只存在 App 本地。草稿要記下作答當時的 `version` 當 `base`；題目的 `version` 變了（被 update 過），要讓人重看那一題，不能偷換成新版本；題目變成 answered／withdrawn，丟掉那一題的草稿。
+
+### 給 PMO 的
+
+- 出題、更新、撤回只用 `decision ask`、`update`、`withdraw`；`answerer` 填指定的名字。
+- 收到 `submit` 之後，以 `decision list --all --json` 確認哪幾項被接受，再照答案行動；不要只依 `submit` 的原文行動，因為可能有 `stale_base` 或 `bad_item`。
+- 放太久的題目自己用 `update` 或 `withdraw` 整理；Angareion 不會自動過期。
+- 待決不叫醒（poke）任何人。PMO 不經 sidecar、自己會 `wait` 的話，`submit` 會讓它的 `wait` 命中。
+
+### 已知限制
+
+- 後端上的紀錄被人繞過 Angareion 改過時，匯總照新內容算（和 `log` 同類，寫在 log 的已知限制裡）。
+- 後端沒給的紀錄無從得知；之後出現了，重算就會修正。
+- snapshot 的墓碑（`closed`）超過上限（約 2000 題以上）時寫不出來；到那時要另開設計，不會用丟掉舊墓碑的方式擠進去（那會讓已結束的題目復活）。
+- 本文件的寫法是 v1 的契約；多題一起問時一題一則 `ask`，不做一則多題。
 
 ## 設定與 token
 

@@ -27,6 +27,7 @@ from angareion.channel_config import (
     ChannelStore,
 )
 from angareion.client import POLL_INTERVAL_SECONDS, Angareion
+from angareion.decision_cli import cmd_decision
 from angareion.config import (
     Config,
     ConfigError,
@@ -726,6 +727,44 @@ def build_parser() -> argparse.ArgumentParser:
     p_log.add_argument("--limit", type=int, metavar="N",
                        help="Keep the last N after sorting.")
     p_log.add_argument("--json", action="store_true", help="Print a JSON array.")
+
+    p_decision = subparsers.add_parser(
+        "decision",
+        help="Pending decisions (datatype: decision): ask, update, withdraw, submit, list, snapshot.",
+    )
+    decision_sub = p_decision.add_subparsers(dest="decision_action", metavar="ACTION")
+    p_ask = decision_sub.add_parser("ask", help="Post a new question; prints its id (the decision id).")
+    p_ask.add_argument("--channel", required=True, help="Channel to ask in.")
+    p_ask.add_argument("--body", metavar="YAML",
+                       help="The question fields as YAML (answerer, title, background, body, options, "
+                            "recommended, reason); '-' reads stdin. Required.")
+    p_update = decision_sub.add_parser("update", help="Replace the fields of an open question; prints the record id.")
+    p_update.add_argument("--channel", required=True, help="Channel the question is in.")
+    p_update.add_argument("--ref", required=True, metavar="ULID", help="The question's id.")
+    p_update.add_argument("--body", metavar="YAML",
+                          help="All the question fields again, as YAML; '-' reads stdin. Required.")
+    p_withdraw = decision_sub.add_parser("withdraw", help="Withdraw an open question; prints the record id.")
+    p_withdraw.add_argument("--channel", required=True, help="Channel the question is in.")
+    p_withdraw.add_argument("--ref", required=True, metavar="ULID", help="The question's id.")
+    p_withdraw.add_argument("--reason", metavar="TEXT", help="Why it is withdrawn (optional).")
+    p_submit = decision_sub.add_parser(
+        "submit",
+        help="Answer open questions; prints one record id per line (only the answers you give are sent).",
+    )
+    p_submit.add_argument("--channel", action="append", default=[], metavar="CH",
+                          help="Channel to submit in (repeatable); default: every registered channel.")
+    p_submit.add_argument("--body", metavar="YAML",
+                          help="{items: [{ref, base, choice?, note?}]} as YAML; '-' reads stdin. Required. "
+                               "base is the version you answered (from `decision list --json`).")
+    p_list = decision_sub.add_parser("list", help="Print the state of the questions (open only, unless --all).")
+    p_list.add_argument("--channel", action="append", default=[], metavar="CH",
+                        help="Channel to list (repeatable); default: every registered channel.")
+    p_list.add_argument("--all", action="store_true",
+                        help="Also answered and withdrawn questions, from the whole channel history.")
+    p_list.add_argument("--json", action="store_true",
+                        help="Print {decisions, ignored} as JSON (the shape the App reads).")
+    p_snapshot = decision_sub.add_parser("snapshot", help="Write a snapshot of the asker's open questions; prints its id.")
+    p_snapshot.add_argument("--channel", required=True, help="Channel to snapshot.")
     return parser
 
 
@@ -762,6 +801,12 @@ def main(
         sys.stderr.write(
             "Error: channel needs an action; try 'angareion channel create <name>' "
             "or 'angareion channel delete <name>'.\n"
+        )
+        return EXIT_USAGE
+    if args.command == "decision" and args.decision_action is None:
+        sys.stderr.write(
+            "Error: decision needs an action; try 'angareion decision list' "
+            "(ask, update, withdraw, submit, list, snapshot).\n"
         )
         return EXIT_USAGE
 
@@ -831,6 +876,8 @@ def main(
             return cmd_read(args, config, app, token)
         if args.command == "log":
             return cmd_log(args, config, app, token)
+        if args.command == "decision":
+            return cmd_decision(args, config, app, token)
         parser.print_help(sys.stderr)
         return EXIT_USAGE
     except ChannelNotFoundError as e:
