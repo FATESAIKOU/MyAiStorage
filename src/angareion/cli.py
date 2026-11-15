@@ -38,6 +38,7 @@ from angareion.config import (
 )
 from angareion.github import HttpTransport, GitHubIssuesBackend
 from angareion.messages import (
+    DEFAULT_DATATYPE,
     Message,
     MessageValidationError,
     is_ulid,
@@ -142,6 +143,8 @@ def _format_message(message: Message) -> str:
         header += f" (received {received_at})"
     header += f" <{message.from_}> channel: {message.channel}"
     lines = [header]
+    if message.datatype != DEFAULT_DATATYPE:
+        lines.append(f"  datatype: {message.datatype}")
     if message.mentions:
         lines.append("  mentions: " + ", ".join(message.mentions))
     if message.in_reply_to:

@@ -33,6 +33,18 @@ def _read(path: Path) -> Message:
     return msg
 
 
+def _fields(msg: Message) -> dict:
+    """`message_to_dict` without `datatype`, which the pinned expectations predate (#468).
+
+    Every message in these vectors is an ordinary one, so the key is checked to
+    read as `message` and then left out of the comparison; the pinned files
+    themselves are not edited (PINNED.md).
+    """
+    data = message_to_dict(msg)
+    assert data.pop("datatype") == "message"
+    return data
+
+
 def test_every_expected_message_has_a_file_in_both_directories():
     for d in DIRS:
         assert sorted(p.name for p in (VECTORS / d).glob("*.md")) == sorted(EXPECTED["messages"])
@@ -40,7 +52,7 @@ def test_every_expected_message_has_a_file_in_both_directories():
 
 @pytest.mark.parametrize(("directory", "name"), CASES)
 def test_parse_message_reads_the_fields_in_expected_json(directory, name):
-    got = message_to_dict(_read(VECTORS / directory / name))
+    got = _fields(_read(VECTORS / directory / name))
     assert got == EXPECTED["messages"][name]
 
 
@@ -62,7 +74,7 @@ def _cannot_read_cases():
 def test_messages_the_old_reader_could_not_read_now_read_back(item):
     msg = _read(CANNOT_READ / "python-written" / item["file"])
     want = {k: v for k, v in item.items() if k != "file"}
-    assert message_to_dict(msg) == want
+    assert _fields(msg) == want
 
 
 def _message_with_inline(inline: str) -> Message:
@@ -169,7 +181,7 @@ def test_an_old_reader_that_ignores_mentions_and_in_reply_to_still_reads_a_ts_me
     name = "01-mentions-attachments-reply.md"
     msg = _read(VECTORS / "ts-written" / name)
     want = dict(EXPECTED["messages"][name], mentions=[], in_reply_to=None)
-    assert message_to_dict(msg) == want
+    assert _fields(msg) == want
 
 
 def test_an_unknown_top_level_key_does_not_hurt_the_known_fields():
@@ -178,7 +190,7 @@ def test_an_unknown_top_level_key_does_not_hurt_the_known_fields():
     text = text.replace("\nchannel:", "\nfuture_key: [1, 2]\nchannel:", 1)
     msg = parse_message(text)
     assert msg is not None
-    assert message_to_dict(msg) == EXPECTED["messages"][name]
+    assert _fields(msg) == EXPECTED["messages"][name]
 
 
 LOCAL = VECTORS / "local-additions"
@@ -193,7 +205,7 @@ def test_a_crlf_message_reads_with_lf_content_like_ts():
     msg = parse_message(raw.decode("utf-8"))
     assert msg is not None
     want = json.loads((LOCAL / "99-crlf-content.expected.json").read_text(encoding="utf-8"))
-    assert message_to_dict(msg) == want
+    assert _fields(msg) == want
     assert msg.content == "body\nmore\n"
 
 
@@ -212,7 +224,7 @@ def test_a_lone_cr_between_front_matter_fields_is_a_line_break_like_yaml():
     raw, msg, want = _local("98-lone-cr-front-matter")
     assert b"urgency: 5\rattachments: []" in raw
     assert b"urgency: 5\r\n" not in raw
-    assert message_to_dict(msg) == want
+    assert _fields(msg) == want
     assert msg.urgency == 5
     assert msg.attachments == []
 
@@ -223,7 +235,7 @@ def test_a_lone_cr_inside_a_double_quoted_scalar_folds_to_a_space():
     # break, so `"a\rb.md"` reads as `a b.md` (#238).
     raw, msg, want = _local("98-lone-cr-in-quoted-string")
     assert b'name: "a\rb.md"' in raw
-    assert message_to_dict(msg) == want
+    assert _fields(msg) == want
     assert msg.attachments == [{"name": "a b.md", "inline": "hi"}]
 
 

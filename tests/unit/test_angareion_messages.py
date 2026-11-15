@@ -106,6 +106,7 @@ def test_message_to_dict():
         "attachments": [],
         "mentions": [],
         "in_reply_to": None,
+        "datatype": "message",
     }
 
 

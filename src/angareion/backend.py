@@ -1,4 +1,4 @@
-"""ChannelBackend protocol (create/close/send/check/read), targets, cursors, fake backend.
+"""ChannelBackend protocol (create/close/send/check/read), EnumerableBackend protocol (enumerate_conditional), targets, cursors, fake backend.
 
 v5: a channel is a name that a config file points at a backend entity; the
 backend never stores members. `create_channel` opens the entity, `close_channel`
@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
+from angareion import messages as _messages
 from angareion.config import identity_slug
 from angareion.messages import Message
 
@@ -301,10 +302,45 @@ class ChannelBackend(Protocol):
         ...
 
 
+@runtime_checkable
+class EnumerableBackend(Protocol):
+    """Read-only listing of a channel's whole history, for the local log mirror (#468).
+
+    Kept apart from `ChannelBackend` (which stays six operations): listing is
+    what `log` and the log mirror need, not what posting and reading need.
+    Returns `(items, new_etag, not_modified)`, items as `(id, created_at, parsed)`
+    in the backend's arrival order; `parsed` is None for a comment that is not a message.
+    """
+
+    def enumerate_conditional(
+        self,
+        entity: Entity,
+        *,
+        since: str | None = None,
+        etag: Any = None,
+    ) -> tuple[list[tuple[Any, str, Message | None]], Any, bool]:
+        ...
+
+
+def _silent_to_its_writer(message: Message, reader: str | None) -> bool:
+    """Whether a message of a datatype its writer does not want back is the reader's own.
+
+    The table is read from `messages` on every call (not copied in here), so the
+    delivery layer names no datatype itself (#468, C-3).
+    """
+    return (
+        reader is not None
+        and message.datatype in _messages.SELF_SILENT_DATATYPES
+        and message.from_ == reader
+    )
+
+
 def recipient_matches(message: Message, recipient: str | None) -> bool:
     """Whether a message counts as "to me": addressed to me, a broadcast, or it mentions me."""
     if recipient is None:
         return True
+    if _silent_to_its_writer(message, recipient):
+        return False
     return message.to is None or message.to == recipient or recipient in message.mentions
 
 
@@ -312,6 +348,8 @@ def mention_matches(message: Message, mentioned: str | None) -> bool:
     """Whether a message counts as "@ me": addressed to me or it mentions me; a broadcast does not."""
     if mentioned is None:
         return True
+    if _silent_to_its_writer(message, mentioned):
+        return False
     return message.to == mentioned or mentioned in message.mentions
 
 

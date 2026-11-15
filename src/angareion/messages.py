@@ -1,4 +1,4 @@
-"""Six-field message model, front matter serialization, parsing, and validation (D3/v5).
+"""Message model (six fields plus `datatype`, #468), front matter serialization, parsing, and validation (D3/v5).
 
 v5 speaks AI names, not GitHub shapes: `from`, `to` and the personal identity
 are strings like `mylinuxpool-impl-w1-1` or `mypmo-pm-m1`. The grammar is
@@ -31,6 +31,16 @@ from ainame import parse as parse_ainame
 
 MAX_MESSAGE_LENGTH = 65536
 ANGAREION_VERSION = 1
+
+# What a message is for (design 468 §4.1). A message without the field, or with a
+# value that is not a string or not in this grammar, reads as `message`; a legal
+# value this reader does not know is kept as it is and delivered like any message.
+DEFAULT_DATATYPE = "message"
+DATATYPE_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
+# Datatypes whose writer does not want them back: `read`/`wait` skip a message
+# of one of these when its `from` is the reader (design 468 §13.1, C-3). The
+# backend looks this table up on each call, so it names no datatype itself.
+SELF_SILENT_DATATYPES = frozenset({"decision"})
 
 # The old (pre-#97) address shape: `<repo name>-(pm|arch|impl|test)[-<id>]`,
 # case-sensitive, with at most one optional id segment. It is only used on the
@@ -183,6 +193,7 @@ class Message:
     angareion: int = ANGAREION_VERSION
     mentions: list[str] = field(default_factory=list)
     in_reply_to: str | None = None
+    datatype: str = DEFAULT_DATATYPE
 
     def validate(self, *, allow_legacy_addresses: bool = False) -> None:
         """Validate all fields and metadata.
@@ -216,6 +227,11 @@ class Message:
                 f"in_reply_to must be a 26-character ULID (the id of the message replied to), got {self.in_reply_to!r}"
             )
 
+        if not isinstance(self.datatype, str) or DATATYPE_RE.fullmatch(self.datatype) is None:
+            raise MessageValidationError(
+                f"datatype must match {DATATYPE_RE.pattern} (lowercase, at most 32 characters), got {self.datatype!r}"
+            )
+
         validate_channel_name(self.channel)
 
         if not isinstance(self.urgency, int) or isinstance(self.urgency, bool):
@@ -245,6 +261,7 @@ def message_to_dict(message: Message) -> dict[str, Any]:
         "attachments": message.attachments,
         "mentions": message.mentions,
         "in_reply_to": message.in_reply_to,
+        "datatype": message.datatype,
     }
 
 
@@ -347,6 +364,8 @@ def serialize_message(msg: Message) -> str:
         raise MessageValidationError(
             f"Refusing to send: the message cannot be read back from what would be sent ({e})"
         ) from e
+    # `datatype` is not written yet (#468 PR-1: the writer side is PR-2), so a
+    # message of any other datatype reads back as `message` and is refused here.
     # The TS writer sends content as it is (`serialize`, messages.ts:208) and
     # every reader turns `\r\n` into `\n`, so that is what reads back (#232).
     before, after = message_to_dict(msg), message_to_dict(back)
@@ -383,6 +402,16 @@ def _read_mentions(value: Any) -> list[str]:
 def _read_in_reply_to(value: Any) -> str | None:
     """`in_reply_to` on the read side: a value that is not a ULID reads as unset."""
     return value if is_ulid(value) else None
+
+
+def _read_datatype(value: Any) -> str:
+    """`datatype` on the read side: wide. Missing, not a string, or outside the grammar reads as `message`.
+
+    A legal value this reader does not know (say `poll`) is kept as it is.
+    """
+    if isinstance(value, str) and DATATYPE_RE.fullmatch(value):
+        return value
+    return DEFAULT_DATATYPE
 
 
 def parse_message(text: str, *, strict: bool = False) -> Message | None:
@@ -427,6 +456,7 @@ def parse_message(text: str, *, strict: bool = False) -> Message | None:
             content=body,
             mentions=_read_mentions(data.get("mentions")),
             in_reply_to=_read_in_reply_to(data.get("in_reply_to")),
+            datatype=_read_datatype(data.get("datatype")),
         )
         msg.validate(allow_legacy_addresses=True)
         return msg

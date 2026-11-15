@@ -2,7 +2,7 @@
 
 維護者：專案架構師。每一次改到模組切割、依賴方向或公開介面，都和引起它的設計文件放在同一個 PR 更新（AGENTS.md「專案架構師可以 commit 的路徑」）。
 
-- **範圍**：目前收錄 `src/agora` 與 `src/pmo`（PMO skill 見下面「PMO skill」一節）。同一個 repo 裡的 `aicomm`、`ainame`、`angareion`、`atelier`（`pyproject.toml` 的 `[project.scripts]`）還沒收錄，之後再補。
+- **範圍**：目前收錄 `src/agora` 與 `src/pmo`（PMO skill 見下面「PMO skill」一節）。同一個 repo 裡的 `aicomm`、`ainame`、`atelier`（`pyproject.toml` 的 `[project.scripts]`）還沒收錄，之後再補；`angareion` 只收錄待決（#468）那一節，見下面「angareion」。
 - **基準**：#342 的 branch fe89ab6（#342 實作，加上 main f194fd7，含 #340、#341、#343）。行數都是實數。`src/pmo` 的基準是 main 495cec0（見該節）。
 
 ## 模組地圖
@@ -154,3 +154,13 @@ schema／I/O：_io → errors；_jsonutil → errors；_lock → errors；paths 
 
 - 不 import `agora`、`atelier`、`aicomm`、`angareion` 的 Python 模組，也不依賴 MyPMO 的程式（D-16）；`config`／`runtime`／`dispatch` 用到的 `ainame` 是同一個 distribution 的核心套件，也在 D-16 允許的範圍。
 - 狀態檔的讀寫只在各自的 schema 模組（`ledger`／`teamstate`／`tickstate`）；鎖只用 `_lock.path_lock`；`pmo` 的公開介面是指令，模組不留別名（decisions 的「pmo 的通則」）。例外是 `handoff.close` 與 `wake._write_wake` 自己拿 `tick.json.lock` 做鎖內 read-modify-write（收斂到 `tickstate` 是待決的 P-14）。
+
+## angareion（#468；待決 datatype，PR-1 已實作的部分）
+
+設計全文在 `openspec/changes/angareion-pending-decision/design.md`（§19 是分 PR 切法）；決定見 decisions D-30。本節只寫 PR-1 已經在 `src/angareion` 實作的部分。寫入端（`send` 寫 `datatype`）、匯總與 `angareion decision …` 指令還沒有，要到 PR-2～PR-4 才會有。
+
+- **`messages.py`**：`Message.datatype`（預設 `message`）。讀取寬鬆：沒有這個鍵、不是字串、或不符 `[a-z][a-z0-9-]{0,31}` 的值都讀成 `message`；合法但不認得的值（例如 `poll`）照原字串保留。寫入嚴格：`Message.validate` 拒絕不符文法的值。常數 `DEFAULT_DATATYPE`、`SELF_SILENT_DATATYPES`（`frozenset({"decision"})`，「寫的人自己不收」的 datatype 表，格式層擁有）。`message_to_dict` 多了 `"datatype"` 鍵，所以 `read --json`、`log --json` 也多這一鍵。PR-1 的 `serialize_message` 還不寫 `datatype`，所以非預設值會在讀回比對時被拒送（因此 PR-4 要等 PR-2 先合，設計 §19）。
+- **`backend.py`**：`recipient_matches`、`mention_matches` 多一條：讀者自己寫的、datatype 在 `messages.SELF_SILENT_DATATYPES` 裡的訊息不算寄給讀者。表在每次呼叫時從 `messages` 模組讀，遞送層本身不認得任何 datatype 的名字。`ChannelBackend` 的六個方法不變。新增協定 `EnumerableBackend`（`@runtime_checkable`，只有 `enumerate_conditional`），`FakeBackend` 與 `GitHubIssuesBackend` 都符合。
+- **`log_cache.py`**：`LOG_CACHE_VERSION` 是 2；版本 1 的快取整檔重建。`LogCache.sync` 的 `backend` 型別標成 `EnumerableBackend`。
+- **`cli.py`**：`_format_message` 在 datatype 不是 `message` 時多印一行 `  datatype: …`。
+- **依賴方向**：不變（`backend → messages`；`log_cache → {backend, messages}`）。`decision.py`、`decision_cli.py` 還沒有，它們要在 PR-3、PR-4 加入，依賴方向照設計 §13.2。

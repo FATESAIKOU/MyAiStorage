@@ -66,9 +66,22 @@ def test_bad_file_treated_as_empty(tmp_path):
     # corrupt
     f.write_text("{not json", encoding="utf-8")
     assert cache.load("general", {"repo": "r", "issue": 1}) is None
-    # version mismatch
-    f.write_text(json.dumps({"version": 999, "channel": "general", "entity": {"repo": "r", "issue": 1}, "messages": []}), encoding="utf-8")
-    assert cache.load("general", {"repo": "r", "issue": 1}) is None
+    # version mismatch: every required field is present, so only the version check can refuse it
+    for version in (1, 999):
+        f.write_text(
+            json.dumps(
+                {
+                    "version": version,
+                    "channel": "general",
+                    "entity": {"repo": "r", "issue": 1},
+                    "last_comment_id": None,
+                    "last_created_at": None,
+                    "messages": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert cache.load("general", {"repo": "r", "issue": 1}) is None, version
 
 
 def test_entity_mismatch_treated_as_empty(tmp_path):
