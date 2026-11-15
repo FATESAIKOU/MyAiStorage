@@ -4,7 +4,7 @@
 
     agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync | --strict] [--json]
     agora import   session --external-session-id <id> --agent opencode|claude [--header-file F] [--header K=V]...
-    agora merge    session <id>, <id>, ... [--header-file F] [--header K=V]...
+    agora merge    session <id> ... [--header-file F] [--header K=V]...
     agora continue session <id> --agent opencode|claude [--dir <dir>] [--fork] [--header-file F] [--header K=V]...
     agora delete   session <id> --yes [--force]
     agora edit     session <id> [--header-file F] [--header K=V]...
@@ -52,7 +52,7 @@ from agora.agents.base import (NO_REPLY, Agent, AgentError, Exported, Launch, co
 
 AGENTS = ("opencode", "claude", "agy", "codex")
 TYPES = ("session",)
-EXIT_INPUT = 1       # cannot be done: unknown id, nothing to import, too few ids, no --yes, has children
+EXIT_INPUT = 1       # cannot be done: unknown id, nothing to import, no ids, no --yes, has children
 EXIT_ERROR = 2       # header, Drive, agent or unexpected error (argparse usage errors are 2 too)
 EXIT_IN_OUTBOX = 3   # saved locally, not on Drive yet (N13)
 EXIT_LOCKED = 4      # this Session is being continued by another run (#54); not an input error
@@ -824,14 +824,25 @@ def cmd_merge(args, paths: store.Paths) -> int:
         # mistaken for a model answering badly and retried three times.
         raise InputError(AGY_READ_ONLY)
     ids = _split_ids(args.ids)
-    if len(ids) < 2:
-        raise InputError("merge 至少要兩個 Session")
+    if not ids:
+        raise InputError("merge 要給 Session（一個或更多）")
     if len({_ulid_of(i) for i in ids}) < len(ids):
         raise InputError("merge 的 Session 重複了")
     _refuse_agy_source(store.Index(paths), ids)     # a local agy source: no sync needed
     updates = _updates(args)
     index = _sync_for(paths, ids)
     _refuse_agy_source(index, ids)                  # a source that was only on Drive
+    if len(ids) == 1:
+        # One source is a merge of that one (#462 C-1). A summary is the outcome of a
+        # merge, not something to re-summarize: attach it with continue, or merge the
+        # session it was written from. Two or more sources stay as they were, where a
+        # merge among them is reused as is. Read after the sync, so a session only on
+        # Drive is asked about too.
+        one = f"agora:{_ulid_of(ids[0])}"
+        if h.agora_of(_header_for(index, one)).get("relation") == "merge":
+            raise InputError(f"{one} 已經是要約（relation: merge）；"
+                             f"要接它請用 `agora continue session {one} --agent …`，"
+                             "要重新沉澱原本那段請 merge 原本的 Session")
     for session_id in ids:      # P2: all of them first - writing a summary costs an AI
         _need_in_cloud(index, f"agora:{_ulid_of(session_id)}")   # call, and none should be
     parents, parent_headers, sections, models = [], [], [], set()

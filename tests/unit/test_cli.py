@@ -1943,3 +1943,241 @@ def test_a_delete_with_nothing_queued_does_not_blame_the_trash_when_the_uploader
     assert code == 3, err
     assert "背景上傳啟動失敗，outbox 的上傳要等之後的指令" in err
     assert "垃圾桶" not in err
+
+
+# --- #462 C-1～C-6: one Session is a merge of it (design-notes/462 §10.3) -----------
+#
+# Direction B for 沉澱: the session a role was on last time is written into one
+# summary with `merge session <S>`, then attached. The contract is design-notes/462
+# §10.3; the names here say which C-row they hold, so a red one names the row.
+
+def test_c1_one_session_makes_a_merge_with_one_section(env, capsys):
+    """C-1: one id, one summarize call, a new merge whose only source is S."""
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    assert not list((paths.state / "merge-sections").glob("*.json"))  # nothing paid for yet
+
+    code, c, err = run(capsys, "merge", "session", a, "--agent", "opencode")
+
+    assert code == 0, err
+    assert c.startswith("agora:") and c != a and len(env.prompts) == 1
+    hdr = store.Index(paths).header(c.split(":")[1])
+    assert hdr["agora"]["relation"] == "merge"
+    assert [p["id"] for p in hdr["agora"]["parents"]] == [a]
+    assert hdr["title"] == "merge: 把 CSV 轉成 Markdown 表格"
+    _, raw, _ = run(capsys, "show", "session", c, "--raw")
+    sections = json.loads(raw)["sections"]
+    assert [sec["id"] for sec in sections] == [a] and len(sections) == 1
+    _, out, _ = run(capsys, "show", "session", c)
+    assert out.count("### 「") == 1
+    assert f"### 「把 CSV 轉成 Markdown 表格」（原本是 opencode）\n`{a}`" in out
+
+
+def test_c1a_a_paid_for_summary_is_reused_without_ai(env, capsys):
+    """C-1 (a): the merge-sections cache already has S - no AI call the second time."""
+    _, a, _ = _import(capsys)
+    run(capsys, "merge", "session", a, "--agent", "opencode")
+
+    code, c, err = run(capsys, "merge", "session", a, "--agent", "opencode")
+
+    assert code == 0 and c.startswith("agora:") and len(env.prompts) == 1
+    assert "沿用" in err
+
+
+def test_c1b_two_bad_answers_then_a_good_one_merges(env, capsys):
+    """C-1 (b): two unqualified answers, the third is fine - 3 calls, exit 0."""
+    _, a, _ = _import(capsys)
+    good = json.dumps({"purpose": "p", "decisions": [], "progress": "q", "open_questions": []})
+    env.answers = ["不是 JSON", json.dumps({"purpose": "p"}), good]
+
+    code, c, err = run(capsys, "merge", "session", a, "--agent", "opencode")
+
+    assert code == 0, err
+    assert len(env.prompts) == 3 and c.startswith("agora:")
+
+
+def test_c1b_three_bad_answers_exit_2_and_save_nothing(env, capsys):
+    """C-1 (b): three unqualified answers - exit 2, and no Session is written."""
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    rows, queued = len(store.Index(paths).search([])), store.outbox_ulids(paths)
+    env.answers = ["{}", "{}", "{}"]
+
+    code, out, err = run(capsys, "merge", "session", a, "--agent", "opencode")
+
+    assert code == 2 and out == "" and "連續 3 次" in err
+    assert len(env.prompts) == 3
+    assert len(store.Index(paths).search([])) == rows and store.outbox_ulids(paths) == queued
+
+
+def test_c1c_an_upload_that_did_not_finish_exits_3(env, capsys, monkeypatch):
+    """C-1 (c): the summary is here but Drive did not take it - exit 3, C in the outbox."""
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")
+
+    code, out, err = run(capsys, "merge", "session", a, "--agent", "opencode")
+
+    assert code == cli.EXIT_IN_OUTBOX == 3 and "outbox" in err
+    assert out.startswith("agora:") and out.split(":")[1] in store.outbox_ulids(paths)
+
+
+def test_c1_one_source_that_is_already_a_summary_is_refused(env, capsys):
+    """C-1: the new refusal - a single source that is itself a merge. No AI, nothing
+    saved. Two sources may still include a summary (that behaviour is unchanged)."""
+    _, a, _ = _import(capsys)
+    _, c, _ = run(capsys, "merge", "session", a, "--agent", "opencode")
+    paths = store.Paths.from_env()
+    calls, rows, queued = len(env.prompts), len(store.Index(paths).search([])), store.outbox_ulids(paths)
+
+    code, out, err = run(capsys, "merge", "session", c, "--agent", "opencode")
+
+    assert code == 1 and out == "" and "已經是要約" in err and c in err
+    assert len(env.prompts) == calls
+    assert len(store.Index(paths).search([])) == rows and store.outbox_ulids(paths) == queued
+    code, again, err = run(capsys, "merge", "session", c, a, "--agent", "opencode")
+    assert code == 0 and again.startswith("agora:") and again != c, err
+
+
+def test_c1_merge_without_a_session_is_refused(env, capsys):
+    """C-1: no id at all is still a refusal (exit 1)."""
+    code, out, err = run(capsys, "merge", "session", "--agent", "opencode")
+
+    assert code == 1 and out == "" and "Session" in err and "要給" in err
+
+
+def test_c2_tags_are_set_and_the_summary_sorts_first(env, capsys):
+    """C-2: C carries exactly the tag that was asked for, and `--sort updated` puts C
+    before S for the role the next start looks up."""
+    _, a, _ = _import(capsys, "--header", "tags=[role:R]")
+    code, c, err = run(capsys, "merge", "session", a, "--agent", "opencode",
+                       "--header", "tags=[role:R]")
+    assert code == 0, err
+    assert store.Index(store.Paths.from_env()).header(c.split(":")[1])["tags"] == ["role:R"]
+
+    code, out, err = run(capsys, "search", "session", "--filter", "tags=role:R",
+                         "--sort", "updated", "--json", "--no-sync")
+
+    assert code == 0, err
+    assert [row["id"] for row in json.loads(out)] == [c, a]
+
+
+def test_c2_the_same_second_is_ordered_by_the_ulid(env, capsys, monkeypatch):
+    """C-2 (same second): `updated_at` only goes down to the second, so S and C share
+    it; C's ULID millisecond is plainly later, so C comes first on the ULID tie.
+    The clock moves 500 ms inside one second - the random tail never decides."""
+    monkeypatch.setenv("AGORA_NOW", "1763164800.2")
+    _, a, _ = _import(capsys, "--header", "tags=[role:R]")
+    monkeypatch.setenv("AGORA_NOW", "1763164800.7")
+
+    code, c, err = run(capsys, "merge", "session", a, "--agent", "opencode",
+                       "--header", "tags=[role:R]")
+    assert code == 0, err
+    index = store.Index(store.Paths.from_env())
+    ha, hc = index.header(a.split(":")[1]), index.header(c.split(":")[1])
+    assert h.agora_of(ha)["updated_at"] == h.agora_of(hc)["updated_at"]   # the same second
+    assert a.split(":")[1][:10] < c.split(":")[1][:10]                    # C's ms is later
+
+    code, out, err = run(capsys, "search", "session", "--filter", "tags=role:R",
+                         "--sort", "updated", "--json", "--no-sync")
+
+    assert code == 0, err
+    assert [row["id"] for row in json.loads(out)] == [c, a]
+
+
+def test_c3_the_source_header_and_outbox_stay_as_they_were(env, capsys):
+    """C-3: summarizing S does not touch S - same bytes, same header, no new version
+    of S waiting in the outbox (the premise: S was not queued to begin with)."""
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = a.split(":")[1]
+    md = paths.mirror / ulid / "session.md"
+    before_bytes, before_header = md.read_bytes(), store.Index(paths).header(ulid)
+    before_outbox = store.outbox_ulids(paths)
+    assert ulid not in before_outbox
+
+    code, c, err = run(capsys, "merge", "session", a, "--agent", "opencode")
+
+    assert code == 0, err
+    assert md.read_bytes() == before_bytes
+    assert store.Index(paths).header(ulid) == before_header
+    assert store.outbox_ulids(paths) == before_outbox
+
+
+def test_c4_continuing_a_one_source_merge_writes_back_into_it(env, capsys):
+    """C-4: C behaves like any other merge - continue writes into C itself, the
+    summary is what is loaded, `parents` is still [S], and S is untouched."""
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    source_md = paths.mirror / a.split(":")[1] / "session.md"
+    source_before = source_md.read_bytes()
+    _, c, _ = run(capsys, "merge", "session", a, "--agent", "opencode")
+
+    code, out, err = run(capsys, "continue", "session", c, "--agent", "opencode", "--dir", "/tmp",
+                         "--add-tag", "role:R")
+
+    assert code == 0 and out == c, err                       # the same Session, no new one
+    hdr = store.Index(paths).header(c.split(":")[1])
+    assert hdr["agora"]["relation"] == "continue"
+    assert "merge" not in hdr["agora"] and hdr.get("status") != "draft"
+    assert [p["id"] for p in hdr["agora"]["parents"]] == [a]
+    assert hdr["tags"] == ["role:R"]
+    loaded = env.sessions[env.launched[-1].agent_session_id]
+    assert loaded[0].startswith(cli.MERGE_NOTE.format(by="opencode/fake-model"))
+    assert loaded[1] == cli.MERGE_READY
+    assert source_md.read_bytes() == source_before
+
+
+def test_c5_a_source_of_a_one_source_merge_cannot_be_deleted(env, capsys):
+    """C-5: S has a child now, so delete refuses and names C; S is still here."""
+    _, a, _ = _import(capsys)
+    _, c, _ = run(capsys, "merge", "session", a, "--agent", "opencode")
+
+    code, out, err = run(capsys, "delete", "session", a, "--yes")
+
+    assert code == 1 and out == "" and c in err
+    assert (store.Paths.from_env().mirror / a.split(":")[1] / "session.md").exists()
+
+
+def test_c6_a_long_source_keeps_its_head_and_tail_and_is_paid_for_once(env, capsys):
+    """C-6: over 60,000 characters the summarizer gets the head, a note, and the
+    tail - and a re-run of the same one-source merge reuses that summary."""
+    env.sessions["ses_long"] = ["長" * 61000 + "結尾", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_long",
+                  "--agent", "opencode")
+    # the fake agent's default answer quotes the source, which is longer than a section
+    # may be; the cut is what this test is about, so answer with a short good one
+    env.answers = [json.dumps({"purpose": "長的那段", "decisions": [], "progress": "好",
+                              "open_questions": []}, ensure_ascii=False)]
+
+    code, c, err = run(capsys, "merge", "session", b, "--agent", "opencode")
+    assert code == 0, err
+    paths = store.Paths.from_env()
+    body = h.split_document((paths.mirror / b.split(":")[1] / "session.md").read_text())[1]
+    assert len(body) > cli.SOURCE_MAX == 60_000
+    half = cli.SOURCE_MAX // 2
+    cut = (f"{body[:half]}\n\n（中間省略 {len(body) - cli.SOURCE_MAX} 字；"
+           f"完整內容用 `agora show session {b}` 看）\n\n{body[-half:]}")
+    assert cut in env.prompts[-1][0]
+
+    code, c2, err = run(capsys, "merge", "session", b, "--agent", "opencode")
+
+    assert code == 0 and c2.startswith("agora:") and len(env.prompts) == 1
+    assert "沿用" in err
+
+
+def test_c1_a_source_only_on_drive_is_read_after_the_sync(env, capsys):
+    """C-1: the header is read *after* the sync. A session this machine has never
+    seen is found (merge works), and a summary among them is still refused by its
+    relation rather than reported as a missing id."""
+    _, a, _ = _import(capsys)
+    _, c, _ = run(capsys, "merge", "session", a, "--agent", "opencode")
+    paths = store.Paths.from_env()
+    shutil.rmtree(paths.cache)               # this machine forgot both: Drive still has them
+
+    code, again, err = run(capsys, "merge", "session", a, "--agent", "opencode")
+    assert code == 0 and again.startswith("agora:"), err
+
+    shutil.rmtree(paths.cache)
+    code, out, err = run(capsys, "merge", "session", c, "--agent", "opencode")
+    assert code == 1 and out == "" and "已經是要約" in err and "找不到" not in err
