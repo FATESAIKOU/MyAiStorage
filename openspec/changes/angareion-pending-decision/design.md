@@ -196,7 +196,7 @@ payload 放在內文而不是 front matter，有兩個原因：
 - **`submit.items[].title`**：只是抄一份給人看，匯總時不當依據。
 - **整則長度**：整則序列化文字（含 front matter）不得超過 `MAX_MESSAGE_LENGTH`，即 65536 字元（L-9）。
 - **讀取時**：
-  - 不認得的 `decision` 版本：整則紀錄略過，診斷 `unsupported_version`。
+  - 不認得的 `decision` 版本：整則紀錄略過，診斷 `unsupported_version`。內文讀得出 YAML mapping、但 `decision` 不是整數 1（含**沒有這個鍵**、不是整數）都算這一類：這個讀者看不懂，不斷定是寫壞了；兩者一樣是整則略過，只差診斷碼。讀不出 YAML 或不是 mapping 才是 `bad_payload`。
   - payload 裡多出來的鍵：略過不理。
   - submit 的某一項不合上面的答案規則：只略過那一項，診斷 `bad_item`（§6.2）。
 
@@ -300,6 +300,8 @@ items:
   - `ref` 讀不出來（例如 `bad_payload`）時是 `null`。
 - 不給 `--all` 時，`ignored` 只涵蓋實際被匯總的紀錄（snapshot 的 `through` 之後的，加上壞掉的 snapshot 本身）；要看全部用 `--all`。
 - 排序：`(asked_at, channel, id)`，由舊到新，跟 `log` 跨頻道的排序鍵同一套（`spec.md:312`）。
+  - `asked_at` 是後端給的原字串，照字串比，和 `log` 的實作相同（`log_query.py:127` 的 `(m.received_at or "", m.channel, m.id)`）。前提是同一個後端寫出的時刻格式一致（GitHub 一律 `…Z`）；混用 `Z` 和 `+00:00` 會排錯。將來的後端若格式不一，在後端層正規化，`log` 和待決一起改，不在 `decision.py` 另做一套。
+  - §7.4 算 cutoff 時則是把時刻**解析**成時間再比，不靠字串順序。
 - 文字模式：每題一塊，含狀態、題目、選項、推薦，已答的加答案。`ignored` 只在 stderr 印一行總數。
 
 ---
@@ -433,6 +435,7 @@ closed: [<題目 id>, …]     # 已結束（answered／withdrawn）題目的 id
 - 讀者手上本來就有頻道的完整鏡像（log 快取）。匯總時，從尾端往前找該提問者**最新一則有效的** snapshot。有效的條件：
   - payload 合法；
   - `from`＝`asker`；
+  - front matter 的 `to`＝`asker`（§4.3 表格的寫法；不符就是 `bad_snapshot`。寫者照 §4.3 就不會碰到；判無效只會退回前一則或從頭匯總，不會算錯。和 submit 整則檢查 `to` 是同一類格式檢查，§6.2）；
   - `through` 指向的紀錄在列表裡**恰好一則**（重複出現就判無效），而且排在這則 snapshot **之前**；
   - **列表中到達位置 ≤ `through` 的 decision 紀錄則數＝`covered`**。不相等代表 snapshot 寫出之後，`through` 之前又冒出（或少了）紀錄，這則 snapshot 不再等於前綴，判無效（診斷 `snapshot_stale`）。
 - 不必去後端額外找「最新 snapshot 的指標」。因為只能 append，也不能有可改動的指標。
@@ -465,8 +468,13 @@ closed: [<題目 id>, …]     # 已結束（answered／withdrawn）題目的 id
 
 在「只能依序讀回」的限制下，全新的讀者第一次還是要把整串讀一遍（log 快取的全量同步），snapshot 省不掉這一步。它省的是：
 
-1. 預設的 `list`（只看 open）、出題端（`ask`／`update`／`withdraw`）寫入前的預檢，匯總時不必從頭走過所有歷史；
+1. 預設的 `list`（只看 open）、出題端（`ask`／`update`／`withdraw`）寫入前的預檢，匯總時不必**套用** `through` 之前的紀錄（`FoldResult.folded` 只算 `through` 之後的，C-16(d)）；
 2. 很久以前的壞紀錄不再出現在預設 `list` 的 `ignored` 裡。
+
+**PR-3 的實作只省「套用」，不省「解析」**：`fold` 對鏡像裡每一則 decision 紀錄仍各做一次 YAML 解析（`decision.py` 的第一圈），因為每一則歸哪位提問者、哪一則是 snapshot，都要解析內文才知道；snapshot 只讓 `through` 之前的紀錄不進狀態轉移、不產生診斷。所以「匯總時間」仍隨整串的長度線性成長，只是常數變小。
+- 「不套用」的精確範圍：歸屬看得出來的紀錄（ask、submit 看 payload 的 `asker`；update、withdraw 看 `ref` 指向的題目）落在**它那位提問者**的 `through` 之前就不套用；解析不出來的紀錄，只有在頻道裡每位已知的提問者都用了 snapshot、而且位置在其中**最早**的 `through` 之前，才不列進 `ignored`。
+- 曾經做過「延後解析」（PR-3 第 1 輪），因為「同 id、內容讀回會變樣」的紀錄讓 `fold` 丟出未捕捉的錯，第 2 輪整段拿掉。
+- **什麼時候再做解析省略**：PR-4 合併之後，若量到預設 `list` 或出題端的預檢太慢（門檻由 PM 定），另開單處理，不在本單。那張單的設計至少要滿足：結果和不省略時逐項相同（C-16 之外，加一個「省略 vs 不省略」的差分測試，含讀回會變樣與壞內容的紀錄）；不能為了判歸屬而信任未經完整驗證的內容。
 
 它**不**省 `list --all` 的匯總（§7.6），也**不**省 `submit` 的規劃：submit 要分辨「已經送過的同一個答案」和「別的結束方式」，需要已結束題目的答案，所以一律完整匯總（§9.1，第 3 輪的裁決）。代價是一次對本機鏡像的純記憶體匯總；鏡像本來就要完整讀一遍（上一段），不多一次後端讀取。將來 log 快取要不要修剪 snapshot 以前的紀錄，不在本單範圍；`list --all`、`covered` 檢查和退回從頭匯總都需要完整前綴，所以在另有設計之前**不能**修剪。
 
@@ -691,11 +699,20 @@ class FoldResult:
     complete: bool            # True＝decisions 含已結束題目的詳細資料（status、submitted）；只由 use_snapshot 決定：
                               # use_snapshot=False → True；use_snapshot=True → False，即使沒有 snapshot 或全部回退
                               # （snapshot_used 全是 None）也是 False。不輸出到 JSON，給 plan_submit 的防呆與測試用
+    snapshot_closed: dict[str, list[str]] = field(default_factory=dict)
+                              # 每位提問者實際用到的那則 snapshot 的 closed（原樣，依提問者分開）；沒用 snapshot 的提問者沒有鍵，
+                              # use_snapshot=False 時是空 dict。只給 snapshot_for：fold 的 closed 是不分提問者的集合，
+                              # 「snapshot 帶進來、但歷史裡沒有對應題目」的墓碑要靠它才知道歸誰，才能照 §7.2
+                              # 「fold(P) 的投影」傳進下一則 snapshot。不輸出到 JSON；decision_cli 不讀它（PR-3 結構審加）
+# FoldResult、SubmitPlan 由 decision.py 建構，呼叫端當唯讀用：不改它們的欄位，也不改 decisions／ignored 裡的 dict。
 
 @dataclass
 class SubmitPlan:
     batches: list[tuple[str, str, list[dict]]]  # (channel, asker, items)，已依 §9.1 分組、分塊、排好送的順序
     skipped: list[str]                          # 照「重跑略過」略過的題目 id
+
+class PayloadError(MessageValidationError):     # parse_payload 讀不了；code 是 bad_payload 或 unsupported_version（§4.3）
+    code: str
 
 class SubmitRejected(MessageValidationError):   # 預檢不過；帶每一個不過的項
     problems: list[tuple[str, str]]             # (ref, §6.2 的診斷碼)
@@ -828,7 +845,7 @@ stateDiagram-v2
 | C-14 | FakeBackend 在寫第 2 則 submit 時注入錯誤 → exit 2，stdout 恰好有第 1 則的 id，stderr 指出第 2 則失敗，第 3 則以後沒有送；**原樣重跑** `submit` → 第 1 則的題照「重跑略過」不重送（stderr 有「已送出，略過」），只寫出剩下的；FakeBackend 注入「已收下但回應失敗」→ exit 2；重跑時同步看得到它 → 那幾題略過；以 FakeBackend 讓它暫時不出現在列舉裡再重跑 → 會再送一則，那一則的項全部判 `closed_ref`，`list --all` 每題只有一個答案；全部略過 → exit 0、stdout 空、stderr 有說明 | CLI |
 | C-15 | 匯總：壞掉的 YAML、`decision: 2`、未知的 `op` → 各自進 `ignored`（`bad_payload`／`unsupported_version`／`bad_payload`，`ref` 是 `null`、`item` 是 `null`），其他紀錄照常匯總，結束碼 0；一則 submit 有 3 項、第 2 項 `stale_base` → `ignored` 恰好一筆，`item=1`、`ref`＝那題、`op=submit`；submit 的 `to` 不是 `asker`，或 `mentions` 沒有 `asker` → 整則 `bad_payload`、`item` 是 `null`，各項都不被接受 | 單元＋CLI（`list`） |
 | C-16 | **等價性**（性質測試，seed 固定）：隨機產生一串合法和不合法的紀錄（含重複投遞、id 衝突、各種 op 與各種 submit 項，後端時刻遞增，A-1 成立），在隨機位置用 `snapshot_for` 產生 snapshot 插入 → (a) `fold(use_snapshot=True)` 的 `decisions`＝`fold(use_snapshot=False)` 的 `decisions` 裡 status 是 open 的那幾項（逐鍵相同，含 `version`、`revisions`、`answerer`、`asked_at`、`updated_at`）；(b) 兩者的 `seen`（open 題目的版本 id）相同；(c) 前者的 `closed` ＝後者已結束題目的 id 集合；`ignored` 不比；(d) 用 snapshot 的那一次，`snapshot_used` 指到插入的 snapshot，`folded` ＝ `through` 之後的 decision 紀錄則數（確認 `through` 之前的紀錄沒有被匯總）；(e) 每一次 `fold(use_snapshot=True)` 的 `complete` 都是 False、`fold(use_snapshot=False)` 的都是 True，和有沒有插入 snapshot、snapshot 有沒有被用到無關。**固定交錯案例**（逐一寫成測試）：ask Q、update U1、標記 M（另一題的 `ask`，整串只出現一次）在 cutoff 前，之後是 update U2／submit Q（`base=U1`）／withdraw Q／U1 重送 其中之一，再寫 snapshot（`through`＝M，**不用 U1**：U1 重送的那一案 U1 會在列表裡出現兩次，`through`＝U1 的 snapshot 依 §7.3 無效）→ snapshot 的 `items` 裡 Q 的 `version` 是 U1、`revisions`＝2、`versions`＝[Q, U1]、不在 `closed` 裡（**前綴投影**，不受 `through` 之後影響），而且 (a)～(d) 成立；把那一則改放到 snapshot 之後，(a)～(d) 同樣成立；**回退分支另測**：U1 重送那一案若把 `through` 設成 U1 → `ignored` 有 `bad_snapshot`，`snapshot_used` 是 `None`，(a)～(c) 仍成立（等於從頭匯總），`complete` 仍是 False（(e)）；H1 的序列（ask、submit、61 秒後的一般訊息、snapshot）→ `list --all` 有 Q answered、答案是 submit 的那一項，預設 `list` 沒有 Q | 單元 |
-| C-17 | snapshot 無效的情況：`through` 指不到、`through` 在列表裡出現兩次、`through` 排在 snapshot 之後、`from`≠`asker`、YAML 壞掉 → `bad_snapshot`；`covered` 和列表對不上 → `snapshot_stale`；以上都改用前一則有效的；全部無效 → 結果等於從頭匯總，`snapshot_used` 是 `None`。**A-1 失效**：先寫 snapshot S（`through`＝位置 5，`covered`＝5），之後用 FakeBackend 的 `deliver` 補一則位置 3 的 withdraw Q（後端時刻落在 log 增量同步的 `since` 窗內，確保鏡像收得到）→ 預設 `list` 判 S 為 `snapshot_stale`，Q 是 withdrawn（等於從頭匯總），不是 open | 單元 |
+| C-17 | snapshot 無效的情況：`through` 指不到、`through` 在列表裡出現兩次、`through` 排在 snapshot 之後、`from`≠`asker`、`to`≠`asker`、YAML 壞掉 → `bad_snapshot`；`covered` 和列表對不上 → `snapshot_stale`；以上都改用前一則有效的；全部無效 → 結果等於從頭匯總，`snapshot_used` 是 `None`。**A-1 失效**：先寫 snapshot S（`through`＝位置 5，`covered`＝5），之後用 FakeBackend 的 `deliver` 補一則位置 3 的 withdraw Q（後端時刻落在 log 增量同步的 `since` 窗內，確保鏡像收得到）→ 預設 `list` 判 S 為 `snapshot_stale`，Q 是 withdrawn（等於從頭匯總），不是 open | 單元 |
 | C-18 | 每一個 `decision` action（含寫入）跑完之後，游標檔逐位元相同；`wait` 的 ETag 狀態檔不被讀寫 | CLI |
 | C-19 | 自動 snapshot：`SNAPSHOT_EVERY` 用 monkeypatch 設成 3，出題者連寫 4 則相關紀錄之後再一次 `ask` → 多寫一則 snapshot（只涵蓋整個前綴都過了穩定窗的部分，§7.4），stdout 只有 `ask` 的 id；snapshot 超過 65536 字元 → stderr 警告、`ask` 仍然 exit 0；手動 `snapshot`，但沒有可涵蓋的 → exit 0、stdout 空；手動 `snapshot` 超過 65536 字元 → exit 1；**through 的選法**：位置 1、2、3 的時刻是 t、t+90、t+10，最新時刻 t+100（cutoff＝t+40）→ `through` 是位置 1，不是位置 3（位置 3 本身早於 cutoff，但它的前綴裡有位置 2 晚於 cutoff）；**一般訊息推進 cutoff**：最後一則 decision 在 t，之後只有一則 t+61 的一般訊息 → 傳給 `snapshot_for` 的 `records` 含這則一般訊息時，`through` 是那則 decision；只傳 decision 時找不到 `through`（說明呼叫端不能先濾） | 單元＋CLI |
 | C-20 | (a) `ChannelBackend` 協定的方法集合和 main `0577584` 相同（用 `inspect` 斷言方法名恰好六個）；(b) `EnumerableBackend` 的方法集合恰好是 `enumerate_conditional`；(c) `isinstance(FakeBackend(None), EnumerableBackend)` 和 `isinstance(<GitHubIssuesBackend 以假設定建出>, EnumerableBackend)` 都是 True（`runtime_checkable`）；(d) `decision.py` 不 import `backend`、`log_cache`、`cli`、`github`（import 圖測試）；(e) `decision_cli` 呼叫的後端方法只有 `send`（ChannelBackend）和經由 `LogCache.sync` 的 `enumerate_conditional`（用記錄呼叫的假後端斷言） | 單元 |
