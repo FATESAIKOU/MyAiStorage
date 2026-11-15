@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change angareion-v0. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: 確認有沒有新訊息
 `angareion wait` MUST 能不阻塞（`--timeout 0`：查一次就回）、限時阻塞（`--timeout N`）或一直阻塞（不給逾時）。有新訊息時 exit 0；逾時沒有新訊息時 exit 3。等待期間 MUST NOT 改動游標。**不給 `--timeout` 的預設仍然是一直播阻塞**（MyAiStorage#96 重新評估後維持：保留 ETag 之後閒置重啟的成本接近 0，限時是呼叫方／harness 的事）。
 
@@ -124,6 +126,8 @@ TBD - created by archiving change angareion-v0. Update Purpose after archive.
 ### Requirement: 訊息格式
 一則訊息 MUST 有 `from`、`to`、`channel`、`urgency`（0～9 的整數，預設 5）、`content`、`attachments`，加上寄件者產生的 `id`（ULID）與 `at`（含時區）；`id` 與 `at` 只用來辨識與顯示，MUST NOT 用來判斷新舊。`from`、`to` 與自己的身分 MUST 是 agent 名：驗證用的正規式是 `^[A-Za-z0-9][A-Za-z0-9._-]*-(pm|arch|impl|test)(-[A-Za-z0-9_.]+)?$`（repo 段含 `-`；複審 M1）；**驗證與解析是兩步**——regex 只驗整體形狀，另做由右而左的解析（先取可省的 `-<id>`、再取最右邊的角色字，左邊剩下的都是 repo 名；例 `MyLinuxPool-impl-2`、`LLMGateway-pm`、`my-repo-impl-2` → repo `my-repo`、角色 `impl`、id `2`；同角色只有一個時省略 id；角色字只有小寫的 `pm|arch|impl|test`）；`to` 選填（不給＝發到整個 channel）。`--json` 輸出的 `from`／`to` 也是這個字串。不做嚴格的身分認證（任何人可以用任何名字送）。送出時內文 MUST 來自 `--body <文字>` 或 `--body -`（stdin），沒給 `--body` MUST exit 1。
 
+`datatype` 是 front matter 的一個欄位（單行純量，文法 `^[a-z][a-z0-9-]{0,31}$`；內文不放結構）：`send` 寫 `message`，`angareion decision …` 寫 `decision`，寫入的 front matter 鍵順序是 `angareion`、`datatype`、`id`、…。沒有這個欄位的舊訊息讀成 `message`；值不是字串或不合文法的也讀成 `message`（整則照收）；值合法但不認得的照原字串保留，只照位址遞送，不參與 `decision` 的匯總。`angareion: 1` 不升版（舊讀者會略過未知的欄位）。`read --json` 與 `log --json` 的每則都帶 `datatype`。
+
 #### Scenario: urgency 超出範圍
 - **WHEN** `angareion send --channel X --urgency 12 --body hi`
 - **THEN** exit 1，什麼都沒送
@@ -155,6 +159,18 @@ TBD - created by archiving change angareion-v0. Update Purpose after archive.
 #### Scenario: 不存在的 channel
 - **WHEN** 對 channel 設定檔裡沒有的 channel 做 `send`、`read`、`wait` 或 `channel delete`
 - **THEN** exit 1，stderr 說明 channel 不存在；什麼都沒送、什麼都沒改
+
+#### Scenario: 寫入帶 datatype
+- **WHEN** `angareion send --channel X --body hi`
+- **THEN** 留言的 front matter 第二個鍵是 `datatype: message`；`read --json` 的那則帶 `"datatype": "message"`
+
+#### Scenario: 舊訊息沒有 datatype
+- **WHEN** 讀到一則 front matter 沒有 `datatype` 的留言（舊版寫的）
+- **THEN** 讀成一般訊息，`datatype` 是 `message`，照常遞送與顯示，不丟掉
+
+#### Scenario: 不認得的 datatype
+- **WHEN** 讀到 `datatype: poll`（合法但這個讀者不認得）
+- **THEN** 照位址遞送（`read`／`wait` 的收件範圍不變），`log` 照顯示並標出原字串，`decision` 的匯總不理它
 
 ### Requirement: token 的位置與讀法
 token 檔的位置 MUST 能由 `ANGAREION_TOKEN_FILE` 指定（優先於其他來源）；沒有設定時用設定檔的 `token_file` 或預設位置（實作細節，見 design）。檔案 MUST 只有擁有者有權限（0400 或 0600），否則 MUST 拒絕（exit 2）。token MUST NOT 出現在任何輸出、log、錯誤訊息或訊息內容裡。token 的權限範圍見 design §10（定案；複審 M2）：各 backend 的 repo 與 `MyAiStorage` 的 `Issues: Read and write`（backend repo＝讀 issue 與留言；MyAiStorage 只用來在註冊簿 issue 留言）；MyAiStorage 的 clone／fetch 走匿名 HTTPS、不用 token；workflow 推送 main 用的是 repo 的 `GITHUB_TOKEN`。檔案的位置與權限規則不變。
@@ -221,7 +237,7 @@ repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：六
 - **THEN** 同一批留言的到達位置與後端時刻一致；非 angareion 訊息的留言在「列舉」看得到（標示為非訊息），在「讀」（`read` 的輸出）則不會出現
 
 ### Requirement: 六個介面
-Angareion 對外 MUST 只有六個介面：建 channel、刪 channel、送訊息、確認有沒有新訊息、讀訊息、查詢訊息（唯讀）；指令分別是 `angareion channel create`、`angareion channel delete`、`angareion send`、`angareion wait`、`angareion read`、`angareion log`。MUST NOT 有 ack、已讀回條或限流。channel 名 MUST 是英文名（非空的 ASCII 字母、數字、`-`、`_`）；介面（參數、stdout、stderr、錯誤訊息）MUST NOT 出現 GitHub repo／issue 的概念。第一期 channel 對所有隊員公開，沒有成員設定：`channel create` MUST NOT 收 `--member`。`send` 的 `--channel` 必填、`--to` 選填（不給＝發到整個 channel）。`channel create` 與 `channel delete` 的 stdout MUST 只印 channel 名。`channel create` MUST 在送出註冊留言前先確認後端實體（存在而且標題等於 channel 名；不符 MUST exit 2、什麼都沒註冊——複審 H2），留言後 MUST 輪詢 fetch 到對應出現為止（上限 2 分鐘；逾時 MUST 在 stderr 印提示、仍 exit 0）；`channel delete` MUST NOT 等落地（送出註銷留言成功即 exit 0）。（註冊簿與重建見 `angareion/channel-config` 與 design §9／§10。）
+Angareion 對外 MUST 只有七個介面家族：建 channel、刪 channel、送訊息、確認有沒有新訊息、讀訊息、查詢訊息（唯讀）、待決（`decision`）；指令分別是 `angareion channel create`、`angareion channel delete`、`angareion send`、`angareion wait`、`angareion read`、`angareion log`、`angareion decision`。`decision` 的六個動作（`ask`、`update`、`withdraw`、`submit`、`list`、`snapshot`）的語意見 `angareion-pending-decision`；它的寫入也只是 append 一則訊息，MUST NOT 編輯或刪除任何訊息。MUST NOT 有 ack、已讀回條或限流。channel 名 MUST 是英文名（非空的 ASCII 字母、數字、`-`、`_`）；介面（參數、stdout、stderr、錯誤訊息）MUST NOT 出現 GitHub repo／issue 的概念。第一期 channel 對所有隊員公開，沒有成員設定：`channel create` MUST NOT 收 `--member`。`send` 的 `--channel` 必填、`--to` 選填（不給＝發到整個 channel）。`channel create` 與 `channel delete` 的 stdout MUST 只印 channel 名。`channel create` MUST 在送出註冊留言前先確認後端實體（存在而且標題等於 channel 名；不符 MUST exit 2、什麼都沒註冊——複審 H2），留言後 MUST 輪詢 fetch 到對應出現為止（上限 2 分鐘；逾時 MUST 在 stderr 印提示、仍 exit 0）；`channel delete` MUST NOT 等落地（送出註銷留言成功即 exit 0）。（註冊簿與重建見 `angareion/channel-config` 與 design §9／§10。）
 
 `log` 是唯讀的查詢介面（語意見「唯讀查詢 log」）：它 MUST NOT 讀取、改動或推進游標，MUST NOT 參與「同一個身分只留一個讀者」規則；它的旗標與錯誤訊息同樣 MUST NOT 出現 GitHub repo／issue 的概念（只用 channel 名、AI 名、訊息 id（ULID）、RFC 3339 時刻與字面字串表達）。
 
@@ -291,7 +307,7 @@ Angareion 對外 MUST 只有六個介面：建 channel、刪 channel、送訊息
 
 #### Scenario: log 是第六個介面
 - **WHEN** `angareion --help` 印出的子指令清單、`angareion channel --help` 印出的子子指令清單，與 `angareion log --help` 印出的旗標清單（低-14：三份清單都由 WHEN 的輸出觀察）
-- **THEN** 頂層子指令恰好是 `channel`、`send`、`wait`、`read`、`log`（由 `angareion --help` 斷言）；`channel` 下的子子指令恰好是 `create`、`delete`（由 `angareion channel --help` 斷言）；`log` 的旗標是查詢類（`--channel`、`--from`、`--to`、`--mentioned`、`--since`、`--until`、`--grep`、`--around`、`--thread`、`--before`、`--after`、`--limit`、`--json`），沒有 `--body` 等寫入旗標（log 不寫信；`--to` 在 log 是收件人的「過濾」條件，不是 `send` 的寫入）
+- **THEN** 頂層子指令恰好是 `channel`、`send`、`wait`、`read`、`log`、`decision`（由 `angareion --help` 斷言）；`decision` 下的 action 恰好是 `ask`、`update`、`withdraw`、`submit`、`list`、`snapshot`（由 `angareion decision --help` 斷言）；`channel` 下的子子指令恰好是 `create`、`delete`（由 `angareion channel --help` 斷言）；`log` 的旗標是查詢類（`--channel`、`--from`、`--to`、`--mentioned`、`--since`、`--until`、`--grep`、`--around`、`--thread`、`--before`、`--after`、`--limit`、`--json`），沒有 `--body` 等寫入旗標（log 不寫信；`--to` 在 log 是收件人的「過濾」條件，不是 `send` 的寫入）
 
 #### Scenario: log 的介面不出現後端概念
 - **WHEN** 檢查 `angareion log` 的參數清單、stdout、stderr 與說明（`--help`）
@@ -458,4 +474,3 @@ Angareion 對外 MUST 只有六個介面：建 channel、刪 channel、送訊息
 #### Scenario: 快取與游標各行其是
 - **WHEN** B 刪掉 `log-<身分>/` 後執行 `log`；或 B 執行 `log` 跟 `read` 交替
 - **THEN** `log` 全量重建後照常回答；`read` 的游標與已讀狀態不受 `log`／快取影響，`log` 也不受游標影響
-
