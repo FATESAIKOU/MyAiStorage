@@ -71,6 +71,10 @@
     "team-mypmo-m1": {
       "backend": "aicompany-channel",
       "issue": 22
+    },
+    "test-decision-1116": {
+      "backend": "aicompany-channel",
+      "issue": 33
     }
   },
   "version": 1
