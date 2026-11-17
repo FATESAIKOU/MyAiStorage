@@ -243,6 +243,9 @@ def _message_of(record: object, what: str = "angareion read") -> Message:
                 str(record["in_reply_to"]) if record.get("in_reply_to") is not None else None
             ),
             mentions=mentions,
+            datatype=(
+                record["datatype"] if isinstance(record.get("datatype"), str) else None
+            ),
         )
     except (TypeError, ValueError) as e:
         raise PortError(f"{what} 的訊息欄位不合格式：{e}") from e

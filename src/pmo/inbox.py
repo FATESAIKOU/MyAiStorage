@@ -24,6 +24,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
+import yaml
+
 from . import ledger, sanitize
 from .decision import format_decision_event, latest_decision_answers
 from .errors import SchemaError, SentButNotRecorded, UsageError
@@ -40,6 +42,8 @@ __all__ = [
     "item_channel",
     "is_call",
     "is_group_request",
+    "decision_submit_payload",
+    "format_decision_submit_event",
     "should_poke",
     "parse_work_message",
     "extract_section",
@@ -114,6 +118,7 @@ def as_dict(msg: Any) -> dict:
             "received_at": str(msg.get("received_at") or ""),
             "urgency": msg.get("urgency"),
             "mentions": msg.get("mentions"),
+            "datatype": msg.get("datatype"),
         }
     if isinstance(msg, Message):
         return {
@@ -125,6 +130,7 @@ def as_dict(msg: Any) -> dict:
             "received_at": msg.received_at,
             "urgency": msg.urgency,
             "mentions": None if msg.mentions is None else tuple(msg.mentions),
+            "datatype": msg.datatype,
         }
     raise TypeError(f"not a message: {type(msg).__name__}")
 
@@ -271,6 +277,46 @@ def is_group_request(msg: Mapping, config: Any) -> bool:
     if config.pmo_identity not in _names(d.get("to")):
         return False
     return bool(GROUP_FIRST_RE.match(_first_line(d.get("content"))))
+
+
+#: #478：App 作答送出的是 `datatype: decision` 的一則（內文是 YAML，`op: submit`）。
+DECISION_DATATYPE = "decision"
+
+
+def decision_submit_payload(msg: Mapping, config: Any) -> dict | None:
+    """這則信是不是寄給 PMO 的待決答案 submit；是就回傳解析後的 YAML payload。
+
+    條件（#478）：`datatype` 是 `decision`、`to` 點名 PMO（本機身分）、內文的
+    YAML `op` 是 `submit`。只讀 `op` 與 `items`——答案內容不解析（PMO 讀答案
+    走 `angareion decision list --all --json`）。舊版 angareion 沒有
+    `datatype` 欄位（`None`）、`ask`／`withdraw`、壞 YAML、深的巢狀
+    （`RecursionError`）一律回 None：行為與沒有這個分流時完全相同。
+    PMO 自己寫的不算（與 `is_call` 的自我守門一致）。
+    """
+    d = as_dict(msg)
+    if d.get("datatype") != DECISION_DATATYPE:
+        return None
+    if str(d.get("from") or "") == config.pmo_identity:
+        return None
+    if config.pmo_identity not in _names(d.get("to")):
+        return None
+    try:
+        payload = yaml.safe_load(d.get("content") or "")
+    except Exception:  # noqa: BLE001 - 壞 YAML／RecursionError：當作不是 submit
+        return None
+    if not isinstance(payload, dict) or payload.get("op") != "submit":
+        return None
+    return payload
+
+
+def format_decision_submit_event(msg: Mapping, payload: Mapping) -> str:
+    """`[decision-submit]` 一行（#478）；`items` 讀不出來就印 `?`，不丟例外。"""
+    items = payload.get("items")
+    count = str(len(items)) if isinstance(items, list) else "?"
+    return (
+        f"[decision-submit] {msg.get('id')} from={msg.get('from')} "
+        f"channel={msg.get('channel')} items={count}"
+    )
 
 
 def parse_work_message(msg: Mapping, config: Any) -> dict | None:
@@ -575,6 +621,13 @@ def process_messages(
                     )
                     mark_notified(inbox_state, "poke", msg_id, now=ctx.deps.now())
                     dirty = True
+            # 待決答案 submit（datatype=decision、op=submit）也在 is_call **之前**
+            # 分流（#478，位置與群請求同理）：不回機械 ack、不記叫人去重，只印
+            # 一行 `[decision-submit]`；上面的 [poke]／叫醒照舊，不在這裡吃掉。
+            submit = decision_submit_payload(msg, ctx.config)
+            if submit is not None:
+                events.append(format_decision_submit_event(msg, submit))
+                continue
             # 群請求在 is_call **之前**分流（MyPMO#233 的位置）：不回機械 ack、
             # 不記成已處理，只印一行交接（Q-9 (a)；完整交接機制是 #358）
             if is_group_request(msg, ctx.config):

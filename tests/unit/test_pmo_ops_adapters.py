@@ -22,7 +22,7 @@ import urllib.error
 import pytest
 
 from pmo import ops
-from pmo.adapters import Aicomm, Sidecar
+from pmo.adapters import Aicomm, Angareion, Sidecar
 from pmo.config import DEFAULT_WAKE_TEXT
 from pmo.ports import (
     AgentRecord,
@@ -575,3 +575,29 @@ def test_is_own_job_follows_the_fixed_sentence_and_auto(job, expected):
 def test_is_auto_job_reads_the_job_field_and_the_args_field(job, expected):
     """裁定 (d)：`auto` 是 job 欄位，舊的或假的 sidecar 可能放在 `args` 裡。"""
     assert ops.is_auto_job(job) is expected
+
+
+# --------------------------------------------------------------------------- #
+# 4. #478：`angareion read --json` 的 `datatype` 要進 Message
+# --------------------------------------------------------------------------- #
+
+
+def test_angareion_read_carries_the_datatype_from_read_json(monkeypatch):
+    """inbox 的待決答案分流靠 Message 上的 `datatype`（#478）：缺欄位或非字串讀成 None。"""
+    base = {
+        "channel": "general",
+        "from": "demo-pm-m1",
+        "to": "demo-secretary-m1",
+        "received_at": "2026-11-17T10:00:00Z",
+        "content": "x",
+    }
+    records = [
+        {**base, "id": "01JX9A1B2C3D4E5F6G7H8J9K0M", "datatype": "decision"},
+        {**base, "id": "01JX9A1B2C3D4E5F6G7H8J9K0N"},
+        {**base, "id": "01JX9A1B2C3D4E5F6G7H8J9K2Q", "datatype": 3},
+    ]
+    monkeypatch.setattr("pmo.adapters._run", lambda args, **kwargs: json.dumps(records))
+
+    got = Angareion().read()
+
+    assert [m.datatype for m in got] == ["decision", None, None]
