@@ -29,6 +29,7 @@ from _pmo_env import (
     OTHER_IDENTITY_WRONG,
     ULID_1,
     ULID_2,
+    ULID_3,
     VALID_WORK_BODY,
     PmoEnv,
     config_data,
@@ -1307,3 +1308,207 @@ def test_write_ledger_wraps_disk_error_as_schema_error(pmo_env, monkeypatch):
     with pytest.raises(SchemaError) as exc_info:
         ledger.save_state(pmo_env.state_dir, ledger.load_state(pmo_env.state_dir))
     assert "state 檔寫不起來" in str(exc_info.value)
+
+
+# --------------------------------------------------------------------------- #
+# 12. #478 待決答案 submit（datatype=decision、op=submit）：不回機械 ack、
+#     印一行 [decision-submit]、照常叫醒；其他 datatype／op 行為不變
+# --------------------------------------------------------------------------- #
+
+#: App 作答送出的內文（YAML；`items` 是答案清單，兩題）。
+SUBMIT_YAML = (
+    "decision: 1\n"
+    "op: submit\n"
+    f"asker: {E.TEAM_PM}\n"
+    "items:\n"
+    f"  - ref: {ULID_1}\n"
+    f"    base: {ULID_1}\n"
+    "    title: 先做哪一半？\n"
+    "    choice:\n"
+    "      - a\n"
+    f"  - ref: {ULID_2}\n"
+    f"    base: {ULID_2}\n"
+    "    title: 誰審？\n"
+    "    note: 都可以\n"
+)
+
+
+def _decision_msg(
+    content: str = SUBMIT_YAML,
+    *,
+    datatype: object = "decision",
+    sender: str = E.TEAM_PM,
+    channel: str = E.OTHER_CHANNEL,
+    to: object = PMO_IDENTITY,
+    urgency: int = 8,
+    msg_id: str = ULID_3,
+) -> dict:
+    """作答者寄給 PMO 的一則 `datatype: decision` 訊息（dict 臉面同 read --json）。"""
+    return {
+        "id": msg_id,
+        "from": sender,
+        "to": to,
+        "channel": channel,
+        "urgency": urgency,
+        "received_at": "2026-11-17T10:00:00Z",
+        "content": content,
+        "datatype": datatype,
+    }
+
+
+def test_decision_submit_prints_event_without_call_ack(pmo_env):
+    """submit 不回機械 ack、不進叫人去重、不建單，只印一行可辨認的事件。"""
+    # 寄件人用秘書：一般叫人會回機械 ack，所以「沒有 ack」要靠分流才成立
+    msg = _decision_msg(sender=SECRETARY_IDENTITY)
+
+    rc, out, err = run_cli(["inbox", "read"], pmo_env, msgs=[msg])
+    assert rc == 0, (out, err)
+    assert (
+        f"[decision-submit] {ULID_3} from={SECRETARY_IDENTITY} channel={E.OTHER_CHANNEL} items=2"
+        in out
+    )
+    assert "叫人" not in out
+    assert "# 收到叫人" not in out
+    assert pmo_env.sends() == []
+    st = ledger.load_state(pmo_env.state_dir)
+    assert st["items"] == {}
+    assert st["notified"]["call"] == {}
+
+
+def test_decision_submit_still_pokes_and_dedupes(pmo_env):
+    """辨認 submit 不吃叫醒：祕書急件（派工頻道、urgency 8）照樣 [poke]，重送不重複叫。"""
+    msg = _decision_msg(sender=SECRETARY_IDENTITY, channel=DISPATCH_CHANNEL)
+
+    rc, out, err = run_cli(["inbox", "read"], pmo_env, msgs=[msg])
+    assert rc == 0, (out, err)
+    assert f"[decision-submit] {ULID_3}" in out
+    assert f"[poke] 秘書急件 id={ULID_3}" in out
+    assert pmo_env.sends() == []
+    st = ledger.load_state(pmo_env.state_dir)
+    assert ULID_3 in st["notified"]["poke"]
+    assert st["notified"]["call"] == {}
+
+    # 同一則再出現（游標重來／--since 補讀）：不再叫醒、也不再回任何 ack
+    rc2, out2, err2 = run_cli(["inbox", "read"], pmo_env, msgs=[msg])
+    assert rc2 == 0, (out2, err2)
+    assert "[poke]" not in out2
+    assert f"[dedupe] 秘書急件 id={ULID_3} 已叫過" in out2
+    assert pmo_env.sends() == []
+
+
+@pytest.mark.parametrize(
+    "content, expected",
+    [
+        pytest.param(SUBMIT_YAML, "items=2", id="list-of-two"),
+        pytest.param(
+            "decision: 1\nop: submit\nasker: x\nitems:\n  - ref: a\n",
+            "items=1",
+            id="list-of-one",
+        ),
+        pytest.param(
+            "decision: 1\nop: submit\nasker: x\nitems: 3\n", "items=?", id="not-a-list"
+        ),
+        pytest.param("decision: 1\nop: submit\nasker: x\n", "items=?", id="missing"),
+        pytest.param(
+            "decision: 1\nop: submit\nasker: x\nitems:\n  a: b\n", "items=?", id="mapping"
+        ),
+    ],
+)
+def test_decision_submit_event_counts_items_or_prints_question_mark(
+    pmo_env, content, expected
+):
+    rc, out, err = run_cli(
+        ["inbox", "read"], pmo_env, msgs=[_decision_msg(content)]
+    )
+    assert rc == 0, (out, err)
+    assert f"[decision-submit] {ULID_3}" in out
+    assert expected in out
+    assert pmo_env.sends() == []
+
+
+@pytest.mark.parametrize(
+    "content, datatype",
+    [
+        pytest.param(SUBMIT_YAML, None, id="no-datatype-field"),
+        pytest.param(SUBMIT_YAML, "message", id="datatype-message"),
+        pytest.param(SUBMIT_YAML.replace("op: submit", "op: ask"), "decision", id="op-ask"),
+        pytest.param(
+            SUBMIT_YAML.replace("op: submit", "op: withdraw"), "decision", id="op-withdraw"
+        ),
+        pytest.param(
+            SUBMIT_YAML.replace("op: submit", "op: [submit]"), "decision", id="op-not-a-string"
+        ),
+        pytest.param("op: submit\nitems: [", "decision", id="broken-yaml"),
+        pytest.param("[" * 600, "decision", id="deep-nesting"),
+        pytest.param("- just\n- a list\n", "decision", id="yaml-not-a-mapping"),
+        pytest.param("", "decision", id="empty-content"),
+    ],
+)
+def test_non_submit_decision_messages_keep_the_call_path(pmo_env, content, datatype):
+    """datatype 不是 decision、op 不是 submit、壞 YAML／深巢狀 → 行為與現在完全相同。"""
+    msg = _decision_msg(
+        content, datatype=datatype, sender=SECRETARY_IDENTITY, urgency=5
+    )
+
+    rc, out, err = run_cli(["inbox", "read"], pmo_env, msgs=[msg])
+    assert rc == 0, (out, err)
+    assert "[decision-submit]" not in out
+    # 仍走叫人：印叫人、回一則機械 ack（內容不是工作樣板，不會被當派工）
+    assert "叫人" in out
+    (send,) = pmo_env.sends()
+    assert send.body.startswith(f"# 收到叫人：{ULID_3}")
+
+
+def test_decision_submit_requires_the_pmo_in_the_to_field(pmo_env):
+    """`to` 不是 PMO 的 submit 不是給本席的（不印事件、不回 ack）。"""
+    msg = _decision_msg(to=E.OTHER_PM)
+
+    rc, out, err = run_cli(["inbox", "read"], pmo_env, msgs=[msg])
+    assert rc == 0, (out, err)
+    assert "[decision-submit]" not in out
+    assert pmo_env.sends() == []
+
+
+def test_decision_submit_mentions_alone_does_not_count(pmo_env):
+    """只有 mentions 點到 PMO（`to` 是別人）的 submit 不分流：仍走叫人、回一則 ack（只認 `to`）。"""
+    msg = _decision_msg(sender=SECRETARY_IDENTITY, to=E.OTHER_PM)
+    msg["mentions"] = [PMO_IDENTITY]
+
+    rc, out, err = run_cli(["inbox", "read"], pmo_env, msgs=[msg])
+    assert rc == 0, (out, err)
+    assert "[decision-submit]" not in out
+    assert "叫人" in out
+    (send,) = pmo_env.sends()
+    assert send.body.startswith(f"# 收到叫人：{ULID_3}")
+
+
+def test_pmo_self_sent_decision_submit_is_not_a_submit(pmo_env):
+    """PMO 自己寄給自己的 submit 不當成 submit：與一般訊息行為相同（不印事件、不叫人、不回 ack）。"""
+    msg = _decision_msg(sender=PMO_IDENTITY, to=PMO_IDENTITY)
+
+    rc, out, err = run_cli(["inbox", "read"], pmo_env, msgs=[msg])
+    assert rc == 0, (out, err)
+    assert "[decision-submit]" not in out
+    assert "叫人" not in out
+    assert pmo_env.sends() == []
+    st = ledger.load_state(pmo_env.state_dir)
+    assert st["notified"]["call"] == {}
+
+
+@pytest.mark.parametrize(
+    "datatype",
+    [pytest.param(None, id="no-datatype"), pytest.param("message", id="message")],
+)
+def test_legacy_decision_answer_still_prints_and_acks(pmo_env, datatype):
+    """舊格式「# 回答決定題：」不受影響：照印 [decision]、照叫人規則 ack。"""
+    content = f"# 回答決定題：{ULID_1}\n- q1：a\n"
+    msg = _decision_msg(content, datatype=datatype, sender=SECRETARY_IDENTITY,
+                        channel=DISPATCH_CHANNEL, urgency=5)
+
+    rc, out, err = run_cli(["inbox", "read"], pmo_env, msgs=[msg])
+    assert rc == 0, (out, err)
+    assert f"[decision] q={ULID_1} from={SECRETARY_IDENTITY}" in out
+    assert "[decision-submit]" not in out
+    (send,) = pmo_env.sends()
+    assert send.body.startswith(f"# 收到叫人：{ULID_3}")
+

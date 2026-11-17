@@ -159,6 +159,9 @@ class Message:
     urgency: int | None = None
     in_reply_to: str | None = None
     mentions: tuple[str, ...] | None = None
+    #: #478：`angareion read --json` 的 `datatype`（#468）。`None` 是舊版
+    #: angareion 沒有這個欄位；分流只看它是不是 `decision`，其餘一律照舊。
+    datatype: str | None = None
 
 
 _SECONDS_RE = re.compile(r"([0-9]+)([smh]?)")

@@ -199,6 +199,20 @@ def test_the_round_prints_the_existing_labels(pmo_env):
     assert "一般訊息" in out
 
 
+def test_the_round_prints_decision_submit_and_sends_no_ack(pmo_env):
+    """#478：App 的 submit（datatype=decision、op=submit）在 tick 只印一行、不回 ack。"""
+    body = "decision: 1\nop: submit\nasker: demo2-pm-m1\nitems:\n  - ref: x\n"
+    messages = [secretary_msg(ulid=ULID_2, content=body, datatype="decision")]
+    deps, _sidecar, _factory = make_deps(ang=FakeAngareion(messages))
+
+    rc, out, err = run_tick(pmo_env, deps)
+    assert (rc, err) == (0, "")
+    assert f"[decision-submit] {ULID_2}" in out
+    assert "items=1" in out
+    assert "# 收到叫人" not in out
+    assert deps.angareion.sent == []
+
+
 def test_a_group_handoff_id_reaches_the_rounds_handoffs_list(pmo_env, monkeypatch):
     """第 7 條：`tick` 把 `run.handoffs_seen` 交進 `read_round`，群請求 id 進得去（T5-3 用）。
 
