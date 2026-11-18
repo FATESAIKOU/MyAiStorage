@@ -365,236 +365,306 @@ def build_payload(op: str, **fields: Any) -> str:
         raise MessageValidationError(str(exc)) from exc
 
 
-def fold(records: Sequence[Record], *, use_snapshot: bool) -> FoldResult:
-    records = sorted(records, key=lambda r: r.position)
-    decisions: dict[str, dict] = {}
-    versions: dict[str, set[str]] = {}
-    closed: set[str] = set()
-    ignored: list[dict] = []
-    used: dict[str, str | None] = {}
-    cutoff: dict[str, int] = {}
-    owners: dict[str, str] = {}
-    snapshot_closed: dict[str, list[str]] = {}
-    parsed: list[dict | None] = []
-    for r in records:
-        m = r.message
-        if m.datatype != "decision":
-            parsed.append(None)
-            continue
-        try:
-            p = parse_payload(m)
-        except PayloadError:
-            p = None
-        parsed.append(p)
-        if p and p["op"] == "ask":
-            owners.setdefault(m.id, p["asker"])
-            used.setdefault(p["asker"], None)
-        if p and p["op"] == "snapshot":
-            used.setdefault(p["asker"], None)
-    if use_snapshot:
-        for i in range(len(records) - 1, -1, -1):
-            r, p = records[i], parsed[i]
-            if not p or p["op"] != "snapshot" or used[p["asker"]] is not None:
-                continue
-            m = r.message
-            found = [j for j, x in enumerate(records) if x.message.id == p["through"]]
-            code = None
-            if (
-                m.from_ != p["asker"]
-                or m.to != p["asker"]
-                or len(found) != 1
-                or found[0] >= i
-            ):
-                code = "bad_snapshot"
-            elif (
-                sum(x.message.datatype == "decision" for x in records[: found[0] + 1])
-                != p["covered"]
-            ):
-                code = "snapshot_stale"
-            if code:
-                ignored.append(
-                    dict(
-                        record=m.id,
-                        channel=m.channel,
-                        op="snapshot",
-                        ref=None,
-                        item=None,
-                        code=code,
-                    )
-                )
-                continue
-            asker = p["asker"]
-            used[asker] = m.id
-            snapshot_closed[asker] = list(p["closed"])
-            cutoff[asker] = records[found[0]].position
-            for x in p["items"]:
-                q = _question_fields(x)
-                q.update(
-                    id=x["id"],
-                    channel=m.channel,
-                    asker=asker,
-                    status="open",
-                    version=x["version"],
-                    revisions=x["revisions"],
-                    asked_at=x["asked_at"],
-                    updated_at=x["updated_at"],
-                    submitted=None,
-                    withdrawn=None,
-                )
-                decisions[x["id"]] = q
-                versions[x["id"]] = set(x["versions"])
-                owners[x["id"]] = asker
-            for ref in p["closed"]:
-                closed.add(ref)
-                owners[ref] = asker
+@dataclass
+class _FoldState:
+    """What one `fold` pass accumulates: the views, the tombstones and the diagnostics."""
 
-    def ignore(m, op, code, ref=None, item=None):
-        ignored.append(
+    decisions: dict[str, dict] = field(default_factory=dict)
+    versions: dict[str, set[str]] = field(default_factory=dict)
+    closed: set[str] = field(default_factory=set)
+    owners: dict[str, str] = field(default_factory=dict)
+    used: dict[str, str | None] = field(default_factory=dict)
+    cutoff: dict[str, int] = field(default_factory=dict)
+    snapshot_closed: dict[str, list[str]] = field(default_factory=dict)
+    ignored: list[dict] = field(default_factory=list)
+    folded: int = 0
+
+    def ignore(self, m: Message, op, code, ref=None, item=None) -> None:
+        """Record one ignored record in the `ignored` view (§5)."""
+        self.ignored.append(
             dict(record=m.id, channel=m.channel, op=op, ref=ref, item=item, code=code)
         )
 
-    folded = 0
-    for r, p in zip(records, parsed):
+
+def _parse_all(
+    records: Sequence[Record],
+) -> list[tuple[Record, dict | None, str | None]]:
+    """Read every record once, keeping the code of a payload that would not read.
+
+    `_apply_unreadable` needs that code for its diagnostic; keeping it here is why a
+    record whose payload is bad is read once per fold, not twice.
+    """
+    parsed: list[tuple[Record, dict | None, str | None]] = []
+    for r in records:
+        if r.message.datatype != "decision":
+            parsed.append((r, None, None))
+            continue
+        try:
+            parsed.append((r, parse_payload(r.message), None))
+        except PayloadError as exc:
+            parsed.append((r, None, exc.code))
+    return parsed
+
+
+def _prime(state: _FoldState, parsed) -> None:
+    """Fill in what is known before a snapshot is chosen.
+
+    An ask names its asker under its own id, and every asker starts with no snapshot
+    used, so the newest usable one wins in `_select_snapshots` (first come, first
+    served, §6.4).
+    """
+    for r, p, _ in parsed:
+        if p is None or p["op"] not in ("ask", "snapshot"):
+            continue
+        if p["op"] == "ask":
+            state.owners.setdefault(r.message.id, p["asker"])
+        state.used.setdefault(p["asker"], None)
+
+
+def _select_snapshots(records: Sequence[Record], parsed, state: _FoldState) -> None:
+    """Take the newest snapshot of each asker that still checks out, and seed from it."""
+    for i in range(len(records) - 1, -1, -1):
+        r, p, _ = parsed[i]
+        if not p or p["op"] != "snapshot" or state.used[p["asker"]] is not None:
+            continue
         m = r.message
-        if m.datatype != "decision":
+        found = [j for j, x in enumerate(records) if x.message.id == p["through"]]
+        code = None
+        if (
+            m.from_ != p["asker"]
+            or m.to != p["asker"]
+            or len(found) != 1
+            or found[0] >= i
+        ):
+            code = "bad_snapshot"
+        elif (
+            sum(x.message.datatype == "decision" for x in records[: found[0] + 1])
+            != p["covered"]
+        ):
+            code = "snapshot_stale"
+        if code:
+            state.ignore(m, "snapshot", code)
             continue
-        if p is None:
-            if (
-                cutoff
-                and all(value is not None for value in used.values())
-                and r.position <= min(cutoff.values())
-            ):
-                continue
-            try:
-                parse_payload(m)
-            except PayloadError as e:
-                is_snapshot = bool(re.search(r"(?m)^op:\s*snapshot\s*$", m.content))
-                ignore(
-                    m,
-                    "snapshot" if is_snapshot else None,
-                    "bad_snapshot" if is_snapshot else e.code,
-                )
-            folded += 1
+        asker = p["asker"]
+        state.used[asker] = m.id
+        state.snapshot_closed[asker] = list(p["closed"])
+        state.cutoff[asker] = records[found[0]].position
+        _seed_from_snapshot(state, m, p)
+
+
+def _seed_from_snapshot(state: _FoldState, m: Message, p: dict) -> None:
+    """Start the views from a selected snapshot's items and tombstones (§5)."""
+    asker = p["asker"]
+    for x in p["items"]:
+        q = _question_fields(x)
+        q.update(
+            id=x["id"],
+            channel=m.channel,
+            asker=asker,
+            status="open",
+            version=x["version"],
+            revisions=x["revisions"],
+            asked_at=x["asked_at"],
+            updated_at=x["updated_at"],
+            submitted=None,
+            withdrawn=None,
+        )
+        state.decisions[x["id"]] = q
+        state.versions[x["id"]] = set(x["versions"])
+        state.owners[x["id"]] = asker
+    for ref in p["closed"]:
+        state.closed.add(ref)
+        state.owners[ref] = asker
+
+
+def _apply(r, p: dict | None, code: str | None, state: _FoldState) -> None:
+    """Apply one record, in log order: the snapshot cutoff first, then the op."""
+    m = r.message
+    if m.datatype != "decision":
+        return
+    if p is None:
+        _apply_unreadable(r, code, state)
+        return
+    op = p["op"]
+    if op == "snapshot":
+        if r.position > state.cutoff.get(p["asker"], -1):
+            state.folded += 1
+        return
+    owner = p.get("asker") if op in ("ask", "submit") else state.owners.get(p.get("ref"))
+    if owner is not None and r.position <= state.cutoff.get(owner, -1):
+        return
+    state.folded += 1
+    if op == "ask":
+        _apply_ask(r, p, state)
+    elif op in ("update", "withdraw"):
+        _apply_change(r, p, state)
+    elif op == "submit":
+        _apply_submit(r, p, state)
+
+
+def _apply_unreadable(r, code: str | None, state: _FoldState) -> None:
+    """Diagnose a decision record whose payload would not read (or that a snapshot covers)."""
+    m = r.message
+    if (
+        state.cutoff
+        and all(value is not None for value in state.used.values())
+        and r.position <= min(state.cutoff.values())
+    ):
+        return
+    is_snapshot = bool(re.search(r"(?m)^op:\s*snapshot\s*$", m.content))
+    state.ignore(
+        m,
+        "snapshot" if is_snapshot else None,
+        "bad_snapshot" if is_snapshot else code,
+    )
+    state.folded += 1
+
+
+def _apply_ask(r, p: dict, state: _FoldState) -> None:
+    """Open a decision from an `ask` record (§5)."""
+    m = r.message
+    if p["ask_channel"] != m.channel or p["asker"] != m.from_:
+        state.ignore(m, "ask", "binding_mismatch")
+        return
+    if m.id in state.decisions or m.id in state.closed:
+        state.ignore(m, "ask", "duplicate_id")
+        return
+    q = _question_fields(p)
+    q.update(
+        id=m.id,
+        channel=m.channel,
+        asker=m.from_,
+        status="open",
+        version=m.id,
+        revisions=1,
+        asked_at=r.received_at,
+        updated_at=r.received_at,
+        submitted=None,
+        withdrawn=None,
+    )
+    state.decisions[m.id] = q
+    state.versions[m.id] = {m.id}
+    state.owners[m.id] = m.from_
+
+
+def _apply_change(r, p: dict, state: _FoldState) -> None:
+    """Apply an `update` or a `withdraw` to an open decision (§5).
+
+    The checks are one chain, in this order, so the first problem names the code:
+    tombstoned, unknown, closed, not the asker, and (for an update) a record id
+    already counted.
+    """
+    m = r.message
+    op = p["op"]
+    ref = p.get("ref")
+    q = state.decisions.get(ref)
+    if ref in state.closed:
+        code = "closed_ref"
+    elif q is None:
+        code = "unknown_ref"
+    elif q["status"] != "open":
+        code = "closed_ref"
+    elif m.from_ != q["asker"]:
+        code = "not_owner"
+    elif op == "update" and m.id in state.versions[ref]:
+        code = "duplicate_id"
+    else:
+        code = None
+    if code:
+        state.ignore(m, op, code, ref)
+        return
+    if op == "update":
+        q.update(_question_fields(p))
+        q.update(
+            version=m.id, revisions=q["revisions"] + 1, updated_at=r.received_at
+        )
+        state.versions[ref].add(m.id)
+    else:
+        q["status"] = "withdrawn"
+        q["withdrawn"] = {"record": m.id, "reason": p.get("reason")}
+        state.closed.add(ref)
+
+
+def _item_code(
+    state: _FoldState, m: Message, p: dict, entry, ref, refs: set[str]
+) -> str | None:
+    """The first problem with one `submit` item, in the order `plan_submit` uses (C-10/C-27)."""
+    if isinstance(ref, str) and ref in refs:
+        return "duplicate_ref"
+    if not is_ulid(ref):
+        return "bad_item"
+    if ref in state.closed:
+        return "closed_ref"
+    q = state.decisions.get(ref)
+    if q is None:
+        return "unknown_ref"
+    if q["status"] != "open":
+        return "closed_ref"
+    if m.from_ != q["answerer"]:
+        return "not_answerer"
+    if p["asker"] != q["asker"]:
+        return "binding_mismatch"
+    if entry.get("base") != q["version"]:
+        return "stale_base"
+    if not _answer(entry, q["options"]):
+        return "bad_item"
+    return None
+
+
+def _apply_submit(r, p: dict, state: _FoldState) -> None:
+    """Answer the items of a `submit` that check out; diagnose the others, per item (§5)."""
+    m = r.message
+    if m.to != p["asker"] or p["asker"] not in m.mentions:
+        state.ignore(m, "submit", "bad_payload")
+        return
+    refs: set[str] = set()
+    for index, entry in enumerate(p["items"]):
+        ref = entry.get("ref") if isinstance(entry, dict) else None
+        code = _item_code(state, m, p, entry, ref, refs)
+        if isinstance(ref, str):
+            refs.add(ref)
+        if code:
+            # `ref` is the schema's str | None; a foreign value that is not a string is not echoed.
+            state.ignore(m, "submit", code, ref if isinstance(ref, str) else None, index)
             continue
-        op = p["op"]
-        if op == "snapshot":
-            if r.position > cutoff.get(p["asker"], -1):
-                folded += 1
-            continue
-        owner = p.get("asker") if op in ("ask", "submit") else owners.get(p.get("ref"))
-        if owner is not None and r.position <= cutoff.get(owner, -1):
-            continue
-        folded += 1
-        ref = p.get("ref")
-        if op == "ask":
-            if p["ask_channel"] != m.channel or p["asker"] != m.from_:
-                ignore(m, op, "binding_mismatch")
-                continue
-            if m.id in decisions or m.id in closed:
-                ignore(m, op, "duplicate_id")
-                continue
-            q = _question_fields(p)
-            q.update(
-                id=m.id,
-                channel=m.channel,
-                asker=m.from_,
-                status="open",
-                version=m.id,
-                revisions=1,
-                asked_at=r.received_at,
-                updated_at=r.received_at,
-                submitted=None,
-                withdrawn=None,
-            )
-            decisions[m.id] = q
-            versions[m.id] = {m.id}
-            owners[m.id] = m.from_
-        elif op in ("update", "withdraw"):
-            q = decisions.get(ref)
-            if ref in closed:
-                code = "closed_ref"
-            elif q is None:
-                code = "unknown_ref"
-            elif q["status"] != "open":
-                code = "closed_ref"
-            elif m.from_ != q["asker"]:
-                code = "not_owner"
-            elif op == "update" and m.id in versions[ref]:
-                code = "duplicate_id"
-            else:
-                code = None
-            if code:
-                ignore(m, op, code, ref)
-                continue
-            if op == "update":
-                q.update(_question_fields(p))
-                q.update(
-                    version=m.id, revisions=q["revisions"] + 1, updated_at=r.received_at
-                )
-                versions[ref].add(m.id)
-            else:
-                q["status"] = "withdrawn"
-                q["withdrawn"] = {"record": m.id, "reason": p.get("reason")}
-                closed.add(ref)
-        elif op == "submit":
-            if m.to != p["asker"] or p["asker"] not in m.mentions:
-                ignore(m, op, "bad_payload")
-                continue
-            refs: set[str] = set()
-            for index, entry in enumerate(p["items"]):
-                ref = entry.get("ref") if isinstance(entry, dict) else None
-                if isinstance(ref, str) and ref in refs:
-                    code = "duplicate_ref"
-                elif not is_ulid(ref):
-                    code = "bad_item"
-                elif ref in closed:
-                    code = "closed_ref"
-                elif ref not in decisions:
-                    code = "unknown_ref"
-                else:
-                    q = decisions[ref]
-                    if q["status"] != "open":
-                        code = "closed_ref"
-                    elif m.from_ != q["answerer"]:
-                        code = "not_answerer"
-                    elif p["asker"] != q["asker"]:
-                        code = "binding_mismatch"
-                    elif entry.get("base") != q["version"]:
-                        code = "stale_base"
-                    elif not _answer(entry, q["options"]):
-                        code = "bad_item"
-                    else:
-                        code = None
-                if isinstance(ref, str):
-                    refs.add(ref)
-                if code:
-                    # `ref` is the schema's str | None; a foreign value that is not a string is not echoed.
-                    ignore(m, op, code, ref if isinstance(ref, str) else None, index)
-                    continue
-                q["status"] = "answered"
-                q["submitted"] = {
-                    "record": m.id,
-                    "from": m.from_,
-                    "base": entry["base"],
-                    "choice": entry.get("choice"),
-                    "note": entry.get("note"),
-                    "submitted_at": r.received_at,
-                }
-                closed.add(ref)
+        q = state.decisions[ref]
+        q["status"] = "answered"
+        q["submitted"] = {
+            "record": m.id,
+            "from": m.from_,
+            "base": entry["base"],
+            "choice": entry.get("choice"),
+            "note": entry.get("note"),
+            "submitted_at": r.received_at,
+        }
+        state.closed.add(ref)
+
+
+def fold(records: Sequence[Record], *, use_snapshot: bool) -> FoldResult:
+    records = sorted(records, key=lambda r: r.position)
+    parsed = _parse_all(records)
+    state = _FoldState()
+    _prime(state, parsed)
+    if use_snapshot:
+        _select_snapshots(records, parsed, state)
+    for r, p, code in parsed:
+        _apply(r, p, code, state)
     ordered = sorted(
-        decisions.values(), key=lambda q: (q["asked_at"] or "", q["channel"], q["id"])
+        state.decisions.values(), key=lambda q: (q["asked_at"] or "", q["channel"], q["id"])
     )
     if use_snapshot:
         ordered = [q for q in ordered if q["status"] == "open"]
     return FoldResult(
         decisions=ordered,
-        ignored=ignored,
-        seen={k: frozenset(v) for k, v in versions.items() if k not in closed},
-        closed=frozenset(closed),
-        snapshot_used=used,
-        folded=folded,
+        ignored=state.ignored,
+        seen={
+            k: frozenset(v) for k, v in state.versions.items() if k not in state.closed
+        },
+        closed=frozenset(state.closed),
+        snapshot_used=state.used,
+        folded=state.folded,
         complete=not use_snapshot,
-        snapshot_closed=snapshot_closed,
+        snapshot_closed=state.snapshot_closed,
     )
 
 
