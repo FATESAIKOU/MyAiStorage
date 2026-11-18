@@ -207,7 +207,7 @@ stdout MUST 只放結果（`channel create`／`channel delete` 印 channel 名�
 - **THEN** exit 2，stderr 說明 channel 沒有建立成功；後端可能留著沒有對應的實體，但介面不提它
 
 ### Requirement: 給 agent 的說明
-repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：六個指令的用法（含 `channel create`／`channel delete` 與落地有時間差、`angareion log` 的查詢用途與「不動游標」）、身分、閒著時用 `angareion wait` 阻塞地等、收到高 urgency 訊息的處理。說明 MUST NOT 含任何秘密或私人資訊。
+repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：六個訊息指令與待決的 `angareion decision` 的用法（含 `channel create`／`channel delete` 與落地有時間差、`angareion log` 的查詢用途與「不動游標」、`angareion decision` 的六個動作與「一律用指令寫、不自己拼 `datatype: decision`」）、身分、閒著時用 `angareion wait` 阻塞地等、收到高 urgency 訊息的處理。說明 MUST NOT 含任何秘密或私人資訊。
 
 #### Scenario: agent 照說明收信
 - **WHEN** 一個讀了說明的 agent 手上沒事
@@ -218,10 +218,10 @@ repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：六
 - **THEN** 它用 `angareion log` 的過濾與錨點查詢，而不是用 `read --since` 反覆撈；說明寫明 log 不動游標
 
 ### Requirement: 後端可以替換（設定檔指位）
-六個介面 MUST 經由一個後端介面實作，後端的動作是：建 channel＝開實體、刪 channel＝關實體、送、確認有沒有新訊息、讀，以及一個唯讀的「列舉」（列出實體上的留言與其到達位置、後端時刻，並標出留言是否是 angareion 訊息——非訊息的留言也要列得出來；`log` 與它的本機快取使用這個動作）。列舉帶 `since` 時 MUST 按留言的**最後編輯時刻**過濾（與 GitHub 列表 API 的語意一致：被編輯過的舊留言 MUST 因編輯重新出現在結果裡；增量同步的「同 id 內容變就覆蓋」仰賴這條）——假後端 MUST 照守，MUST NOT 以「照 `created_at` 過濾或直接忽略 `since`」實作它。對外的 `wait` 是在後端「確認有沒有新訊息」上輪詢（不阻塞＝確認一次）。這次的實作是 GitHub API＋Issues：channel 名經 channel 設定檔指到某個 backend 的某個實體（issue；訊息＝留言）。解析 MUST 只認設定檔，MUST NOT 用標題掃描挑實體——同名標題不影響操作。後端 MUST NOT 存成員（第一期 channel 全公開）。換後端時，指令與訊息格式 MUST NOT 改變。
+七個介面家族 MUST 經由一個後端介面實作，後端的動作是：建 channel＝開實體、刪 channel＝關實體、送、確認有沒有新訊息、讀，以及一個唯讀的「列舉」（列出實體上的留言與其到達位置、後端時刻，並標出留言是否是 angareion 訊息——非訊息的留言也要列得出來；`log` 與它的本機快取使用這個動作）。待決（`decision`）只用「送」與唯讀的「列舉」（經 `log` 的本機快取）這兩種後端動作，MUST NOT 新增後端動作（見 `angareion-pending-decision` 的 design §11／§13.1）。列舉帶 `since` 時 MUST 按留言的**最後編輯時刻**過濾（與 GitHub 列表 API 的語意一致：被編輯過的舊留言 MUST 因編輯重新出現在結果裡；增量同步的「同 id 內容變就覆蓋」仰賴這條）——假後端 MUST 照守，MUST NOT 以「照 `created_at` 過濾或直接忽略 `since`」實作它。對外的 `wait` 是在後端「確認有沒有新訊息」上輪詢（不阻塞＝確認一次）。這次的實作是 GitHub API＋Issues：channel 名經 channel 設定檔指到某個 backend 的某個實體（issue；訊息＝留言）。解析 MUST 只認設定檔，MUST NOT 用標題掃描挑實體——同名標題不影響操作。後端 MUST NOT 存成員（第一期 channel 全公開）。換後端時，指令與訊息格式 MUST NOT 改變。
 
 #### Scenario: 用假後端
-- **WHEN** 測試以記憶體裡的假後端執行六個指令
+- **WHEN** 測試以記憶體裡的假後端執行六個訊息指令與 `decision`
 - **THEN** 行為和用 GitHub 後端時相同，不連網
 
 #### Scenario: 多頁時第 1 頁不變
