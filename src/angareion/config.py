@@ -188,7 +188,20 @@ def load_config(path: Path | str | None = None) -> Config:
     if not isinstance(data, dict):
         raise ConfigError(f"Configuration root must be a JSON object in {config_path}")
 
-    identity = _required(data, "identity", config_path)
+    # #483: a seat named only by `ANGAREION_IDENTITY` is a complete setup - the
+    # environment variable is the first source of the identity (see
+    # `resolve_identity`), so `config.json` may leave it out or empty. The value
+    # is validated by `Config.validate()` below, exactly like config.json's own
+    # identity: a mistyped environment name is a configuration error (exit 2),
+    # never silently dropped in favour of some other seat.
+    identity = data.get("identity")
+    if identity in (None, ""):
+        identity = os.environ.get(IDENTITY_ENV, "")
+        if identity == "":
+            raise ConfigError(
+                f"Configuration is missing 'identity': {config_path} "
+                f"(set it there, or set {IDENTITY_ENV} in the environment)"
+            )
     config_dir = _required(data, "config_dir", config_path)
     registry_repo = _required(data, "registry_repo", config_path)
     registry_issue = _required(data, "registry_issue", config_path)

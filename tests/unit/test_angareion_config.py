@@ -9,6 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from _angareion_fakes import FakeGit, backends_json, channels_json, entity
+from angareion.backend import Cursor, FakeBackend
+from angareion.channel_config import BACKENDS_PATH, CHANNELS_PATH, ChannelStore
+from angareion.cli import main
 from angareion.config import (
     CONFIG_PULL_INTERVAL_DEFAULT,
     Config,
@@ -21,6 +25,7 @@ from angareion.config import (
     resolve_identity,
     save_config,
 )
+from angareion.registry import FakeRegistryClient
 
 
 def test_config_defaults(tmp_path, monkeypatch):
@@ -155,19 +160,20 @@ def test_missing_config_file(tmp_path):
         load_config(tmp_path / "nope.json")
 
 
-def _write_config(tmp_path, identity: str) -> Path:
+_IDENTITY_NOT_IN_CONFIG = object()
+
+
+def _write_config(tmp_path, identity=_IDENTITY_NOT_IN_CONFIG) -> Path:
+    """Write a config.json; with no `identity` argument the key is left out."""
+    data = {
+        "config_dir": str(tmp_path / "clone"),
+        "registry_repo": "owner/MyAiStorage",
+        "registry_issue": 77,
+    }
+    if identity is not _IDENTITY_NOT_IN_CONFIG:
+        data["identity"] = identity
     cfg_file = tmp_path / "config.json"
-    cfg_file.write_text(
-        json.dumps(
-            {
-                "identity": identity,
-                "config_dir": str(tmp_path / "clone"),
-                "registry_repo": "owner/MyAiStorage",
-                "registry_issue": 77,
-            }
-        ),
-        encoding="utf-8",
-    )
+    cfg_file.write_text(json.dumps(data), encoding="utf-8")
     return cfg_file
 
 
@@ -223,3 +229,89 @@ def test_with_identity_copies_and_keeps_everything_else(tmp_path):
     assert other.state_dir == cfg.state_dir
     assert other.registry_issue == cfg.registry_issue
     assert other.to_dict()["identity"] == "mylinuxpool-rev-w1-1"
+
+
+# -- #483: ANGAREION_IDENTITY alone names the seat -------------------------
+
+
+def test_a_missing_config_identity_uses_the_environment_identity(tmp_path, monkeypatch):
+    """#483: the environment is the first source of the identity, so it can load alone."""
+    monkeypatch.setenv("ANGAREION_IDENTITY", "mylinuxpool-rev-w1-1")
+    cfg = load_config(_write_config(tmp_path))
+    assert cfg.identity == "mylinuxpool-rev-w1-1"
+
+
+@pytest.mark.parametrize("empty", ["", None])
+def test_an_empty_config_identity_uses_the_environment_identity(tmp_path, monkeypatch, empty):
+    monkeypatch.setenv("ANGAREION_IDENTITY", "mylinuxpool-rev-w1-1")
+    cfg = load_config(_write_config(tmp_path, empty))
+    assert cfg.identity == "mylinuxpool-rev-w1-1"
+
+
+def test_a_missing_config_identity_without_the_environment_is_a_config_error(tmp_path):
+    """Both places silent is still the old error - and it points at the environment."""
+    with pytest.raises(ConfigError, match="identity") as excinfo:
+        load_config(_write_config(tmp_path))
+    assert "ANGAREION_IDENTITY" in str(excinfo.value)
+
+
+def test_an_illegal_environment_identity_is_a_config_error(tmp_path, monkeypatch):
+    """A set-but-wrong name is an error (exit 2), never a silent fall back."""
+    monkeypatch.setenv("ANGAREION_IDENTITY", "mylinuxpool impl w1-1")
+    with pytest.raises(ConfigError, match="identity"):
+        load_config(_write_config(tmp_path))
+
+
+def test_the_config_identity_is_what_load_config_returns(tmp_path, monkeypatch):
+    """The env wins only in `resolve_identity`; `load_config` reports config.json's name."""
+    monkeypatch.setenv("ANGAREION_IDENTITY", "mylinuxpool-rev-w1-1")
+    cfg = load_config(_write_config(tmp_path, "mylinuxpool-impl-w1-1"))
+    assert cfg.identity == "mylinuxpool-impl-w1-1"
+    assert resolve_identity(cfg) == "mylinuxpool-rev-w1-1"
+
+
+@pytest.mark.parametrize("missing", ["config_dir", "registry_repo", "registry_issue"])
+def test_other_missing_keys_stay_required_with_an_environment_identity(tmp_path, monkeypatch, missing):
+    monkeypatch.setenv("ANGAREION_IDENTITY", "mylinuxpool-rev-w1-1")
+    data = {
+        "config_dir": str(tmp_path / "clone"),
+        "registry_repo": "owner/MyAiStorage",
+        "registry_issue": 77,
+    }
+    del data[missing]
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ConfigError, match=missing):
+        load_config(cfg_file)
+
+
+def test_the_cli_runs_on_a_config_without_identity(tmp_path, monkeypatch, capsys):
+    """#483 end to end: one read-only command starts instead of exiting 2 at load."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    monkeypatch.setenv("ANGAREION_CONFIG", str(_write_config(tmp_path)))
+    monkeypatch.setenv("ANGAREION_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("ANGAREION_IDENTITY", "mylinuxpool-rev-w1-1")
+
+    git = FakeGit(
+        {
+            f"origin/main:{CHANNELS_PATH}": channels_json({"general": ("github-main", 10)}),
+            f"origin/main:{BACKENDS_PATH}": backends_json({"github-main": ("github", "owner/repo")}),
+        },
+        fetch_head_mtime=1000.0,
+    )
+    store = ChannelStore(clone, git=git, interval=0, now=lambda: 1000.0, fetch_head_mtime=lambda: git.fetch_head_mtime)
+    backend = FakeBackend(store)
+    backend.add_entity("general", number=10)
+
+    ret = main(
+        ["send", "--channel", "general", "--to", "mypmo-pm-m1", "--body", "hi"],
+        backend=backend,
+        store=store,
+        registry=FakeRegistryClient(),
+    )
+    captured = capsys.readouterr()
+    assert ret == 0, captured.err
+    assert "missing 'identity'" not in captured.err
+    sent = backend.read(entity(channel="general", issue=10), Cursor()).messages
+    assert [m.from_ for m in sent] == ["mylinuxpool-rev-w1-1"]
