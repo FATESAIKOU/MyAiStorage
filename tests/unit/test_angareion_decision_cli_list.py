@@ -170,11 +170,17 @@ def test_c20e_each_action_calls_only_send_and_the_log_listing(world, action, who
 
 
 def test_c20e_automatic_snapshot_calls_only_send_and_the_log_listing(world, monkeypatch):
-    monkeypatch.setattr(dec, "SNAPSHOT_EVERY", 1)
+    # A snapshot is only written when something is old enough to cover (the 60 s stable window), so build a
+    # history first; otherwise this test would never reach the snapshot's send (#477, architect L-B1).
+    _build_history_for_snapshot(world, monkeypatch)
+    world.at(201)
     world.backend.calls.clear()
-    world.ask()
+    result = world.run(P, "decision", "ask", "--channel", CH, "--body", yaml_of(question(title="四")))
+    assert result.code == 0
+    assert len(_snapshot_records(world)) == 1  # the automatic snapshot really was sent
     assert set(world.backend.calls) <= C20E_ALLOWED
     assert "enumerate_conditional" in world.backend.calls
+    assert world.backend.calls.count("send") >= 2  # the ask and the snapshot
 
 
 # -- C-23: list's defaults, --all, the JSON shape, and failures ---------------

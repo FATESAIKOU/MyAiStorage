@@ -339,7 +339,7 @@ stdout 只放結果（`channel create`／`channel delete` 的名稱、`send` 的
 
 ## 給 MyLinuxPool 的需求
 
-這一節是交接資料，不是 Angareion 的設計決定：Angareion 對外只有六個介面，token、設定檔與說明檔怎麼放到 worker 上是 MyLinuxPool 的「Angareion 能力」的事。
+這一節是交接資料，不是 Angareion 的設計決定：Angareion 對外有七個介面家族（六個訊息指令與待決的 `decision`），token、設定檔與說明檔怎麼放到 worker 上是 MyLinuxPool 的「Angareion 能力」的事。
 
 ### token
 
