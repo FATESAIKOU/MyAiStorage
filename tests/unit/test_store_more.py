@@ -460,3 +460,45 @@ def test_broken_outbox_entry_quarantined(remote, capsys):  # new, C2/C4
     store.sync(paths)
     assert (paths.outbox / ".bad" / hdr["id"].split(":", 1)[1]).is_dir()
     assert "壞了" in capsys.readouterr().err
+
+
+def test_sources_answers_every_by_source_in_one_pass():  # #486 F1
+    """The one-pass map says, for every key, exactly what `by_source` says: missing
+    copies left out, newest first, the same source id under two agents kept apart,
+    and a row whose agent or source id is NULL given no key (an empty source id is a
+    value like any other, as it is for `by_source`)."""
+    paths = store.Paths.from_env()
+    index = store.Index(paths)
+
+    def put(ulid, agent, sid):
+        hdr = _header(f"標題 {ulid[-4:]}")
+        hdr["id"] = f"agora:{ulid}"
+        hdr["agora"]["source"] = {"agent": agent, "session_id": sid,
+                                  "created_at": "2026-10-01T00:00:00Z"}
+        index.put(ulid, "md5", hdr, "## user\nx\n")
+
+    a, b, c = ("01AAAAAAAAAAAAAAAAAAAAAAAA", "01BBBBBBBBBBBBBBBBBBBBBBBB",
+               "01CCCCCCCCCCCCCCCCCCCCCCCC")
+    d, e, f, g = ("01DDDDDDDDDDDDDDDDDDDDDDDD", "01EEEEEEEEEEEEEEEEEEEEEEEE",
+                  "01FFFFFFFFFFFFFFFFFFFFFFFF", "01GGGGGGGGGGGGGGGGGGGGGGGG")
+    put(a, "opencode", "ses_three")
+    put(b, "opencode", "ses_three")
+    put(c, "opencode", "ses_three")
+    put(d, "claude", "ses_three")            # same source id, other agent
+    put(e, "opencode", "ses_gone")
+    put(f, "opencode", None)                 # no source id
+    put(g, "opencode", "")                   # empty source id
+    index.mark_missing([e])
+
+    groups = index.sources()
+    for key in (("opencode", "ses_three"), ("claude", "ses_three"), ("opencode", "ses_gone"),
+                ("opencode", "")):
+        assert groups.get(key, []) == index.by_source(*key)
+    assert groups[("opencode", "ses_three")] == [c, b, a]       # newest first
+    assert groups[("claude", "ses_three")] == [d]
+    assert groups["claude", "ses_three"] != groups["opencode", "ses_three"]
+    assert ("opencode", "ses_gone") not in groups               # Drive no longer has it
+    assert index.by_source("opencode", "ses_gone") == []
+    assert groups[("opencode", "")] == [g] == index.by_source("opencode", "")   # empty is a value
+    assert (None, None) not in groups and index.by_source(None, None) == []
+    assert sum(len(ulids) for ulids in groups.values()) == 5    # only f (NULL) is in none

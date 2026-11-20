@@ -2787,6 +2787,27 @@ class Index:
             (agent, source_id))
         return [r[0] for r in rows]
 
+    def sources(self) -> dict[tuple[str, str], list[str]]:
+        """Every (agent, source_id) group at once, newest first.
+
+        What `by_source` answers, one query instead of one per listed agent
+        session (#486): the caller that wants them all (the import tab) must
+        not scan the whole table once per session. Sessions Drive no longer
+        has are left out here too (T1 3.4). A row whose agent or source id is NULL
+        gets no key, because `by_source` cannot find it either (`= NULL` matches
+        nothing); an empty string source id is a real value to SQL, so it is a key
+        here exactly as it is for `by_source`.
+        """
+        grouped: dict[tuple[str, str], list[str]] = {}
+        rows = self.db.execute(
+            "SELECT agent, source_id, ulid FROM sessions "
+            "WHERE ulid NOT IN (SELECT ulid FROM cloud_missing) ORDER BY ulid DESC")
+        for agent, source_id, ulid in rows:
+            if agent is None or source_id is None:
+                continue        # NULL: `by_source` finds nothing for it either
+            grouped.setdefault((agent, source_id), []).append(ulid)
+        return grouped
+
     def children(self, ulid: str) -> list[str]:
         """Sessions that continue or merge from this one (refs alone do not count).
 
