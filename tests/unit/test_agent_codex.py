@@ -11,7 +11,7 @@ import pytest
 from agora import cache, cli, credscan, store, tui
 from agora import header as h
 from agora.agents import codex, claude
-from agora.agents.base import AgentError
+from agora.agents.base import AgentError, Listed
 from _round_seam import in_process_start_child
 
 A = codex.ADAPTER
@@ -371,3 +371,164 @@ def test_fix1_title_first_user(rollout):
     expected = next(text[:80] for role, text in codex._parse(codex._rows(rollout.read_bytes()))[1] if role == "user")
     assert A.export(SID).title == expected
     assert A.list_sessions()[0].title == expected
+
+
+# --- #487: list_sessions keeps (path, mtime, size) -> listed fields ----------
+
+
+@pytest.fixture(autouse=True)
+def clear_list_cache():
+    """The cache is module state: no test may see the previous test's keys."""
+    codex._LIST_CACHE.clear()
+    yield
+    codex._LIST_CACHE.clear()
+
+
+def sessions_dir():
+    d = Path(os.environ["AGORA_CODEX_HOME"]) / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def write_rollout(name, sid=None, *, user="hello", cwd="/work", assistant="ok"):
+    rows = []
+    meta = {"timestamp": "2026-11-08T00:00:00Z"}
+    if sid:
+        meta["id"] = sid
+    rows.append({"type": "session_meta", "payload": meta})
+    if user is not None:
+        rows.append({"type": "response_item", "payload": {
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": user}]}})
+    if assistant is not None:
+        rows.append({"type": "response_item", "payload": {
+            "type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": assistant}]}})
+    path = sessions_dir() / name
+    path.write_bytes(b"".join(json.dumps(r).encode() + b"\n" for r in rows))
+    return path
+
+
+def read_calls(monkeypatch):
+    """Count `codex._read` calls and hand back the list the calls land in."""
+    calls = []
+    original = codex._read
+
+    def counting(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(codex, "_read", counting)
+    return calls
+
+
+def old_list_sessions():
+    """The pre-#487 body, verbatim: the result the cache must not change."""
+    listed = []
+    for path in codex._files():
+        rows = codex._rows(codex._read(path))
+        sid = codex._id(path, rows)
+        if sid:
+            texts = codex._parse(rows)[1]
+            updated = codex.iso_utc(path.stat().st_mtime)
+            listed.append(Listed(sid, codex._meta(rows).get("cwd"),
+                                 next((t[:80] for r, t in texts if r == "user"), None), updated))
+    return listed
+
+
+def test_f3_second_call_does_not_read(monkeypatch):
+    write_rollout("rollout-a-00000000-0000-0000-0000-000000000002.jsonl",
+                  "00000000-0000-0000-0000-000000000002")
+    first = A.list_sessions()
+    calls = read_calls(monkeypatch)
+    second = A.list_sessions()
+    assert second == first
+    assert calls == []
+
+
+def test_f3_size_change_rereads_even_with_same_mtime(monkeypatch):
+    write_rollout("rollout-same-00000000-0000-0000-0000-000000000002.jsonl",
+                  "00000000-0000-0000-0000-000000000002")
+    changed = write_rollout("rollout-changed-00000000-0000-0000-0000-000000000003.jsonl",
+                            "00000000-0000-0000-0000-000000000003")
+    before = {s.session_id: s for s in A.list_sessions()}
+    stat = changed.stat()
+    calls = read_calls(monkeypatch)
+    changed.write_bytes(changed.read_bytes().replace(b'"hello"', b'"hello again"'))
+    os.utime(changed, ns=(stat.st_atime_ns, stat.st_mtime_ns))   # mtime put back: size differs
+    after = {s.session_id: s for s in A.list_sessions()}
+    assert calls == [changed]                       # only this one was read
+    assert after["00000000-0000-0000-0000-000000000003"].title == "hello again"
+    assert after["00000000-0000-0000-0000-000000000002"] == before["00000000-0000-0000-0000-000000000002"]
+
+
+def test_f3_mtime_change_rereads(monkeypatch):
+    path = write_rollout("rollout-moved-00000000-0000-0000-0000-000000000002.jsonl",
+                         "00000000-0000-0000-0000-000000000002")
+    first = A.list_sessions()[0]
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))   # size unchanged
+    calls = read_calls(monkeypatch)
+    second = A.list_sessions()[0]
+    assert calls == [path]
+    assert second.updated_at != first.updated_at
+
+
+def test_f3_deleted_file_drops_and_cache_pruned():
+    gone = write_rollout("rollout-gone-00000000-0000-0000-0000-000000000002.jsonl",
+                         "00000000-0000-0000-0000-000000000002")
+    keep = write_rollout("rollout-keep-00000000-0000-0000-0000-000000000003.jsonl",
+                         "00000000-0000-0000-0000-000000000003")
+    assert len(A.list_sessions()) == 2
+    assert {k[0] for k in codex._LIST_CACHE} == {str(gone), str(keep)}
+    gone.unlink()
+    assert [s.session_id for s in A.list_sessions()] == ["00000000-0000-0000-0000-000000000003"]
+    assert {k[0] for k in codex._LIST_CACHE} == {str(keep)}
+
+
+def test_f3_no_sid_not_listed_and_cached(monkeypatch):
+    write_rollout("rollout-noid.jsonl", None, user="no id anywhere")
+    assert A.list_sessions() == []
+    assert len(codex._LIST_CACHE) == 1
+    calls = read_calls(monkeypatch)
+    assert A.list_sessions() == []
+    assert calls == []                    # "not listed" is a result too
+
+
+def test_f3_corrupt_file_raises_as_before_and_is_not_cached():
+    bad = sessions_dir() / "rollout-bad-00000000-0000-0000-0000-000000000002.jsonl"
+    bad.write_bytes(b'{}\nBROKEN\n{}\n')
+    write_rollout("rollout-ok-00000000-0000-0000-0000-000000000003.jsonl",
+                  "00000000-0000-0000-0000-000000000003")
+    # Pre-#487 (checked on a copy of main): the whole list raises, not just skips.
+    for _ in range(2):
+        with pytest.raises(AgentError, match="不是有效 JSONL"):
+            A.list_sessions()
+        assert not any(k[0] == str(bad) for k in codex._LIST_CACHE)
+    bad.unlink()
+    assert [s.session_id for s in A.list_sessions()] == ["00000000-0000-0000-0000-000000000003"]
+
+
+def test_f3_same_results_as_old_implementation(rollout):
+    write_rollout("rollout-long-00000000-0000-0000-0000-000000000002.jsonl",
+                  "00000000-0000-0000-0000-000000000002", user="長" * 120, cwd="/long")
+    write_rollout("rollout-nouser-00000000-0000-0000-0000-000000000003.jsonl",
+                  "00000000-0000-0000-0000-000000000003", user=None, assistant="hi")
+    write_rollout("rollout-nameless-00000000-0000-0000-0000-000000000004.jsonl",
+                  None, user="id only in the file name")
+    write_rollout("rollout-noid.jsonl", None, user="unlisted")
+    expected = old_list_sessions()
+    got = A.list_sessions()
+    assert [(s.session_id, s.dir, s.title, s.updated_at) for s in got] == \
+           [(s.session_id, s.dir, s.title, s.updated_at) for s in expected]
+    assert [s.title for s in got if s.session_id.endswith("0002")] == ["長" * 80]
+
+
+def test_f3_cache_does_not_leak_into_other_readers(rollout):
+    # export / search_text / last_message must keep reading the file itself.
+    assert [s.session_id for s in A.list_sessions()] == [SID]
+    rollout.write_bytes(rollout.read_bytes() + b'{"type":"future_event","payload":{}}\n')
+    assert A.export(SID).message_count == 11
+    assert "future_event" in str(A.export(SID).turns)
+    assert list(A.search_text("樣本測試完成")) == [SID]
+    assert A.last_message(SID) is not None

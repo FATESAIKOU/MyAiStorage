@@ -11,6 +11,14 @@ from agora.agents.base import AgentError, Exported, Listed, iso_utc, tool_line, 
 CODEX_CONTINUE_LATER = "codex 第一版只支援 import／讀取（#443）；接續 codex 匯入的 Session 請用 claude 或 opencode（跨 agent，會寫回同一個 Session）"
 CODEX_MERGE_LATER = "codex 第一版不寫要約；請用 opencode 或 claude"
 _UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+# The TUI lists every rollout on every reload, and one rollout can be megabytes,
+# so the answer worked out for a file is kept until the file changes: same shape
+# as claude's _LIST_CACHE. Keyed by (path, mtime_ns, size); the value is the
+# fields list_sessions needs - or None for a rollout with no usable id, which is
+# cached too so it is not parsed again either. An unreadable or invalid file
+# raises every time and nothing is cached for it.
+_LIST_CACHE: dict = {}
+_CACHE_MISS = object()
 
 
 def _root():
@@ -97,6 +105,20 @@ def _id(path, rows):
     return sid if isinstance(sid, str) and _UUID.fullmatch(sid) else None
 
 
+def _listed(path):
+    """What list_sessions shows for one rollout: (id, dir, title), or None for no usable id.
+
+    Raises like the walk always did (see `_read` / `_rows`); the caller caches
+    only a value that came back.
+    """
+    rows = _rows(_read(path))
+    sid = _id(path, rows)
+    if not sid:
+        return None
+    texts = _parse(rows)[1]
+    return (sid, _meta(rows).get("cwd"), next((t[:80] for r, t in texts if r == "user"), None))
+
+
 def _find(session_id):
     files = _files()
     for path in files:
@@ -140,18 +162,31 @@ class Codex:
         return _parse(_rows(raw))[0]
 
     def list_sessions(self):
+        """Every rollout under sessions/ that carries a usable id, cheapest across reloads.
+
+        The answer for a file is cached by (path, mtime, size) and reused until
+        the file changes (see `_LIST_CACHE`): the TUI reload lists everything
+        again after every action. The parse itself is unchanged - a cache miss
+        reads and parses the whole rollout exactly as before.
+        """
         listed = []
+        seen = set()
         for path in _files():
-            rows = _rows(_read(path))
-            sid = _id(path, rows)
-            if sid:
-                texts = _parse(rows)[1]
-                try:
-                    updated = iso_utc(path.stat().st_mtime)
-                except OSError as exc:
-                    raise AgentError("讀不到 codex rollout 時間") from exc
-                listed.append(Listed(sid, _meta(rows).get("cwd"),
-                                     next((t[:80] for r, t in texts if r == "user"), None), updated))
+            try:
+                stat = path.stat()
+            except OSError as exc:
+                raise AgentError("讀不到 codex rollout 時間") from exc
+            key = (str(path), stat.st_mtime_ns, stat.st_size)
+            seen.add(key)
+            cached = _LIST_CACHE.get(key, _CACHE_MISS)
+            if cached is _CACHE_MISS:
+                cached = _LIST_CACHE[key] = _listed(path)
+            if cached is None:
+                continue
+            sid, directory, title = cached
+            listed.append(Listed(sid, directory, title, iso_utc(stat.st_mtime)))
+        for stale in [k for k in _LIST_CACHE if k not in seen]:
+            del _LIST_CACHE[stale]          # the cache is only as big as the last walk
         return listed
 
     def last_message(self, session_id):
