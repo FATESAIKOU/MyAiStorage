@@ -121,6 +121,7 @@ def import_rows(index: store.Index, agents: list, paths: store.Paths | None = No
     for _ulid, hdr, _snippet in index.search([]):   # agent sessions a continue has moved past
         skip.update(h.agora_of(hdr).get("previous_sources") or [])
     found = []
+    imported_by_source = index.sources()    # one pass, not one scan per listed session (#486)
     for agent in agents:
         try:
             listed = agent.list_sessions()
@@ -131,7 +132,7 @@ def import_rows(index: store.Index, agents: list, paths: store.Paths | None = No
             key = f"{agent.name}:{s.session_id}"
             if key in skip or (own and (s.dir or "").startswith(own)):
                 continue
-            imported = index.by_source(agent.name, s.session_id)
+            imported = imported_by_source.get((agent.name, s.session_id), [])
             if imported and not _newer(s.updated_at, index, imported[0]):
                 continue
             mark = "↻ " if imported else ""   # imported before, talked to since: import again

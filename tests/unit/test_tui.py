@@ -125,6 +125,108 @@ def test_a_session_talked_to_after_its_import_comes_back_marked():
     assert [(r.key, r.cells[1]) for r in rows] == [("opencode:ses_old", "↻ 舊的")]
 
 
+def _import_rows_before_486(index: store.Index, agents: list, paths: store.Paths | None = None) -> list[tui.Row]:
+    """The import tab as it was written before #486: one `by_source` per listed session.
+
+    Kept only as the reference for the new one-pass version, so the tests can say
+    "the same rows" rather than restating the rule in a second place.
+    """
+    skip, own = set(), None
+    if paths is not None:
+        own = str(paths.state)
+        try:
+            skip = set((paths.state / "unsaved-launches").read_text(encoding="utf-8").split())
+        except OSError:
+            pass
+    for _ulid, hdr, _snippet in index.search([]):
+        skip.update(h.agora_of(hdr).get("previous_sources") or [])
+    found = []
+    for agent in agents:
+        try:
+            listed = agent.list_sessions()
+        except Exception as e:
+            print(f"[agora] {agent.name} 的 session 清單讀不到：{e}", file=sys.stderr)
+            listed = []
+        for s in listed:
+            key = f"{agent.name}:{s.session_id}"
+            if key in skip or (own and (s.dir or "").startswith(own)):
+                continue
+            imported = index.by_source(agent.name, s.session_id)
+            if imported and not tui._newer(s.updated_at, index, imported[0]):
+                continue
+            mark = "↻ " if imported else ""
+            found.append((s.updated_at or "", tui.Row(
+                key, [s.session_id[-8:], tui._short(mark + (s.title or "")), agent.name,
+                      tui._when(s.updated_at), tui._home(s.dir)],
+                f"{s.session_id} {agent.name} {s.dir or ''} {s.title or ''}", agent.name, s.dir, s.updated_at)))
+    return [row for _stamp, row in sorted(found, key=lambda pair: pair[0], reverse=True)]
+
+
+def _import_header(ulid: str, sid: str, updated: str, *, agent: str = "opencode") -> dict:
+    hdr = _hdr(ulid, f"標題 {ulid[-4:]}", agent=agent, sid=sid)
+    hdr["agora"]["updated_at"] = updated
+    return hdr
+
+
+def test_import_rows_is_the_old_by_source_answer_in_one_pass():
+    """#486 F1: the new one-pass map lists exactly what the per-session queries did.
+
+    Covers the cases that made the old lookup more than a dictionary key: the same
+    source with several agora copies (the newest is the comparison), a copy Drive
+    no longer has (it is not "already imported" any more), the same source id under
+    two agents, a session talked to since (↻), one unchanged, skip/own folders.
+    """
+    paths, index = _index(
+        (_import_header("01AAAAAAAAAAAAAAAAAAAAAAAA", "ses_multi", "2026-10-04T00:00:00Z"), "## user\nx\n"),
+        (_import_header("01BBBBBBBBBBBBBBBBBBBBBBBB", "ses_multi", "2026-10-05T00:00:00Z"), "## user\nx\n"),
+        (_import_header("01CCCCCCCCCCCCCCCCCCCCCCCC", "ses_old", "2026-10-02T00:00:00Z"), "## user\nx\n"),
+        (_import_header("01DDDDDDDDDDDDDDDDDDDDDDDD", "ses_same", "2026-10-02T03:04:00Z"), "## user\nx\n"),
+        (_import_header("01EEEEEEEEEEEEEEEEEEEEEEEE", "ses_gone", "2026-10-02T00:00:00Z"), "## user\nx\n"),
+        (_import_header("01FFFFFFFFFFFFFFFFFFFFFFFF", "ses_shared", "2026-10-02T00:00:00Z", agent="claude"), "## user\nx\n"),
+    )
+    store.Index(paths).mark_missing(["01EEEEEEEEEEEEEEEEEEEEEEEE"])   # deleted on another machine
+    paths.state.mkdir(parents=True, exist_ok=True)
+    (paths.state / "unsaved-launches").write_text("opencode:ses_copy\n")
+    agents = [
+        FakeAgent("opencode", [
+            Listed("ses_multi", "/tmp/p", "同源多筆", "2026-10-04T00:00:00Z"),
+            Listed("ses_old", "/tmp/p", "接續過", "2026-10-03T00:00:00Z"),
+            Listed("ses_same", "/tmp/p", "沒動", "2026-10-02T03:04:00Z"),
+            Listed("ses_gone", "/tmp/p", "Drive 沒了", "2026-10-02T00:00:00Z"),
+            Listed("ses_shared", "/tmp/p", "opencode 的同一 id", "2026-10-02T00:00:00Z"),
+            Listed("ses_copy", "/tmp/p", "要約用", None),
+            Listed("ses_own", str(paths.state / "summarize"), "自己的", None),
+            Listed("ses_new", None, None, None),
+        ]),
+        FakeAgent("claude", [
+            Listed("ses_shared", "/tmp/p", "claude 的同一 id", "2026-10-03T00:00:00Z"),
+        ]),
+    ]
+
+    expected = _import_rows_before_486(index, agents, paths)
+    rows = tui.import_rows(index, agents, paths)
+    assert [(r.key, r.cells, r.text, r.agent, r.dir, r.updated) for r in rows] == \
+           [(r.key, r.cells, r.text, r.agent, r.dir, r.updated) for r in expected]
+    assert [r.key for r in rows] == ["opencode:ses_old", "claude:ses_shared", "opencode:ses_gone",
+                                     "opencode:ses_shared", "opencode:ses_new"]
+    assert rows[0].cells[1] == "↻ 接續過"                # imported, talked to since
+    assert rows[1].cells[1] == "↻ claude 的同一 id"
+    assert rows[2].cells[1] == "Drive 沒了"              # cloud_missing: import again, no mark
+
+
+def test_import_rows_never_queries_by_source(monkeypatch):
+    """#486 F1: the import tab reads the map once; a per-session `by_source` call is the bug."""
+    _, index = _index((_import_header("01AAAAAAAAAAAAAAAAAAAAAAAA", "ses_in", "2026-10-02T00:00:00Z"), "## user\nx\n"))
+    agent = FakeAgent("opencode", [Listed("ses_in", "/tmp/p", "已匯入", "2026-10-02T00:00:00Z"),
+                                   Listed("ses_new", "/tmp/p", "新的", "2026-10-03T00:00:00Z")])
+
+    def fail(*args, **kwargs):
+        pytest.fail("import_rows called Index.by_source")
+    monkeypatch.setattr(store.Index, "by_source", fail)
+
+    assert [r.key for r in tui.import_rows(index, [agent])] == ["opencode:ses_new"]
+
+
 def test_a_failing_adapter_leaves_the_others_list(capsys):  # review U1
     _, index = _index()
 
