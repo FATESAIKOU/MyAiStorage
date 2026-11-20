@@ -1134,6 +1134,230 @@ def test_a_success_clears_only_the_rows_it_acted_on():
     _run(go)
 
 
+# --- one action, one table rebuild (#488 F2) ----------------------------------
+
+
+def _count_shows(monkeypatch):
+    """Every rebuild of the table, in order (the `keep` each `show` was handed)."""
+    calls = []
+    original = tui.AgoraApp.show
+
+    def counting(self, keep=None):
+        calls.append(keep)
+        return original(self, keep)
+
+    monkeypatch.setattr(tui.AgoraApp, "show", counting)
+    return calls
+
+
+def _act_records_its_return(app):
+    """Wait for the action itself to be done, not only for its window to close.
+
+    The rebuild happens after the result window goes, in the same coroutine; waiting
+    on the window alone would race the code under test.
+    """
+    done = []
+    act = app.act
+
+    async def recording(*args, **kwargs):
+        result = await act(*args, **kwargs)
+        done.append(result)
+        return result
+
+    app.act = recording
+    return done
+
+
+def _tabbed_app():
+    """Three agora rows on one tab, one agent session waiting on the other."""
+    agent = FakeAgent("claude", [Listed("s1", "/tmp/p", "未匯入的", "2026-10-02T00:00:00Z")])
+    paths, _ = _index(*((_hdr(f"01{'0' * 23}{n}", title, sid=f"ses_{n}"), f"## user\n{n} 的內容\n")
+                        for n, title in enumerate("甲乙丙", 1)))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[agent], check_setup=False)
+    app.spawn, started = _spawn()
+    app._last_spawned = started
+    return app
+
+
+def test_one_action_rebuilds_the_table_once(monkeypatch):
+    """F2: a successful `act` used to reload (one `show`) and then `show` again."""
+    app = _tabbed_app()
+    shows = _count_shows(monkeypatch)
+    done = _act_records_its_return(app)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            assert app.rows["agora"], "the list never loaded"
+            shows.clear()                                  # the start-up reload is not the action's
+            await pilot.press("space")                     # mark 甲
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _close_result(pilot, app)
+            assert await _wait(lambda: done, pilot), "the action never came back to the list"
+            assert shows == [None], f"one action rebuilt the table {len(shows)} times"
+            assert not app.marked, "成功之後勾選要清掉"
+            table = app.query_one("#table", tui.DataTable)
+            for row in app.shown():
+                tick = str(table.get_cell(row.key, "mark")).strip()
+                assert (tick == "✓") == (row.key in app.marked), f"{row.key} 的勾選欄和 marked 不一致"
+    _run(go)
+
+
+@pytest.mark.parametrize("code", [2, 130])             # a failure, and an interruption
+def test_a_failed_or_interrupted_action_rebuilds_the_table_once(code, monkeypatch):
+    app = _tabbed_app()
+    app.spawn, _ = _spawn(code=code)
+    shows = _count_shows(monkeypatch)
+    done = _act_records_its_return(app)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            shows.clear()
+            await pilot.press("space")                     # mark 甲
+            marked = set(app.marked)
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _close_result(pilot, app)
+            assert await _wait(lambda: done, pilot), "the action never came back to the list"
+            assert shows == [None], f"one action rebuilt the table {len(shows)} times"
+            assert set(app.marked) == marked, "a command that did not succeed must keep the marks"
+    _run(go)
+
+
+def test_a_success_clears_the_marks_it_sent_and_nothing_else():
+    """Only the rows this command carried lose their mark (review M1), on either tab."""
+    app = _tabbed_app()
+    done = _act_records_its_return(app)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("a")                         # all three agora rows
+            await pilot.press("]")                         # the 未匯入 tab
+            await pilot.pause()
+            await pilot.press("space")                     # its one row
+            on_import = {r.key for r in app.rows["import"]}
+            await pilot.press("[")                         # back to agora
+            await pilot.pause()
+            await _filter_to(pilot, "甲")                  # 乙 is hidden, so it is not sent
+            sent_key = app.shown()[0].key
+            before = set(app.marked)
+            assert sent_key in before and before - {sent_key}
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _close_result(pilot, app)
+            assert await _wait(lambda: done, pilot), "the action never came back to the list"
+            assert set(app.marked) == before - {sent_key}
+            assert on_import <= set(app.marked), "另一頁的勾選被丟掉了"
+            await pilot.press("/")
+            await pilot.press("escape")                    # show every agora row again
+            await pilot.pause()
+            table = app.query_one("#table", tui.DataTable)
+            shown = app.shown()
+            assert [r.key for r in shown] == [r.key for r in app.rows["agora"]]
+            for row in shown:
+                tick = str(table.get_cell(row.key, "mark")).strip()
+                assert (tick == "✓") == (row.key in app.marked), f"{row.key} 的勾選欄和 marked 不一致"
+    _run(go)
+
+
+async def _act_before_the_fix(self, title, argv, sent=None):
+    """`act` as it stood at 193b23c, the reference for the screen it left (#488 F2).
+
+    The only difference from the fixed one is at the end: it reloaded first and then
+    rebuilt the table a second time to clear the marks.
+    """
+    self._stopped = False
+    code, out = await self.push_screen_wait(tui.Run(title, argv, self.spawn))
+    stopped = bool(self._stopped or code == 130)
+    action = argv[0] if argv else ""
+    if stopped:
+        note = "已中斷；重跑同一個動作會接著做"
+    elif code == 0:
+        if action == "delete":
+            note = ("已從本機刪除，背景移到 Drive 垃圾桶" if "背景移到 Drive 垃圾桶" in out
+                    else "已從本機刪除")
+        elif action in ("import", "merge"):
+            note = "已經存在本機，背景上傳中"
+        else:
+            note = "完成"
+    elif code == 3 and action == "delete":
+        note = ("已從本機刪除；移到 Drive 垃圾桶要等之後的指令" if "移到 Drive 垃圾桶要等" in out
+                else "已從本機刪除；背景上傳啟動失敗，outbox 要等之後的指令")
+    elif code == 3:
+        note = "已存進 outbox，之後的指令會自動再送"
+    else:
+        note = "沒有全部成功，訊息在下面"
+    await self.push_screen_wait(tui.Tell(f"{title}{'（已中斷）' if stopped else ''}",
+                                        f"{note}\n\n{out}", code == 0))
+    self.reload(keep_marked=True)
+    if code == 0 and sent:
+        self.marked -= set(sent)
+        self.show()
+    self.say("", failed=code != 0)
+    return stopped
+
+
+def _screen_state(app):
+    """Everything a user can see, as text, so two runs can be compared exactly."""
+    table = app.query_one("#table", tui.DataTable)
+
+    def cell(row_key, column):
+        taken = table.get_cell(row_key, column)
+        return (str(taken), str(getattr(taken, "style", "") or ""))
+
+    return {
+        "tab": app.tab,
+        "rows": [(row.key, tuple(str(c) for c in row.cells),
+                  cell(row.key, "gutter"), cell(row.key, "mark")) for row in app.shown()],
+        "cursor": table.cursor_row,
+        "marked": sorted(app.marked),
+        "bar": str(app.query_one("#bar").render()),
+        "keys": str(app.query_one("#keys").render()),
+        "msg": str(app.query_one("#msg").render()),
+        "filter": app.text,
+    }
+
+
+def _final_screen_after_a_delete(reference_act=None):
+    """Mark both tabs, send the two agora rows, and hand back the list it left."""
+    app = _tabbed_app()
+    if reference_act is not None:
+        async def act(*args, **kwargs):
+            return await reference_act(app, *args, **kwargs)
+        app.act = act
+    done = _act_records_its_return(app)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("space", "down", "space")    # 甲 and 乙
+            await pilot.press("]")
+            await pilot.pause()
+            await pilot.press("space")                     # the other tab's row stays marked
+            await pilot.press("[")
+            await pilot.pause()
+            await pilot.press("down")                      # and the cursor is not on the top row
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _close_result(pilot, app)
+            assert await _wait(lambda: done, pilot), "the action never came back to the list"
+            return _screen_state(app)
+
+    return asyncio.run(go())
+
+
+def test_the_screen_after_an_action_is_what_it_was_before_the_fix():
+    """F2 promises the same list, marks, cursor and bar: only one rebuild fewer."""
+    assert _final_screen_after_a_delete(_act_before_the_fix) == _final_screen_after_a_delete()
+
+
 def test_a_leaves_the_cursor_where_it_was():
     """review T2-sec2: marking everything must not move the cursor to the top."""
     app = _marked_app(None)
