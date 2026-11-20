@@ -2011,10 +2011,12 @@ class AgoraApp(App):
             note = "沒有全部成功，訊息在下面"
         await self.push_screen_wait(Tell(f"{title}{'（已中斷）' if stopped else ''}",
                                          f"{note}\n\n{out}", code == 0))
-        self.reload(keep_marked=True)
         if code == 0 and sent:
+            # Clear the marks of the rows this command acted on *before* the reload
+            # rebuilds the table: the reload redraws with the marks already gone, so
+            # one action rebuilds the table once instead of twice (F2).
             self.marked -= set(sent)
-            self.show()
+        self.reload(keep_marked=True)
         # The note is in the window the user just read; leaving it on the status
         # line too made the next screen look like it was still about that action
         # (review Q4).
