@@ -8,6 +8,7 @@
 - 修正第 5 輪（2026-11-21）：回應非作者審查（head `e6c8c2b`）的高 1～3、中 1～3、低 1。L1、L2 不變。這一輪不加新機制，只把判讀改得更保守。凡是會把成本移出主判讀的規則（邊界變動、層不在層集合、修正未完），都受同一個**排除上限**管；超過上限、缺層，或樣本不足，該視窗就是「未能驗收」，不會算「通過」（§5.3 (a)）。改了 §0、§5.1 (a)(e)(f)、§5.3、§5.4、§5.5（G-1、G-2、G-5 的最少資料）、§5.7（M3-1、M3-6、M3-9）、§6（Q-M、Q-N）、§7.1、§7.2（A-2）、§11。
 - 修正第 6 輪（2026-11-21）：回應非作者審查（head `3bd3935`）的高 1～2。L1、L2 不變，不加新機制，只把兩個例外收進既有的保守規則：(1) 定判後的撤銷期內新開或重開的修正單，讓該視窗的成功資格**暫停**，修完用完整成本重算（§5.1 (a)）；(2) 跨期票與開工在基準期之前的票，算進處理期視窗的**排除上限**，成本按全生命週期，不明就當超限（§5.1 (f)、§5.3 (a)）。改了 §0、§5.1 (a)(f)、§5.3 (a)(d)、§5.7（M3-6、M3-9）、§6（Q-M (4)(5)）、§11。
 - 修正第 7 輪（2026-11-21）：照本人 11-21 的第二次裁定（經 PMO，MyPMO#474）把 §0、§6、§7 的各項改成「已決」，寫入 V-1a 的實測（§7.1 末）；A-2 已授權一次但暫停。新增 §12（本人提議的同名孿生 session 的評估）、§13（品質計算 CI 共用化的設計）。既有規則不改。
+- 修正第 8 輪（2026-11-21）：回應非作者審查（head `ff14bdb`）的中 1、低 1～4，寫入 V-1c 的實測（§12.7 末）。不加新機制：§13.3 把會影響量測的 git 輸入全部固定下來；V-1a 的 K-1p 寫明是哪個 request；R-18、M3-4′ 改成本人裁定後才開；V-1c 第 3 步補 exit 3 與「不確定」的分支；§13 的 G-4 分母與歷史數字改正。改了 §0、§7、§7.1、§12.2、§12.3、§12.4、§12.6、§12.7、§12.9、§12.10、§13.1、§13.3、§13.5、§13.7、§13.8。
 - 範圍：**只設計**。不改 `src/`、`tests/`、`openspec/specs/`、`atelier/`。sidecar 與 M3 在別的 repo，本稿只寫「對 sidecar 的要求」（R-編號）和「對 M3 的要求」（M3-編號），不描述它們的內部設計。
 - 和 v0 的關係：v0 是 `462-session-editing-and-consolidation.md`（11-15；本人同意方向 B：重開時用 `agora merge` 沉澱，預設關閉）。v0 的 agora 側 C-1～C-6 已經實作並 merge（PR #465、#467，測試在 `tests/unit/test_cli.py:1948` 起）。v0 **原檔不改**，只在檔頭加一行指向本稿。逐項的「v0（11-15）→v1」對照放在 §9。
 - **為什麼另開新檔、不就地改寫**：(1) v0 是本人核准方向時看的版本，程式（`cli.py:836` 起的註解）、測試（`test_cli.py:1948-1952`）和 D-29 都用「462 §10.3 C-1」這種編號引用它；就地改寫會讓這些引用指到不同的內容。(2) v1 的目標換了（從「重開時接得短」變成「每個 request 少重讀」），被取代的地方遍布全篇，逐段標「v0→v1」會比新寫一份還難讀。(3) 舊檔留著不動，非作者審查可以直接 diff 兩份。
@@ -22,9 +23,10 @@
 - **未歸戶**（M4-2 選 C，Q-I）：兩種口徑都報，**達標以全帳為準**。
 - **授權**（M4-3 選 A，Q-L）：A-2 授權一次，但**暫停**，等 §12 的評估。
 - **V-1a 已做**（實測，樣本 1，Haiku、合成內容）：結果是①，壓縮撐得過重開，6 題全記得（§7.1 末）。
+- **V-1c 已做**（實測，樣本 1，Haiku、合成內容；§12.7 末）：孿生用**路徑 P**（在 sidecar 開的拋棄式 agent 裡 `/compact`）做得到：壓縮後從壓縮點接、6 題全記得、S 沒動、明指 S 可以回退。**路徑 H**（headless 的 `/compact`）只驗到「被當成壓縮指令」，執行的環境沒有登入，壓縮本身沒驗。
 
 **本人 11-21 新提的兩件事**：
-- **同名孿生 session**（§12）：建議以它為主，A-2 留作備案、不執行。先跑拋棄式的 V-1c（不用授權），再請本人裁定 A-3（取代 A-2）與 T-2′。
+- **同名孿生 session**（§12）：建議以它為主，用路徑 P；A-2 留作備案、不執行。V-1c 已做，下一步請本人裁定 A-3（取代 A-2）與 T-2′；V-1d（真的 PM）要 A-3。
 - **品質計算 CI 共用化**（§13）：建議做成獨立的公開小套件，先只報告。放在哪裡（Q-O）、什麼時候開始讓 CI 失敗，要本人決定。
 
 **根因（實測，§1）**：長壽 PM 每個 request 重讀約 85 萬 token，93% 是開機時整份接回的舊對話，從沒壓縮過。
@@ -33,7 +35,7 @@
 
 **判讀的護欄**（§5.3、§5.4）：缺任一必要的用量來源（例如 PMO）就**不能宣告達成**，只報局部效果（Q-N）；每票成本按票族的生命週期算、分層比較，PR 數與行數只當診斷（Q-M）；被移出主判讀的票族（含跨期票）有上限，超過、缺層或樣本不足，該視窗就是「未能驗收」；修正沒修完（含定判後才開的）不能判過；品質的資料不足也不能判過。
 
-**v1 的順序（§7）**：本稿核准（已核准）→ M3 收基準（至少 10 張票）；V-1a 已做 → V-1c（§12.7）→ 本人裁定 A-2 或 A-3 → V-1b 或 V-1d → P1 → 判讀後，由本人決定 B。各項的決定見 §6。
+**v1 的順序（§7）**：本稿核准（已核准）→ M3 收基準（至少 10 張票）；V-1a、V-1c 已做（§12.7）→ 本人裁定 A-2 或 A-3 → V-1b 或 V-1d → P1 → 判讀後，由本人決定 B。各項的決定見 §6。
 
 ## 1. 根因與資料（回答第 1 問）
 
@@ -648,7 +650,7 @@ v0 的離線重播是 10 個樣本、每個 10 題、四組，太重。最小版
 | atelier-1 | T-6、T-7、T-8（量測要用，先上） | MAS（atelier，由 PMO／PM 照 harness 流程改） | 不會：只是規矩 | 本人核准本稿 |
 | 基準期 | 至少 1 個視窗（10 個票族）；品質的基準用歷史，照 §5.5 的口徑重建 | — | — | T-6、T-8、R-17、M3-a 都就位，而且必要來源齊（或本人已核准 Q-N 的替代做法）之後才開始算 |
 | V-1a | §7.1 第 0～9 步，拋棄式測試 agent | 操作，不是 PR | — | PM 在自己的 worker 上就能做，不用本人；第 7 步（可選）要 A-1。**已做**（11-21，實測，樣本 1）：結果①，紀錄在 §7.1 末 |
-| V-1c | §12.7，拋棄式測試 agent，驗孿生做法 | 操作，不是 PR | — | 不用本人（同 V-1a） |
+| V-1c | §12.7，拋棄式測試 agent，驗孿生做法 | 操作，不是 PR | — | 不用本人（同 V-1a）。**已做**（11-21，實測，樣本 1）：路徑 P 判①′，路徑 H 未驗；紀錄在 §12.7 末 |
 | V-1b | §7.1 第 10～13 步，真的 PM | 操作，不是 PR | — | V-1a 的結果是①或②，而且探針沒有掉太多；**本人單次授權 A-2**。本人 11-21 已授權一次，但**暫停，等 §12 評估**；§12.9 建議改走 V-1d |
 | V-1d | §12.7 末，真的 PM 做一次孿生切換 | 操作，不是 PR | — | V-1c 判①′；**本人單次授權 A-3**（還沒申請） |
 | atelier-2 | T-2、T-5（P1 開始） | MAS（atelier） | 不會：要回頭就改回來 | V-1b 通過（定義在 §7.1）；基準期收滿；Q-D |
@@ -657,6 +659,7 @@ v0 的離線重播是 10 個樣本、每個 10 題、四組，太重。最小版
 
 **順序**：PR-0 → M3-a、MLP-a、atelier-1 → 基準期，同時做 V-1a → V-1b → atelier-2（P1）→ 判讀 → 本人決定 B。
 **第 7 輪補**：V-1a 已做；V-1b 暫停。§12.9 建議的順序是 V-1c → 本人裁定（A-2 換成 A-3、T-2 換成 T-2′）→ V-1d → atelier-2′（P1）。本人裁定之前，上面的順序不變。
+**第 8 輪補**：V-1c 已做（§12.7 末）。下一步是本人裁定；V-1d 仍要 A-3。
 
 ### 7.1 V-1 的驗證協定（可以照做）
 
@@ -737,7 +740,7 @@ v0 的離線重播是 10 個樣本、每個 10 題、四組，太重。最小版
 | 灌 context（第 2 步） | K-1 到 163,800，**超過協定的 15 萬上限**（讀 `store.py` 一次就超過）；沒有出現自動壓縮 |
 | 壓縮前的探針（第 3 步） | A0＝6／6；那一列的 K-1＝163,979 |
 | 忙碌中送 `/compact`（第 4 步） | `/compact` 排在忙碌的那一輪之後才執行，沒有被當成插話 → **(4) 過**。畫面的完成字樣是「Compacted (ctrl+o to see full summary)」（Claude Code 自己的提示，不是模型的回話）→ **(2)(3) 過**。第 5 步沒有做 |
-| K-1p／K-1c | K-1p＝164,268（壓縮前最後一個 request）；K-1c＝20,531（cached 12,676＋cache_write 7,853），掉了 87.5%，**K-6 成立** |
+| K-1p／K-1c | K-1p＝164,268（壓縮前最後一個 request）；K-1c＝20,531。163,979 和 164,268 都是 PM 實測，不是矛盾：163,979 是第 3 步探針的那個 request，164,268 是它之後、壓縮之前的最後一個 request（PM 的紀錄，本稿沒有逐列核對）。K-1p 照定義（本節「判讀用的量」）取最後一個 request，所以 r 的分母用 164,268；用 163,979 算，r 也約 0.023，結論不變。K-1c（cached 12,676＋cache_write 7,853），掉了 87.5%，**K-6 成立** |
 | 壓縮後的探針（第 6 步） | Ac＝6／6 |
 | 跨機器（第 7 步） | 沒做（可選） |
 | 重開（第 8 步，同一個 id、預設召回） | 新段的**第一個 request 沒有獨立的 `/costs` 列**，K-1r 取新段第一個有的列：23,896（cached 20,643）。r＝(23,896−20,531)÷(164,268−20,531)＝0.023 → **撐得過**。Ar＝6／6 |
@@ -1013,6 +1016,7 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
    - **為什麼先關**：PM 還開著時，S 每 5 分鐘寫回一次，`updated_at` 會一直比 T 新；T 也會少掉 fork 之後的對話。
    - **另一種**：PM 不關、只暫停，先做 T，到第 6 步才關。停機比較短，代價是 T 少了暫停那幾則。交接檔已經更新，所以可以接受。選哪一種，看 V-1c 和 V-1d 量到的停機時間。
 3. **做孿生 T**：
+   - **第 8 輪**：V-1c 之後，以 12.4 的**路徑 P** 為主：先做沒有新內容的 fork（下面的指令，stdin 直接關掉，不送 `/compact`），再用 sidecar 開拋棄式 agent（模型與 PM 相同，`session` 明指這個 fork、`remember: false`），照 V-1a 第 4 步的完成確認 poke `/compact …`，再照 Close SOP 關掉，寫回到 fork。下面送 `/compact` 的寫法是**路徑 H**，壓縮本身還沒驗，不用在真的 PM 上。exit 0／3 的規則兩條路徑都適用。
    - 在有 agora、同一個 Drive、claude 登入的機器上跑。推論：在 PM 所在的 worker 上，由拋棄式隊員或 PMO 跑；由 PMO 決定。
    - 指令：`agora continue session S --fork --agent claude --headless --dir <PM 的 workdir> --agent-arg=--model=<PM 的模型>`。可以再加 `--harness-file <PM 的 harness>`，讓系統提示和 PM 相同。
    - stdin 送一則 stream-json 的使用者訊息：`/compact 保留：目前的單、決定與理由、未決、下一步；交接檔路徑是 <路徑>`，然後關掉 stdin。
@@ -1046,8 +1050,8 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 
 **分 PR 與依賴**：
 - V-1c（操作，不是 PR）→ 本人裁定 → atelier-2′（T-2′、T-9，取代 atelier-2）。
-- MLP 的 R-18、M3 的 M3-4′，可以和 V-1c 同時做。
-- R-19 只在 V-1c 判定「要用路徑 P，而且沒有新內容的 fork 做不出來」時才開。
+- MLP 的 R-18、M3 的 M3-4′：**本人裁定之後才開**（同 12.9 的下一步）。裁定之前，只做不實作的調查（例如讀碼確認 `life_start` 現在有哪些欄位），不開 PR。（第 8 輪改：原稿寫「可以和 V-1c 同時做」，和 12.9 矛盾。）
+- R-19 只在 V-1c 判定「要用路徑 P，而且沒有新內容的 fork 做不出來」時才開。V-1c 的結果：做得出來（§12.7 末），所以這個條件不成立，R-19 不是必要的。它和「sidecar 側的 headless 壓縮入口」一起列為待決的候選（12.9），不排程。
 - agora 的 C-11、C-12 是 d 單，和其他步驟沒有依賴。
 
 ### 12.4 能不能離線產生壓縮版（回答 c）
@@ -1058,8 +1062,8 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 
 | 路徑 | 怎麼做 | 驗過嗎 |
 |---|---|---|
-| H：headless 的 `/compact` | 12.2 第 3 步：用 stream-json 送 `/compact …` | **沒驗**。claude 的 `-p` 加 stream-json，會不會把 `/compact` 當成斜線指令執行，本稿沒有證據（推論：可能可以，由 V-1c 驗） |
-| P：拋棄式 tui agent 裡的 `/compact` | 先做一個沒有新內容的 fork（`continue --fork --headless`，stdin 直接關掉，`cli.py:2492-2499`）。再用 sidecar 開一個拋棄式 agent，`session` 明指這個 fork，poke `/compact …`，關掉時寫回到 fork | **一半驗過**：tui 裡 poke `/compact` 會執行；壓縮會跟著寫回；重開時從壓縮點接（V-1a，§7.1 末）。**沒驗**：「沒有新內容的 fork」能不能這樣做；明指 `session` 和 `remember:false` 能不能一起用。不行就要 R-19 |
+| H：headless 的 `/compact` | 12.2 第 3 步：用 stream-json 送 `/compact …` | **部分驗**（V-1c，§12.7 末）：`/compact` 被當成壓縮指令（事件 `status: compacting`），不是一般訊息。但執行的 shell 沒有登入，壓縮失敗（`compact_result: failed`），**壓縮本身沒驗**。要在有憑證的環境（例如 sidecar 開的 agent）才驗得了，見 12.9 的待決 |
+| P：拋棄式 tui agent 裡的 `/compact` | 先做一個沒有新內容的 fork（`continue --fork --headless`，stdin 直接關掉，`cli.py:2492-2499`）。再用 sidecar 開一個拋棄式 agent，`session` 明指這個 fork、帶 `remember: false`，poke `/compact …`，關掉時寫回到 fork | **驗過**（V-1c，樣本 1，§12.7 末）：沒有新內容的 fork 做得出來（在沒有登入的 shell 也行）；明指 `session` 和 `remember:false` 可以一起用（200）；tui 裡的 `/compact` 會執行、寫回到 fork；重開時從壓縮點接 |
 | M：merge 的要約 | 12.2 的 TM | **有測試**（v0 C-1～C-6）；但會截斷來源（6 萬字） |
 
 **成本**（推論）：
@@ -1110,14 +1114,14 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
    - → 切換時明指 `session: T`；切換之前，確認 T 的 `parents` 是 S、tags 有 `role:R`。
 3. **切換後少了暫停之後的對話**：做 T 之後、關 PM 之前的對話，不在 T 裡。→ 先關再 fork（12.2 第 2 步）；不然只容許暫停回覆那幾則。
 4. **T 還在 outbox**：在別台機器重開時找不到 T。→ 第 3 步要等 exit 0（已上傳）才往下。
-5. **讀真的對話的行程**：做 T 的那次 headless 執行，讀的是真的 PM 對話，送到 PM 本來用的那一家、同一個模型。只有輪換表准碰真資料的模型能用（`pm/v7.md:165`）。這次執行不經 sidecar，要照 T-8 記 usage。
+5. **讀真的對話的行程**：做 T 的那次執行（路徑 P 是拋棄式 agent，路徑 H 是 headless），讀的是真的 PM 對話，送到 PM 本來用的那一家、同一個模型。只有輪換表准碰真資料的模型能用（`pm/v7.md:165`）。這次執行不經 sidecar，要照 T-8 記 usage。
 6. **兩個 PM**：舊的沒關乾淨就開新的。同一個 id 不會開出兩個（sidecar 回 409 `id_conflict`），但仍要確認 `exited` 之後才開。
 
 **還要不要本人的單次授權**：要，但範圍變小。
 
 - 新的 **A-3**：對 `myaistorage-pm-w1` 做**一次**孿生切換（12.2 第 1～7 步，含事前探針與 T-5）。
   - 理由：它關掉、重開真的長壽 PM，並且讓 PM 從改過的記憶起來，這是真機操作；它也要在 sidecar 外面讀一次 PM 的真對話。
-  - 停損：沿用 A-2 的停損（§7.2），把「完成確認」換成第 3 步的 exit code 與 stream-json 的壓縮完成事件；另外加：事前探針是「錯」就停，不切換。
+  - 停損：沿用 A-2 的停損（§7.2）。「完成確認」：路徑 P 照 V-1a 第 4 步（第 8 輪改，V-1c 之後以路徑 P 為主）；路徑 H 是第 3 步的 exit code 加 stream-json 的壓縮完成事件，exit 成功本身不算壓縮成功（12.7 V-1c 第 3 步）。另外加：事前探針是「錯」就停，不切換。
 - **不用授權**：V-1c（拋棄式 agent、合成內容，和 V-1a 相同）。
 - **A-2**：本人已授權一次，**暫停**。建議：V-1c 過了，就請本人把 A-2 換成 A-3。V-1c 不過，再回頭考慮 A-2；這時要先讓本人看過 V-1c 的結果（12.9）。
 
@@ -1130,14 +1134,14 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 
 孿生的「接回」走的是同一條路（接續一個含壓縮的 Session），只是換了一個 Session。
 
-**V-1a 沒有覆蓋的**：
-- (a) headless（`-p`、stream-json）裡的 `/compact` 會不會執行（路徑 H）。
-- (b) fork 出來再壓縮的 Session，寫回之後，是不是也從壓縮點接。
-- (c) 預設召回選 T、不選 S（只讀過碼）；明指 `session: T` 的重開。
-- (d) 回退：明指 `session: S`，接回壓縮前的全文。
-- (e) S 真的沒動（標頭、raw）。
-- (f) headless 的 usage 能從 stream-json 記下來。
-- (g) 真的 PM 的大小（88 萬、Sonnet），以及停機時間。(g) 只有 V-1d 才量得到。
+**V-1a 沒有覆蓋的**（第 8 輪：每項後面是 V-1c 之後的狀態，依據見本節末的 V-1c 實測紀錄）：
+- (a) headless（`-p`、stream-json）裡的 `/compact` 會不會執行（路徑 H）。→ **部分驗**：被當成壓縮指令（`status: compacting`）；但那個 shell 沒有登入，壓縮失敗（`compact_result: failed`），**壓縮本身未驗**。要在有憑證的環境才驗得了，待決（12.9）。
+- (b) fork 出來再壓縮的 Session，寫回之後，是不是也從壓縮點接。→ **已驗**（路徑 P：在 `$C` 裡壓縮、寫回 `$TW`；預設召回接 `$TW`，K-1r＝23,800）。
+- (c) 預設召回選 T、不選 S（只讀過碼）；明指 `session: T` 的重開。→ **已驗**：預設召回選 `$TW`；明指 `session: $TW` 和 `remember:false` 一起用是 200。
+- (d) 回退：明指 `session: S`，接回壓縮前的全文。→ **已驗**（K-1 約 13.6 萬，6／6）。
+- (e) S 真的沒動（標頭、raw）。→ **已驗**（`updated_at`、raw md5 前後相同）。
+- (f) headless 的 usage 能從 stream-json 記下來。→ **未驗**（路徑 H 的壓縮沒有做完）。
+- (g) 真的 PM 的大小（88 萬、Sonnet），以及停機時間。(g) 只有 V-1d 才量得到。→ **未驗**，仍只有 V-1d。
 
 **V-1c（拋棄式，可以照做）**：
 - `$T` 的設定、內容紀律、判讀用的量，都和 §7.1 相同，用一個沒用過的序號。
@@ -1148,8 +1152,8 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 | 0 | 前置 | 同 V-1a 第 0 步 | — |
 | 1 | 開、灌、探針 | 同 V-1a 第 1～3 步。K-1 到 10 萬以上，**不超過 15 萬**（V-1a 超過了，這次要守） | A0；K-1p＝最後一個 request 的 K-1 |
 | 2 | 關 | Close SOP，輪詢到 `exited`。`agora search session --filter tags=role:$T --strict --sort updated --json` 的第一列＝`$S`，記下它的 `updated_at`；`agora show session $S --raw \| md5sum` 記下 md5 | `$S` 的 `locked` 不是 true |
-| 3 | 做孿生（路徑 H） | `timeout 600 agora continue session $S --fork --agent claude --headless --dir <workdir> --agent-arg=--model=claude-haiku-5-5`，stdin 送一則 stream-json 使用者訊息 `/compact 保留：六個代號和它們的值`。stdout 存到團隊目錄（內容是合成的）。記下 exit code，以及「fork 已存成」的 id＝`$TW` | **執行了**：stream-json 裡有壓縮完成的系統事件，而且模型沒有用文字回說它不能執行（事件名在第一次看到時記下）。**當成一般訊息**：模型用文字回了 → 刪掉這個 fork，做 3b。exit 不是 0、也不是 3 → 停，跳到第 8 步 |
-| 3b | 只在第 3 步是「當成一般訊息」時做：路徑 P | `agora continue session $S --fork --agent claude --headless </dev/null` 做沒有新內容的 fork＝`$TW`。用 sidecar 開拋棄式 `$C`（另一個沒用過的序號，`session: $TW`、`remember: false`），照 V-1a 第 4 步的完成確認 poke `/compact …`，再照 Close SOP 關掉 `$C` | 完成確認是「完成」。沒有新內容的 fork 做不出來，或 `session` 加 `remember:false` 回 400 → 記下，判「路徑 P 要 R-19」，跳到第 8 步 |
+| 3 | 做孿生（路徑 H） | `timeout 600 agora continue session $S --fork --agent claude --headless --dir <workdir> --agent-arg=--model=claude-haiku-5-5`，stdin 送一則 stream-json 使用者訊息 `/compact 保留：六個代號和它們的值`。stdout 存到團隊目錄（內容是合成的）。記下 exit code，以及「fork 已存成」的 id＝`$TW`。exit 3 表示還在 outbox：照 12.2 第 3 步，等上傳完（`agora push`）再往下；沒等到就做第 5 步的搜尋，只能證明「還沒上傳」，不能判召回失敗 | **exit 只說 fork 存好了沒有，不說壓縮成功了沒有**，要看 stream-json 的事件：**執行了**：有壓縮完成的系統事件，而且模型沒有用文字回說它不能執行（事件名在第一次看到時記下）。**當成一般訊息**：模型用文字回了 → 刪掉這個 fork，做 3b。**壓縮失敗**：有壓縮開始的事件，但結果是失敗（例如 `compact_result: failed`）→ 記下原因，路徑 H 判「這次未驗」，做 3b（第 8 輪補，照 V-1c 實際走的分支）。**不確定**：exit 0 或 3，但壓縮完成、壓縮失敗、文字回覆三種都沒有 → 停，跳到第 8 步，不能把 exit 成功當成壓縮成功。exit 不是 0、也不是 3 → 停，跳到第 8 步 |
+| 3b | 只在第 3 步是「當成一般訊息」或「壓縮失敗」時做：路徑 P | `agora continue session $S --fork --agent claude --headless </dev/null` 做沒有新內容的 fork＝`$TW`。用 sidecar 開拋棄式 `$C`（另一個沒用過的序號，`session: $TW`、`remember: false`），照 V-1a 第 4 步的完成確認 poke `/compact …`，再照 Close SOP 關掉 `$C` | 完成確認是「完成」。沒有新內容的 fork 做不出來，或 `session` 加 `remember:false` 回 400 → 記下，判「路徑 P 要 R-19」，跳到第 8 步 |
 | 4 | S 沒動、T 的形狀對 | `$S` 的 `updated_at`、raw md5 和第 2 步相同；`$TW` 的 `relation` 是 fork、`parents` 是 `[$S]`、tags 有 `role:$T` | 任何一項不符 → 孿生不成立，跳到第 8 步 |
 | 5 | 預設召回 | 搜尋的第一列是 `$TW`。open `$T`（不帶 `session`、`fresh`、`remember`），`input` 問 6 題 | K-1r：照 V-1a，新段的第一個 request 可能沒有列，取第一個有的列。**接到孿生**：K-1r ≤ 0.5×K-1p（V-1a 是 23,896）。記 Ar |
 | 6 | 回退 | Close SOP；open `$T`，帶 `session: $S`，問 6 題 | **回退成功**：K-1 ≥ 0.75×K-1p，而且答對 ≥ A0−1 |
@@ -1168,6 +1172,30 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 - 超過任何一項就停，收尾，回報。
 
 **授權**：不用。只碰 `$T`、`$C`，內容是合成的，和 V-1a 相同。headless 的執行照 T-8 登記。
+
+**V-1c 實測紀錄**（2026-11-21 08:42～09:05 UTC，PM 執行；**實測，樣本 1**，Haiku 5.5，合成內容；紀錄在團隊目錄 `v1c/`，只有數字與畫面、事件的固定字樣）：
+
+設定：`$T` 是 claude-code、Haiku，第一次 open 帶 `fresh: true`；`$C` 用另一個沒用過的序號；`$S`＝`$T` 第一次關掉之後的 Session；`$TW`＝`$S` 的 fork。K-1 的算法同 §7.1。
+
+| 步 | 結果 |
+|---|---|
+| 1（開、灌、探針） | K-1p＝135,763（最後一個 request；探針那個 request 是 135,665）。**守住 15 萬**；A0＝6／6 |
+| 2（關） | `$S` 的 `updated_at` 是關掉時的寫回。raw md5：第一次取在寫回完成之前，不可用；寫回之後取兩次相同，用這個值。（協定偏差：md5 要在寫回完成、`locked` 不是 true 之後才取） |
+| 3（路徑 H） | exit 0。stream-json 的事件：`status: compacting` → `compact_result: failed` → 結果是「Error during compaction: Not logged in」。agora 印「沒有新內容；fork 已存成 `$TW`」。判讀：`/compact` 被當成壓縮指令，不是一般訊息；**壓縮失敗，因為執行的 shell 沒有登入**（憑證由 sidecar 注入，PM 不碰），是環境的限制，不是設計失敗。路徑 H 判「這次未驗」→ 做 3b |
+| 3b（路徑 P） | **協定偏差**：沒有另跑 `</dev/null` 的 fork。第 3 步壓縮失敗、沒有新內容，存下的 `$TW` 就是沒有新內容的 fork，直接用它（推論：和 `</dev/null` 走同一條，`cli.py:2492-2499`）。sidecar 開 `$C`，`session: $TW` 加 `remember: false` → **200**；`$C` 接回原對話（壓縮前的 6 個代號都在）。閒置時 poke `/compact`：畫面「Compacting conversation…」→「Compacted (ctrl+o to see full summary)」→ 完成。固定探針：K-1c＝20,377（cached 12,676＋cache_write 7,699），比 K-1p 掉 85.0% → **K-6 成立**；同一列有 cache_write，K-5 也成立。Ac＝6／6。關掉 `$C` 之後 `$TW` 被寫回；`$C` 因為 `remember: false`，沒有留下自己的 Session |
+| 4（S 沒動、T 的形狀） | `$S` 的 `updated_at`、md5 在 `$C` 做完前後相同。`$TW` 的 `relation` 是 fork、來源是 `$S`、tags 含 `role:$T`（從 `$S` 複製）。`$C` 的接續另外加了 `ai:`、`sidecar:` 的 tag，沒有 `role:$C` → 過 |
+| 5（預設召回） | 搜尋的第一列是 `$TW`；open `$T`（不帶 `session`、`fresh`、`remember`）→ 回應的 session 是 `$TW`。K-1r＝23,800（新段第一個有列的 request）≤ 0.5×K-1p → 接到孿生。r＝(23,800−20,377)÷(135,763−20,377)＝0.030 → 撐得過。（PM 的紀錄寫 0.020；用同樣的數字照公式重算是 0.030。兩者都遠低於 0.25，判讀不變。）Ar＝6／6 |
+| 6（回退） | open `$T` 帶 `session: $S` → K-1＝136,058～136,161（≥ 0.75×K-1p），6／6 → 回退成功 |
+| 7（順序） | `$T` 在 `$S` 上關掉之後，搜尋的第一列變成 `$S`（剛寫回），`$TW` 第二 → 證實「最新的寫回贏」；切換時要明指 `session` |
+| 8（收尾） | `$T`、`$C` 都 `exited`；`$TW`、`$S` 已刪（exit 0）；`role:$T`、`role:$C` 再搜都是空的 |
+
+- **判讀**：3b、4、5、6 都過，Ar＝6／6 ≥ A0−2 → **①′，用路徑 P**。第 3 步（路徑 H）不是「不過」，是「這次未驗」；結論同樣是用路徑 P，路徑 H 留待驗（12.9）。
+- **觀察**（與 V-1a 相同）：每個新段的第一個 request 沒有獨立的 `/costs` 列。
+- **限制**：
+  - 樣本 1；Haiku（真的 PM 是 Opus／Sonnet）；只有 6 個合成代號，量不到「決定與理由」；context 13.6 萬（真的 PM 約 88 萬）。
+  - 路徑 H 的壓縮、headless 的 usage 都沒驗。
+  - 停機時間沒量。
+  - 成本上限的各項（request 數、token）PM 沒有逐項回報，本稿沒有核對。
 
 **V-1d（真的 PM，要 A-3）**：
 - 照 12.2 第 1～7 步做一次。
@@ -1193,7 +1221,7 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 
 ### 12.9 建議（回答 h）
 
-**建議：以孿生 TW 為主；原地 A-2 留作備案，不執行；先跑 V-1c。**
+**建議：以孿生 TW 為主，用路徑 P；路徑 H 待驗；原地 A-2 留作備案，不執行。**（第 8 輪：V-1c 已做，路徑 P 判①′，§12.7 末。）
 
 **理由**：
 1. 消掉 A-2 唯一的大風險（不可逆、往跑著的 PM 打字），換成一次可以回退的切換。
@@ -1203,16 +1231,22 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 5. 它是 B 的一個子集：之後如果要做 B，孿生的經驗可以直接用。
 
 **風險**（推論）：
-- headless 的 `/compact` 沒驗（V-1c 第 3 步）。
+- 路徑 P 只有樣本 1（Haiku、13.6 萬、合成內容）；88 萬的壓縮要多久、品質如何，要 V-1d 才知道。
+- 路徑 H 的壓縮沒驗（V-1c 第 3 步，缺憑證）。
 - 每做一次就停機一次。
-- 做 T 的那次執行不經 sidecar，量測要靠 T-8。
+- 路徑 P 的壓縮在 sidecar 開的 agent 裡，usage 進 `/costs`；前面那個沒有新內容的 fork 不經 sidecar（推論：不呼叫模型），仍照 T-8 登記。路徑 H 整個不經 sidecar，量測要靠 T-8。
 - PMO 的手工步驟比 A-2 多（第 1～7 步）。
 - 不帶 `--harness-file` 時，壓縮的取捨可能和原地壓縮不同。
 
 **下一步**：
-1. PM 跑 V-1c（不用授權）。
-2. PMO 把 V-1c 的結果和本節帶回本人，請本人裁定：A-2 換成 A-3，T-2 的動作換成 T-2′。
-3. 本人裁定之後，才改 atelier（atelier-2′），才開 R-18、M3-4′。
+1. PM 跑 V-1c（不用授權）。**已做**（§12.7 末）。
+2. PMO 把 V-1c 的結果和本節帶回本人，請本人裁定：A-2 換成 A-3（路徑 P），T-2 的動作換成 T-2′。
+3. 本人裁定之後，才改 atelier（atelier-2′），才開 R-18、M3-4′。裁定之前只做不實作的調查（12.3）。
+4. V-1d 要 A-3，還沒申請。
+
+**待決（第 8 輪；不排程，由 PMO 帶回本人）**：路徑 H 要不要驗、怎麼驗。路徑 P 已經夠用，所以這不擋 A-3。要驗的話，壓縮得在有憑證的環境跑，候選有兩個：
+- (i) R-19：sidecar 的 open 可以「先 fork 再接」。這樣路徑 P 的 fork 也在 sidecar 裡做，不用在外面跑 headless；它其實取代路徑 H，而不是驗它。
+- (ii) sidecar 側提供 headless 壓縮的入口：在 sidecar 注入的憑證下跑 12.2 第 3 步的路徑 H，usage 也進 `/costs`。這是新的 R 要求，本稿不編號、不寫契約，等本人決定要不要。
 
 **要新增或改的契約**（全部等本人裁定；**本稿既有的 T-2、A-2 不改**）：
 
@@ -1223,17 +1257,18 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 | C-11 | agora（d 單，只加測試） | `continue session S --fork`（假 agent）→ 新的 T：`relation: fork`；`parents` 只有 S；T 的 tags 包含 S 的全部 tags（含 `role:R`）；S 的標頭與 raw 位元組不變 |
 | C-12 | agora（d 單，只加測試） | (a) `edit session T --add-tag <新的 tag>` → T 的 `updated_at` 變新，`search --filter tags=role:R --sort updated --json` 的第一列是 T；(b) `--add-tag` 一個已經有的 tag → exit 0，stderr 是「標頭沒有變」，`updated_at` 不變 |
 | R-18 | sidecar | `life_start` 列帶這一段接續的 agora id（沒有接續就是 null）。M3 用它分辨「接孿生」的重開（這種重開的段首 K-5 會很小） |
-| R-19 | sidecar（只在 V-1c 判定要用路徑 P，而且沒有新內容的 fork 做不出來時才開） | open 帶 `session` 時，可以要求「先 fork 再接」，回應帶 fork 的 id；usage 照常進 `/costs` |
+| R-19 | sidecar（只在 V-1c 判定要用路徑 P，而且沒有新內容的 fork 做不出來時才開。第 8 輪：V-1c 做得出來，條件不成立；改列上面的待決候選 (i)，不排程） | open 帶 `session` 時，可以要求「先 fork 再接」，回應帶 fork 的 id；usage 照常進 `/costs` |
 | M3-4′ | M3 | 孿生事件：S、T、做 T 的開始與結束時刻、headless 的 usage（記不到就記「未量」）、事前探針的結果、切換的時刻、有沒有回退。一次孿生切換算一次「重開」，G-6 (a) 的 T-5 照記 |
 
 （M3-4′ 是 M3-4 的延伸，所以用 ′ 表示，不另外編號。）
 
 ### 12.10 沒驗到（第 7 輪，§12）
 
-- headless 的 `/compact`（路徑 H）：完全沒驗。
-- 「沒有新內容的 fork」（路徑 P 的前半）：只讀過碼。
-- sidecar 的 open 帶 `session` 加 `remember:false` 能不能一起用：沒讀到那條驗證規則。
-- 召回的順序、`edit` 會不會更新 `updated_at`、fork 會不會複製 tags：都是讀碼，沒有跑。sidecar 讀的是這台 worker 安裝的版本，別台 worker 的版本可能不同。
+- headless 的 `/compact`（路徑 H）：第 8 輪更新：只驗到被當成壓縮指令；壓縮本身、headless 的 usage 沒驗（V-1c，缺憑證）。
+- 「沒有新內容的 fork」（路徑 P 的前半）：第 8 輪更新：V-1c 實測做得出來，但用的是第 3 步壓縮失敗留下的 fork；`</dev/null` 的寫法本身沒有另跑。
+- sidecar 的 open 帶 `session` 加 `remember:false` 能不能一起用：第 8 輪更新：V-1c 實測 200。
+- 召回的順序、fork 會不會複製 tags：第 8 輪更新：V-1c 實測（最新的寫回贏；`role:` tag 被複製）。`edit` 會不會更新 `updated_at`（C-12）：仍只讀碼，沒有跑。sidecar 讀的是這台 worker 安裝的版本，別台 worker 的版本可能不同。
+- V-1c 是樣本 1、Haiku、13.6 萬、合成內容；停機時間沒量。
 - 做 T 的成本：重寫一次約 176 萬，是用 §1.2 的倍率推的；同一個前綴能不能命中 PM 的快取，沒驗。
 - 88 萬的 context 壓縮要多久、品質如何：沒有資料，要 V-1d 才量得到。
 - 做 T 的那次執行該在哪台機器跑、由誰跑：留給 PMO 決定，沒有查各台機器的設定。
@@ -1253,7 +1288,7 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 | G-5 (i)：有沒有動到 `tests/`；淨增的測試函式數 | 可以 | 只看 diff |
 | G-0 (a)：測試全綠 | 可以，但是**另一個** workflow（`uv run pytest`），不是這個工具 | 本 repo 現在沒有（`.github/workflows/` 只有 `angareion-registry.yml`，實測） |
 | G-1、G-2、G-3、G-5 (ii)(iii)、G-6、G-7 | 不行 | 要人工判斷、要等 14 天，或要看審查報告；留在 M3 |
-| 視窗層級的門檻（例如 G-4 的「有壞味道的 PR 比例 ≤ 基準＋20 個百分點」） | 不能當成單一 PR 的失敗條件 | 它是 10 個票族的比例，單一 PR 判不出來；由 M3 每個視窗算 |
+| 視窗層級的門檻（例如 G-4 的「有壞味道的 PR 比例 ≤ 基準＋20 個百分點」） | 不能當成單一 PR 的失敗條件 | 它是視窗裡改碼 PR 的比例（視窗由票族形成，分母是改碼 PR，不是票族；G-4 的定義見 §5.5），單一 PR 判不出來；由 M3 每個視窗算 |
 
 ### 13.2 輸入與輸出
 
@@ -1275,10 +1310,23 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 - **不用 LLM**，只用標準庫：`ast`、`json`，以及用 `subprocess` 呼叫 git。
 - **要固定的東西**（推論；原型 `q3_static_v2.py` 都沒有固定，是現在的缺口）：
   1. **Python 的小版本**：`ast.dump` 的輸出在不同的 Python 版本之間可能不一樣，「AST 相同」「改碼 PR」的判定就會跟著變。CI 要釘一個版本，輸出寫明版本；基準也要用同一個版本重算。
-  2. **git diff 的選項**：原型直接用 `git diff -U0`（`q3_static_v2.py:89`），會受使用者的 git 設定影響（`diff.algorithm`、改名偵測）。要明寫 `--no-renames`、`--diff-algorithm=myers`、`--no-ext-diff`、`-c core.quotepath=off`，並且不讀系統與全域的 git 設定（`GIT_CONFIG_NOSYSTEM=1`、`GIT_CONFIG_GLOBAL=/dev/null`，和本 repo 測試夾具的做法相同）。
+  2. **git 的輸入**（第 8 輪重寫，回應審查的中-1）：原型直接用 `git diff -U0`（`q3_static_v2.py:89`），hunk 的範圍會受設定、環境變數與 attributes 影響。M3-11 的相鄰新增窗以 hunk 為界，所以 hunk 必須只由兩棵樹決定。下面全部固定：
+     - (a) **命令列明寫**（命令列的選項蓋過設定檔）：`git -C <repo 根目錄> diff --no-color --no-ext-diff --no-textconv --text --no-renames --diff-algorithm=myers --inter-hunk-context=0 --no-indent-heuristic --no-relative --src-prefix=a/ --dst-prefix=b/ -U0 <base> <head> -- <pathspec>`。`--text` 讓 attributes 的 `binary`、`-diff` 不會把 `.py` 變成「Binary files differ」。檔名清單一律加 `-z`。讀檔案內容一律 `git cat-file blob <sha>:<path>`（不經 textconv，也不讀工作目錄）。
+     - (b) **設定檔**：不讀系統與全域的設定（`GIT_CONFIG_NOSYSTEM=1`、`GIT_CONFIG_GLOBAL=/dev/null`，和本 repo 測試夾具相同）。repo 自己的 `.git/config` 關不掉：(a) 的命令列選項是第一道；再用 `git -c` 覆蓋一次（第二道）：`core.quotepath=off`、`core.attributesFile=/dev/null`、`diff.interHunkContext=0`、`diff.indentHeuristic=false`、`diff.algorithm=myers`、`diff.renames=false`、`diff.noprefix=false`、`color.ui=never`。
+     - (c) **環境變數**：git 用白名單的環境起（只傳 `PATH`、`LC_ALL=C`、一個空的暫存 `HOME`，加上 (b) 的兩個和 `GIT_ATTR_NOSYSTEM=1`）。其他一律不傳，特別是會注入設定的 `GIT_CONFIG_PARAMETERS`、`GIT_CONFIG_COUNT`／`GIT_CONFIG_KEY_*`／`GIT_CONFIG_VALUE_*`，以及 `GIT_DIFF_OPTS`、`GIT_EXTERNAL_DIFF`、`GIT_DIR`、`GIT_WORK_TREE`。
+     - (d) **attributes**：只解析 hunk 的範圍（`@@ -a,b +c,d @@`），不用 `@@` 後面的函式名（attributes 的 `diff=<driver>` 會改它）。系統層與 `core.attributesFile` 不讀（(b)(c)）；repo 的 `.git/info/attributes` 和工作目錄的 `.gitattributes` 關不掉，靠 `--no-textconv`、`--no-ext-diff`、`--text` 讓它們不影響輸出，由下面的驗收證明。
+     - (e) **git 版本是確定性的輸入**：輸出記下 git 版本（13.2）。CI runner 的 git 會跟著映像升級，不一定釘得住，所以契約寫成：**（`base`、`head`、工具版本、Python 小版本、git 版本）都相同 → 輸出位元組相同**。版本不同算不同的輸入，結果不直接比；M3 的基準和處理期要用同一個版本算，換版本時基準整個重算。
   3. **檔案的順序**：`ls-tree`、`diff --name-only` 的結果，再排序一次。
   4. **解析不了的檔案**（語法比 CI 的 Python 新，或檔案本來就壞了）：不猜。列進「解析失敗」，那個檔案的指標記「無法判定」。
-- **驗收**：同一組輸入跑兩次，輸出位元組相同；換一台機器（同樣的版本）跑，也相同。
+- **驗收**：
+  - 同一組輸入跑兩次，輸出位元組相同；換一台機器（同樣的版本）跑，也相同。
+  - **刻意改本機設定仍同輸出**（第 8 輪新增）：同一對 SHA、同樣的版本，下面每一種都要和乾淨環境的輸出位元組相同：(i) repo 的 `.git/config` 設 `diff.interHunkContext=10`、`diff.indentHeuristic=true`、`diff.algorithm=patience`、`diff.renames=copies`、`diff.noprefix=true`、`diff.relative=true`、`color.ui=always`；(ii) `.git/info/attributes` 設 `*.py diff=x`，加 `diff.x.textconv`、`diff.x.algorithm=histogram`、`diff.x.xfuncname`；(iii) `.git/info/attributes` 設 `*.py -diff`；(iv) 環境設 `GIT_CONFIG_PARAMETERS`（注入 `diff.interHunkContext=10`）、`GIT_DIFF_OPTS=--unified=3`；(v) 從 repo 的子目錄執行。測試用的相近 hunk 要讓 (i) 的 `interHunkContext` 在沒有固定時真的會合併。
+- **第 8 輪的手動反例**（實測，git 2.43.0，暫存 repo，兩個相隔 3 行的單行修改；沒有寫進任何 repo）：
+  - repo 的 `.git/config` 設 `diff.interHunkContext=10`：原型的寫法（`git diff -U0`）兩個 hunk 被合成一個；加上 (a) 的選項，回到兩個。`GIT_CONFIG_PARAMETERS` 注入同一個設定，結果一樣被合併。
+  - `GIT_DIFF_OPTS=--unified=3`：**連命令列明寫的 `-U0` 都被蓋過**，所以 (c) 的白名單是必要的，不能只靠命令列。
+  - `.git/info/attributes` 設 `*.py -diff`：即使有 (a) 的其他選項，沒有 `--text` 時輸出是「Binary files differ」。
+  - 經 `.git/info/attributes` 掛的 textconv：沒有 `--no-textconv` 時內容被改寫；有就不會。
+  - 沒試：driver 的 `algorithm` 會不會蓋過 `--diff-algorithm`、indent heuristic 的差異、別的 git 版本。這些留給上面的驗收。
 
 ### 13.4 放在哪裡
 
@@ -1306,7 +1354,7 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 | Q0（上線起） | **只有工具自己出錯**（例如讀不到 base）時，job 才失敗；指標一律只報告 | job summary 加 JSON artifact |
 | Q1（M3-11 校驗通過，而且本人同意之後） | 兩項**基準是 0** 的事件：檔案跨過 1000 行；出現和既有函式 AST 相同的新函式（G-4 已經寫了「交架構師判」）。CI 失敗；專案架構師判過之後，用一個固定的 label 放行（例如 `quality:arch-ok`），放行留在 PR 上 | 函式跨過 50 行、巢狀跨到 4 層、跨檔重複、`grew_over50`：只報告；比例由 M3 每個視窗判（G-4） |
 
-**為什麼「函式跨過 50 行」這類事件不設成失敗**：基準的 15 個改碼 PR 裡有 5 個有（§5.5）。一個 PR 一個 PR 地擋，會讓三分之一的 PR 卡住；而 G-4 本來就是視窗比例的門檻。
+**為什麼「函式跨過 50 行」這類事件不設成失敗**：基準的 15 個改碼 PR 裡，跨 50 行的有 3／15 個 PR（6 個事件）；有任一項壞味道的是 5／15（§5.5 的 G-4）。一個 PR 一個 PR 地擋，會讓五分之一到三分之一的 PR 卡住；而 G-4 本來就是視窗比例的門檻。
 
 ### 13.6 和 G-0～G-7 的關係
 
@@ -1320,7 +1368,7 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 | 步 | 內容 | repo | 前置 |
 |---|---|---|---|
 | QC-0 | M3-11 校驗的第二項：人工對 5 個真的 PR | —（M3） | 無 |
-| QC-1 | 小套件：CLI 加 13.3 的確定性；7 個合成案例變成它的測試；加一個「跑兩次，輸出位元組相同」的測試 | 新的公開 repo（Q-O） | 本人同意 (c) 與 repo |
+| QC-1 | 小套件：CLI 加 13.3 的確定性；7 個合成案例變成它的測試；加一個「跑兩次，輸出位元組相同」的測試，以及 13.3 的「刻意改本機設定仍同輸出」(i)～(v) | 新的公開 repo（Q-O） | 本人同意 (c) 與 repo |
 | QC-2 | 可重用的 workflow（Q0：只報告） | 同 QC-1 | QC-1 |
 | QC-3 | 本 repo 的 `.github/workflows/` 加一個呼叫 QC-2 的 workflow（Q0） | MAS（PM 的 PR；不在架構師能 commit 的路徑裡） | QC-2 |
 | QC-4 | 本 repo 的 `uv run pytest` workflow（G-0） | MAS | 無，可以先做。要確認測試在 GitHub 的 runner 上能跑：測試隔離已經不讀真的家目錄（AGENTS.md），但沒有在 runner 上跑過 |
@@ -1337,4 +1385,5 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 - `ast.dump` 在不同 Python 版本之間的差異，會不會真的改到這幾個指標：沒試。
 - GitHub 對「公開 repo 呼叫私有 repo 的可重用 workflow」的限制：依記憶推論，沒有查最新的文件。
 - 本 repo 的測試在 GitHub 的 runner 上能不能全綠：沒跑。
-- 原型的 git 選項沒有固定時，結果實際上會不會不同：沒試。
+- 原型的 git 選項沒有固定時，結果實際上會不會不同：第 8 輪更新：在暫存 repo 用手動反例試過（13.3），會不同；在本 repo 的 15 個改碼 PR 上，當時算基準的環境有沒有受影響，沒查。
+- 13.3 的固定做法：只在暫存 repo 驗了 4 種反例；driver 的 `algorithm`、indent heuristic、別的 git 版本沒試。
