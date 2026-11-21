@@ -10,6 +10,7 @@
 - 修正第 7 輪（2026-11-21）：照本人 11-21 的第二次裁定（經 PMO，MyPMO#474）把 §0、§6、§7 的各項改成「已決」，寫入 V-1a 的實測（§7.1 末）；A-2 已授權一次但暫停。新增 §12（本人提議的同名孿生 session 的評估）、§13（品質計算 CI 共用化的設計）。既有規則不改。
 - 修正第 8 輪（2026-11-21）：回應非作者審查（head `ff14bdb`）的中 1、低 1～4，寫入 V-1c 的實測（§12.7 末）。不加新機制：§13.3 把會影響量測的 git 輸入全部固定下來；V-1a 的 K-1p 寫明是哪個 request；R-18、M3-4′ 改成本人裁定後才開；V-1c 第 3 步補 exit 3 與「不確定」的分支；§13 的 G-4 分母與歷史數字改正。改了 §0、§7、§7.1、§12.2、§12.3、§12.4、§12.6、§12.7、§12.9、§12.10、§13.1、§13.3、§13.5、§13.7、§13.8。
 - 修正第 9 輪（2026-11-21）：回應非作者審查（head `2ffd67b`）的中 1、低 1。不加新機制：§13.3 補上 replacement objects（所有 git 讀取一律 `git --no-replace-objects`，`-c core.useReplaceRefs=false`，相關環境變數由工具明設或不傳），驗收加 (vi)；§12.6 第 5 項的「不經 sidecar」限定到前置 fork 與路徑 H。
+- 修正第 10 輪（2026-11-21）：回應非作者審查（head `b78e567`）的中 1。不加新機制：基底由工具在**完整、乾淨的歷史**上解析，工具啟動時先做前置檢查（§13.3 的 2 (g)）：有傳統 grafts 或是 shallow 就以「工具錯誤」停止，不輸出品質值、不換基底；alternates 接受並記警告；`refs/replace/` 有 ref 時照常量測（已由 (f) 停用）但記警告。CI 的 checkout 一律 `fetch-depth: 0`。改了 §13.2、§13.3、§13.4、§13.5、§13.7、§13.8。
 - 範圍：**只設計**。不改 `src/`、`tests/`、`openspec/specs/`、`atelier/`。sidecar 與 M3 在別的 repo，本稿只寫「對 sidecar 的要求」（R-編號）和「對 M3 的要求」（M3-編號），不描述它們的內部設計。
 - 和 v0 的關係：v0 是 `462-session-editing-and-consolidation.md`（11-15；本人同意方向 B：重開時用 `agora merge` 沉澱，預設關閉）。v0 的 agora 側 C-1～C-6 已經實作並 merge（PR #465、#467，測試在 `tests/unit/test_cli.py:1948` 起）。v0 **原檔不改**，只在檔頭加一行指向本稿。逐項的「v0（11-15）→v1」對照放在 §9。
 - **為什麼另開新檔、不就地改寫**：(1) v0 是本人核准方向時看的版本，程式（`cli.py:836` 起的註解）、測試（`test_cli.py:1948-1952`）和 D-29 都用「462 §10.3 C-1」這種編號引用它；就地改寫會讓這些引用指到不同的內容。(2) v1 的目標換了（從「重開時接得短」變成「每個 request 少重讀」），被取代的地方遍布全篇，逐段標「v0→v1」會比新寫一份還難讀。(3) 舊檔留著不動，非作者審查可以直接 diff 兩份。
@@ -1293,16 +1294,20 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 
 ### 13.2 輸入與輸出
 
-**輸入**：repo，以及 `base`、`head` 兩個 commit；`--src`（預設 `src`）、`--tests`（預設 `tests`）。
+**輸入**：repo，以及一個 merge commit、或 PR 的兩端（工具由此解析出 `base`、`head` 兩個 commit；也可以直接給這兩個 SHA，見下面第三點）；`--src`（預設 `src`）、`--tests`（預設 `tests`）。
 - **合進 main 之後**（push 到 main）：`base`＝merge commit 的第一個 parent，`head`＝merge commit。也就是 first-parent diff，和 §5.5 的口徑相同。
 - **PR 上**（pull_request）：`base`＝PR 的 base 與 head 的 merge-base，`head`＝PR 的 head。這只是**預覽**：main 前進之後，合進去的值可能不同。M3 只用 main 上的值。
+- **基底由工具解析，而且只在完整、乾淨的歷史上解析**（第 10 輪，回應審查的中-1）：第一個 parent（`<merge>^1`）與 merge-base 都由工具自己用 §13.3 的 git 呼叫算，不由呼叫端先算好再傳 SHA；呼叫端只傳 merge commit，或 PR 的兩端。解析之前先過 §13.3 的 2 (g) 前置檢查：本機的歷史被改過（傳統 grafts）或不完整（shallow）時，以「工具錯誤」停止，**不輸出品質值、不猜基底、不換一個基底照算**。所以同一個 merge commit、同一對 PR 端點，只會有一個基底，或者明確失敗。直接給 `base`、`head` 兩個 SHA 的用法（M3 照 CI 的 JSON 重算）也先過同一個前置檢查。
 
 **輸出**：一份 JSON，再加一段給人看的摘要，寫進 job summary：
-- 工具版本、Python 版本、git 版本、`base`、`head`；
+- 工具版本、Python 版本、git 版本、`base`、`head`，以及基底怎麼來的（第一個 parent、merge-base，或直接給）；
 - `code_change`：是不是改碼 PR；
 - G-4 五項的事件清單：檔案、函式的 qualified name、哪一項、前後的值；
 - `grew_over50`、`tests_touched`、`net_new_tests`；
-- 解析失敗的檔案清單（13.3）。
+- 解析失敗的檔案清單（13.3）；
+- `warnings`：前置檢查的警告代碼（13.3 的 2 (g)），排序。它描述的是本機 repo 的狀態，不是量測；13.3 的「輸出位元組相同」指的是**拿掉 `warnings` 之後**的 JSON。
+
+工具錯誤（含前置檢查不過）時，只輸出錯誤代碼與說明，不輸出任何品質值，exit 不是 0。
 
 沒有時間戳、沒有亂數、不連網路；鍵與清單都排序。
 
@@ -1311,18 +1316,25 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 - **不用 LLM**，只用標準庫：`ast`、`json`，以及用 `subprocess` 呼叫 git。
 - **要固定的東西**（推論；原型 `q3_static_v2.py` 都沒有固定，是現在的缺口）：
   1. **Python 的小版本**：`ast.dump` 的輸出在不同的 Python 版本之間可能不一樣，「AST 相同」「改碼 PR」的判定就會跟著變。CI 要釘一個版本，輸出寫明版本；基準也要用同一個版本重算。
-  2. **git 的輸入**（第 8 輪重寫，回應審查的中-1）：原型直接用 `git diff -U0`（`q3_static_v2.py:89`），hunk 的範圍會受設定、環境變數、attributes 與 replacement objects 影響。M3-11 的相鄰新增窗以 hunk 為界，所以 hunk 必須只由兩棵樹決定。下面全部固定（(f) 是第 9 輪補）：
+  2. **git 的輸入**（第 8 輪重寫，回應審查的中-1）：原型直接用 `git diff -U0`（`q3_static_v2.py:89`），hunk 的範圍會受設定、環境變數、attributes 與 replacement objects 影響。M3-11 的相鄰新增窗以 hunk 為界，所以 hunk 必須只由兩棵樹決定。下面全部固定（(f) 是第 9 輪補，(g) 是第 10 輪補）：
      - (a) **命令列明寫**（命令列的選項蓋過設定檔）：`git --no-replace-objects -C <repo 根目錄> diff --no-color --no-ext-diff --no-textconv --text --no-renames --diff-algorithm=myers --inter-hunk-context=0 --no-indent-heuristic --no-relative --src-prefix=a/ --dst-prefix=b/ -U0 <base> <head> -- <pathspec>`。`--text` 讓 attributes 的 `binary`、`-diff` 不會把 `.py` 變成「Binary files differ」。檔名清單一律加 `-z`。讀檔案內容一律 `git --no-replace-objects cat-file blob <sha>:<path>`（不經 textconv，也不讀工作目錄）。所有 git 呼叫都帶 `--no-replace-objects`，見 (f)。
      - (b) **設定檔**：不讀系統與全域的設定（`GIT_CONFIG_NOSYSTEM=1`、`GIT_CONFIG_GLOBAL=/dev/null`，和本 repo 測試夾具相同）。repo 自己的 `.git/config` 關不掉：(a) 的命令列選項是第一道；再用 `git -c` 覆蓋一次（第二道）：`core.quotepath=off`、`core.attributesFile=/dev/null`、`diff.interHunkContext=0`、`diff.indentHeuristic=false`、`diff.algorithm=myers`、`diff.renames=false`、`diff.noprefix=false`、`color.ui=never`、`core.useReplaceRefs=false`（第 9 輪補）。
      - (c) **環境變數**：git 用白名單的環境起（只傳 `PATH`、`LC_ALL=C`、一個空的暫存 `HOME`，加上 (b) 的兩個和 `GIT_ATTR_NOSYSTEM=1`）。其他一律不傳，特別是會注入設定的 `GIT_CONFIG_PARAMETERS`、`GIT_CONFIG_COUNT`／`GIT_CONFIG_KEY_*`／`GIT_CONFIG_VALUE_*`，以及 `GIT_DIFF_OPTS`、`GIT_EXTERNAL_DIFF`、`GIT_DIR`、`GIT_WORK_TREE`、`GIT_REPLACE_REF_BASE`。`GIT_NO_REPLACE_OBJECTS` 不從外面繼承；工具要用它的話，由工具自己設成 `1`，並列進白名單（第 9 輪補）。
      - (d) **attributes**：只解析 hunk 的範圍（`@@ -a,b +c,d @@`），不用 `@@` 後面的函式名（attributes 的 `diff=<driver>` 會改它）。系統層與 `core.attributesFile` 不讀（(b)(c)）；repo 的 `.git/info/attributes` 和工作目錄的 `.gitattributes` 關不掉，靠 `--no-textconv`、`--no-ext-diff`、`--text` 讓它們不影響輸出，由下面的驗收證明。
      - (e) **git 版本是確定性的輸入**：輸出記下 git 版本（13.2）。CI runner 的 git 會跟著映像升級，不一定釘得住，所以契約寫成：**（`base`、`head`、工具版本、Python 小版本、git 版本）都相同 → 輸出位元組相同**。版本不同算不同的輸入，結果不直接比；M3 的基準和處理期要用同一個版本算，換版本時基準整個重算。
      - (f) **replacement objects**（第 9 輪，回應審查的中-1）：git 預設會照 repo 的 `refs/replace/` 把 commit、tree、blob 換成別的物件，SHA 的字面值不變，讀到的內容卻不同；hunk、AST 的改碼判定、`cat-file` 讀到的內容、`<sha>^` 與 `merge-base` 的解析都會跟著變。所以**所有 git 讀取一律停用**：命令列一律 `git --no-replace-objects …`（diff、`diff --name-only`、ls-tree、cat-file、rev-parse／`<sha>^`、merge-base 都算），(b) 的 `-c` 也加 `core.useReplaceRefs=false`，(c) 不傳 `GIT_REPLACE_REF_BASE`。三道裡只靠一道也停得掉（下面的反例），全部都寫是為了不靠記得哪一道。
+     - (g) **前置檢查：歷史要完整、乾淨**（第 10 輪，回應審查的中-1）：傳統的 grafts（`info/grafts`）和 shallow 不是 replacement objects，(f) 停不掉；它們會改 `<sha>^1` 與 `merge-base` 的結果（下面第 10 輪的反例），但不改同一對 SHA 的 `diff` 與 `cat-file`。所以工具在任何量測之前、用 (a)～(f) 同樣的 git 呼叫檢查一次。檔案位置一律用 `git rev-parse --git-path <路徑>` 問（worktree 裡會指到共用的 `.git`），不自己拼：
+       - `info/grafts` 存在 → **工具錯誤**（代碼 `grafts_present`）。不靠把 `GIT_GRAFT_FILE` 指到不存在的檔案來略過：沒有實測，而且那等於接受一個本機改過歷史的 repo；直接拒絕較清楚。(c) 的白名單本來就不傳 `GIT_GRAFT_FILE`。
+       - `git rev-parse --is-shallow-repository` 是 `true`（`shallow` 檔存在）→ **工具錯誤**（代碼 `shallow_repository`）。要的是完整歷史，見 13.4 的 `fetch-depth: 0`。
+       - `objects/info/alternates` 存在 → **接受**，`warnings` 記 `alternates_present`。理由：alternates 只多一個物件的來源；物件以 SHA 定址，同一個 SHA 讀到的內容不會因此改變（雜湊碰撞不考慮）；缺物件時 git 會出錯，工具照「工具錯誤」停止。(c) 不傳 `GIT_ALTERNATE_OBJECT_DIRECTORIES`、`GIT_OBJECT_DIRECTORY`。
+       - `refs/replace/` 底下有 ref（`git for-each-ref refs/replace/` 有輸出）→ 照常量測（(f) 已經停用），`warnings` 記 `replace_refs_present`。
+       - 工具錯誤一律 exit 不是 0、不輸出品質值；在 Q0 也讓 job 失敗（13.5「工具自己出錯」）。
   3. **檔案的順序**：`ls-tree`、`diff --name-only` 的結果，再排序一次。
   4. **解析不了的檔案**（語法比 CI 的 Python 新，或檔案本來就壞了）：不猜。列進「解析失敗」，那個檔案的指標記「無法判定」。
 - **驗收**：
   - 同一組輸入跑兩次，輸出位元組相同；換一台機器（同樣的版本）跑，也相同。
-  - **刻意改本機設定仍同輸出**（第 8 輪新增）：同一對 SHA、同樣的版本，下面每一種都要和乾淨環境的輸出位元組相同：(i) repo 的 `.git/config` 設 `diff.interHunkContext=10`、`diff.indentHeuristic=true`、`diff.algorithm=patience`、`diff.renames=copies`、`diff.noprefix=true`、`diff.relative=true`、`color.ui=always`；(ii) `.git/info/attributes` 設 `*.py diff=x`，加 `diff.x.textconv`、`diff.x.algorithm=histogram`、`diff.x.xfuncname`；(iii) `.git/info/attributes` 設 `*.py -diff`；(iv) 環境設 `GIT_CONFIG_PARAMETERS`（注入 `diff.interHunkContext=10`）、`GIT_DIFF_OPTS=--unified=3`；(v) 從 repo 的子目錄執行；(vi) repo 裡存在 `refs/replace/`（例如 `git replace <head> <base>`、`git replace --graft <head> <別的 commit>`，以及把 `<head>:<path>` 的 blob 換掉），而且 repo 的 `core.useReplaceRefs` 分別設 `true` 與 `false`（第 9 輪新增）。測試用的相近 hunk 要讓 (i) 的 `interHunkContext` 在沒有固定時真的會合併。
+  - **刻意改本機設定仍同輸出**（第 8 輪新增）：同一對 SHA、同樣的版本，下面每一種都要和乾淨環境的輸出位元組相同：(i) repo 的 `.git/config` 設 `diff.interHunkContext=10`、`diff.indentHeuristic=true`、`diff.algorithm=patience`、`diff.renames=copies`、`diff.noprefix=true`、`diff.relative=true`、`color.ui=always`；(ii) `.git/info/attributes` 設 `*.py diff=x`，加 `diff.x.textconv`、`diff.x.algorithm=histogram`、`diff.x.xfuncname`；(iii) `.git/info/attributes` 設 `*.py -diff`；(iv) 環境設 `GIT_CONFIG_PARAMETERS`（注入 `diff.interHunkContext=10`）、`GIT_DIFF_OPTS=--unified=3`；(v) 從 repo 的子目錄執行；(vi) repo 裡存在 `refs/replace/`（例如 `git replace <head> <base>`、`git replace --graft <head> <別的 commit>`，以及把 `<head>:<path>` 的 blob 換掉），而且 repo 的 `core.useReplaceRefs` 分別設 `true` 與 `false`（第 9 輪新增；拿掉 `warnings` 之後相同，`warnings` 要有 `replace_refs_present`）。測試用的相近 hunk 要讓 (i) 的 `interHunkContext` 在沒有固定時真的會合併。
+  - **歷史不乾淨時明確失敗**（第 10 輪新增）：(vii) `info/grafts` 存在（例如三個 commit A→B→C，寫入「C A」）→ merge commit 模式（`head`＝C）與 PR 模式（端點 B、C）都是工具錯誤 `grafts_present`，**不是**以 A 為基底成功輸出；(viii) `shallow` 存在（例如寫入 C）→ 工具錯誤 `shallow_repository`；(ix) 從 worktree 執行、grafts 或 shallow 在共用的 `.git` 裡，結果同 (vii)(viii)；(x) `objects/info/alternates` 指到一個空的物件目錄 → 拿掉 `warnings` 之後和乾淨環境位元組相同，`warnings` 有 `alternates_present`。
 - **第 8 輪的手動反例**（實測，git 2.43.0，暫存 repo，兩個相隔 3 行的單行修改；沒有寫進任何 repo）：
   - repo 的 `.git/config` 設 `diff.interHunkContext=10`：原型的寫法（`git diff -U0`）兩個 hunk 被合成一個；加上 (a) 的選項，回到兩個。`GIT_CONFIG_PARAMETERS` 注入同一個設定，結果一樣被合併。
   - `GIT_DIFF_OPTS=--unified=3`：**連命令列明寫的 `-U0` 都被蓋過**，所以 (c) 的白名單是必要的，不能只靠命令列。
@@ -1334,6 +1346,13 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
   - 換掉 blob：`git cat-file blob <head>:a.py` 讀到的是被換進來的內容；加 `--no-replace-objects` 讀回原本的。
   - `git replace --graft`（把第 3 個 commit 換成沒有 parent 的那個）：`rev-parse <sha>^` 解析失敗、`merge-base` 沒有結果；加 `--no-replace-objects` 回到原本的 parent。
   - `GIT_REPLACE_REF_BASE` 指到別的 ref 目錄，git 就改讀那裡的替換。所以 (c) 不傳它。
+- **第 10 輪的手動反例**（實測，git 2.43.0，暫存 repo，三個 commit A→B→C，`a.py` 依序 `x = 0`→`1`→`2`；全程用 (a)～(f) 的環境與選項；沒有寫進任何 repo。審查者在團隊目錄的合成 repo 得到同樣的結果，另外實測同一對 SHA 的 `diff` 與 `cat-file` 在各狀態都不變）：
+  - 乾淨：`rev-parse C^1` 與 `merge-base B C` 都是 B；`--is-shallow-repository` 是 `false`。
+  - `info/grafts` 寫入「C A」：兩者都**成功**改回 A（exit 0，沒有警告）。所以只能偵測後拒絕。
+  - `shallow` 寫入 C：`--is-shallow-repository` 變 `true`；`rev-parse C^1` exit 128，`merge-base B C` exit 1、沒有輸出。
+  - 從 worktree 執行：`git rev-parse --git-path info/grafts`（`shallow`、`objects/info/alternates` 也一樣）指到主 repo 的 `.git` 底下；grafts、shallow 放在那裡時，worktree 裡的結果和上面相同。
+  - `refs/replace/` 有 ref 時，`git for-each-ref refs/replace/` 列得出來，`^1` 與 `merge-base` 仍是 B（(f) 停用中）。
+  - 審查者另外試過 alternates 指到空的物件目錄、commit graph、`gc`、`repack -ad`：`diff`、parent、merge-base、blob 都沒變。損壞或缺物件、別的 git 版本沒試。
 
 ### 13.4 放在哪裡
 
@@ -1346,7 +1365,7 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 **建議 (c)**：
 - 一個公開的小套件，提供 CLI（例如 `qmetrics diff --base <sha> --head <sha> --json`）。
 - 加一個可重用的 GitHub Actions workflow（`workflow_call`），或 composite action。
-- 各 repo 的 workflow 只要幾行：checkout（要 `fetch-depth: 0`，才拿得到 base）、釘 Python 版本、呼叫它。
+- 各 repo 的 workflow 只要幾行：checkout（**一律 `fetch-depth: 0`**：完整歷史，才拿得到 base；淺的 checkout 會被 13.3 的 2 (g) 判成工具錯誤，不會靜默換基底）、釘 Python 版本、呼叫它。
 - M3 可以用同一個版本在本地重算，也可以直接讀 CI 的 JSON artifact；因為結果確定，兩者會相同。
 - 放在哪個帳號、叫什麼名字，由 PMO 與本人決定（**Q-O**）。
 
@@ -1358,7 +1377,7 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 
 | 階段 | 失敗條件 | 其他 |
 |---|---|---|
-| Q0（上線起） | **只有工具自己出錯**（例如讀不到 base）時，job 才失敗；指標一律只報告 | job summary 加 JSON artifact |
+| Q0（上線起） | **只有工具自己出錯**（例如讀不到 base、13.3 的 2 (g) 前置檢查不過）時，job 才失敗；指標一律只報告 | job summary 加 JSON artifact |
 | Q1（M3-11 校驗通過，而且本人同意之後） | 兩項**基準是 0** 的事件：檔案跨過 1000 行；出現和既有函式 AST 相同的新函式（G-4 已經寫了「交架構師判」）。CI 失敗；專案架構師判過之後，用一個固定的 label 放行（例如 `quality:arch-ok`），放行留在 PR 上 | 函式跨過 50 行、巢狀跨到 4 層、跨檔重複、`grew_over50`：只報告；比例由 M3 每個視窗判（G-4） |
 
 **為什麼「函式跨過 50 行」這類事件不設成失敗**：基準的 15 個改碼 PR 裡，跨 50 行的有 3／15 個 PR（6 個事件）；有任一項壞味道的是 5／15（§5.5 的 G-4）。一個 PR 一個 PR 地擋，會讓五分之一到三分之一的 PR 卡住；而 G-4 本來就是視窗比例的門檻。
@@ -1375,7 +1394,7 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 | 步 | 內容 | repo | 前置 |
 |---|---|---|---|
 | QC-0 | M3-11 校驗的第二項：人工對 5 個真的 PR | —（M3） | 無 |
-| QC-1 | 小套件：CLI 加 13.3 的確定性；7 個合成案例變成它的測試；加一個「跑兩次，輸出位元組相同」的測試，以及 13.3 的「刻意改本機設定仍同輸出」(i)～(vi) | 新的公開 repo（Q-O） | 本人同意 (c) 與 repo |
+| QC-1 | 小套件：CLI 加 13.3 的確定性；7 個合成案例變成它的測試；加一個「跑兩次，輸出位元組相同」的測試，以及 13.3 的「刻意改本機設定仍同輸出」(i)～(vi) 與「歷史不乾淨時明確失敗」(vii)～(x) | 新的公開 repo（Q-O） | 本人同意 (c) 與 repo |
 | QC-2 | 可重用的 workflow（Q0：只報告） | 同 QC-1 | QC-1 |
 | QC-3 | 本 repo 的 `.github/workflows/` 加一個呼叫 QC-2 的 workflow（Q0） | MAS（PM 的 PR；不在架構師能 commit 的路徑裡） | QC-2 |
 | QC-4 | 本 repo 的 `uv run pytest` workflow（G-0） | MAS | 無，可以先做。要確認測試在 GitHub 的 runner 上能跑：測試隔離已經不讀真的家目錄（AGENTS.md），但沒有在 runner 上跑過 |
@@ -1394,3 +1413,4 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 - 本 repo 的測試在 GitHub 的 runner 上能不能全綠：沒跑。
 - 原型的 git 選項沒有固定時，結果實際上會不會不同：第 8 輪更新：在暫存 repo 用手動反例試過（13.3），會不同；在本 repo 的 15 個改碼 PR 上，當時算基準的環境有沒有受影響，沒查。
 - 13.3 的固定做法：只在暫存 repo 驗了 4 種反例；driver 的 `algorithm`、indent heuristic、別的 git 版本沒試。
+- 13.3 的 2 (g) 前置檢查（第 10 輪）：只在 git 2.43.0 的暫存 repo 驗了偵測指令與 grafts、shallow 的效果；工具還沒寫，「偵測到就停止」只是契約。GitHub 的 checkout 在 `fetch-depth: 0` 時會不會留下 `shallow` 檔、本 repo 的 15 個改碼 PR 算基準時用的 clone 是不是完整的：沒查。
