@@ -1401,7 +1401,7 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 | QC-1 | 小套件：CLI 加 13.3 的確定性；7 個合成案例變成它的測試；加一個「跑兩次，輸出位元組相同」的測試，以及 13.3 的「刻意改本機設定仍同輸出」(i)～(vi) 與「歷史不乾淨時明確失敗」(vii)～(x) | 新的公開 repo MyCodeQuality（Q-O 已決） | 本人同意 (c) 與 repo。**已完成**（MyCodeQuality PR #4，schema 2） |
 | QC-2 | 可重用的 workflow（Q0：只報告） | 同 QC-1 | QC-1。**進行中**（MyCodeQuality#3） |
 | QC-3 | 本 repo 的 `.github/workflows/` 加一個呼叫 QC-2 的 workflow（Q0） | MAS（PM 的 PR；不在架構師能 commit 的路徑裡） | QC-2 |
-| QC-4 | 本 repo 的 `uv run pytest` workflow（G-0） | MAS | 無，可以先做。要確認測試在 GitHub 的 runner 上能跑：測試隔離已經不讀真的家目錄（AGENTS.md），但沒有在 runner 上跑過。**已完成**（#494，PR #495） |
+| QC-4 | 本 repo 的 `uv run pytest` workflow（G-0） | MAS | 無，可以先做。要確認測試在 GitHub 的 runner 上能跑：測試隔離已經不讀真的家目錄（AGENTS.md），當時沒有在 runner 上跑過（實作前的狀態）。**已完成**（#494，PR #495；已在 runner 上跑過，見 §13.8） |
 | QC-5 | Q1：兩項失敗條件，加上放行的 label | QC-1 的 repo、MAS | QC-0 過了；本人同意 |
 | QC-6 | 其他 repo 照 QC-3 接上 | 各 repo | QC-2；非 Python 的 repo 等「需另設」 |
 
