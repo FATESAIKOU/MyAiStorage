@@ -59,7 +59,7 @@
 | P-12 | `pmo tick` 只以 sidecar `state` 的變化決定要不要印：兩次 tick 之間 agent「結束 → 被重開 → 又結束」時看不到第二次結束。可以比 agent 物件的 `started_at` 補上 | 架構師提、PM 排程 | #375 結構審 §2(1) |
 | P-13 | `pmo` 的 `tick.json` 壞掉、`handoffs` 等只存在本機：PMO 換機器時要不要搬、怎麼搬（T-7 切換前要定） | PM／PMO | #110 T-7 |
 | P-14 | `tick.json` 在 `tickstate.commit` 以外有兩處自己做鎖內 read-modify-write（`handoff` 的關閉、`wake._write_wake`）。要不要在 `tickstate` 加一個通用的 `update(path, mutate, *, timeout)`（`commit` 改成它加上 `last_tick_at`），讓狀態檔的鎖與讀寫只在 schema 模組 | 架構師提、PM 排程（不急） | #358 T5-4 結構審 低-3 |
-| P-15 | #462 v1：長壽角色重開時預設「沉澱後接」（由啟動方帶，sidecar 的預設仍是整份接）；段內超過門檻 N 時由 PMO 送 `/compact`；驗收看每個 request 的快取讀取 token 與加權佔比，不看 token 比例。agora 不改程式（D-29 不變），只補 by-id 取回的測試 | 本人（經 PMO） | design-notes/462-v1-recall-instead-of-resend.md §6 Q-A～Q-D |
+| P-15 | #462 v1：長壽角色重開時預設「沉澱後接」（由啟動方帶，sidecar 的預設仍是整份接）；段內超過門檻 N 時由 PMO 送 `/compact`（先在拋棄式 agent 上驗過 poke 能送斜線指令）；B（sidecar 實作）要不要做，看 `/compact` 能不能撐過重開再定；驗收看每個 request 的快取讀取 token 與加權佔比，不看 token 比例。agora 不改程式（D-29 不變），只補 by-id 取回的測試 | 本人（經 PMO） | design-notes/462-v1-recall-instead-of-resend.md §6 Q-A～Q-D |
 
 ## 交接（2026-11-04：專案架構師由 Mac 的常駐席位改為按需、開在 worker）
 
