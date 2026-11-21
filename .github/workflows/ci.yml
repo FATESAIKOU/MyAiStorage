@@ -1,0 +1,32 @@
+name: CI
+
+# Runs the unit suite (pyproject's testpaths = tests/unit) on every pull request,
+# on pushes to main, and on demand. No secrets: the unit tests isolate HOME and
+# the agora/angareion directories, and fake rclone and agents, so they need no
+# network or Drive access. tests/integration is not run here.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.4.0
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+      - name: Run unit tests
+        run: uv run pytest -q
