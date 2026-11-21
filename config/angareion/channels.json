@@ -36,6 +36,10 @@
       "backend": "aicompany-channel",
       "issue": 27
     },
+    "team-mycostcontrol-w1": {
+      "backend": "aicompany-channel",
+      "issue": 34
+    },
     "team-mylinuxpool": {
       "backend": "aicompany-channel",
       "issue": 2
