@@ -1,0 +1,25 @@
+name: Quality
+
+# Deterministic diff metrics (qmetrics, from FATESAIKOU/MyCodeQuality), report only.
+# The reusable workflow fails only when the tool itself errors, never on metric values.
+#
+# The uses: line is pinned to a commit SHA so the same inputs keep producing the same
+# numbers. aebcd2e5912d1f7bfc3b7dc6508e5300af8f248a is MyCodeQuality's main at the time
+# of writing; to upgrade, change both the uses: ref and qmetrics-ref to the new SHA.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: FATESAIKOU/MyCodeQuality/.github/workflows/quality.yml@aebcd2e5912d1f7bfc3b7dc6508e5300af8f248a
+    with:
+      python-version: "3.12"
+      src: src
+      tests: tests
+      qmetrics-ref: aebcd2e5912d1f7bfc3b7dc6508e5300af8f248a
