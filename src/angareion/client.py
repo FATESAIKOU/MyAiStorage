@@ -14,7 +14,7 @@ import time
 from typing import Any, Callable, NamedTuple
 
 from angareion.backend import BackendRef, ChannelBackend, Cursor, Entity, EntityResolver, Target
-from angareion.messages import Message
+from angareion.messages import Message, received_at_key
 from angareion.state import CursorStore, channel_cursor_key, mention_cursor_key, recipient_cursor_key
 
 POLL_INTERVAL_SECONDS = 15.0
@@ -195,8 +195,8 @@ class Angareion:
             if use_local_cursor:
                 updates[key] = result.cursor
 
-        # Oldest first across channels: by the backend time, then channel/name.
-        messages.sort(key=lambda m: (getattr(m, "received_at", "") or "", m.channel, m.id))
+        # Oldest first across channels: by the backend time (as an instant, #510), then channel/name.
+        messages.sort(key=lambda m: (received_at_key(getattr(m, "received_at", None)), m.channel, m.id))
 
         def commit_recipient() -> None:
             if updates:

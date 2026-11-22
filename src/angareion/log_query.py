@@ -8,6 +8,7 @@ then calls ``select`` to turn the cached messages into the final list.
 from __future__ import annotations
 
 from angareion.backend import parse_backend_time
+from angareion.messages import received_at_key
 
 
 class AnchorNotFoundError(Exception):
@@ -124,7 +125,7 @@ def select(
     if len(selected_channels) == 1:
         filtered.sort(key=lambda m: m.comment_id)
     else:
-        filtered.sort(key=lambda m: (m.received_at or "", m.channel, m.id))
+        filtered.sort(key=lambda m: (received_at_key(m.received_at), m.channel, m.id))
 
     if limit is not None:
         n = limit
