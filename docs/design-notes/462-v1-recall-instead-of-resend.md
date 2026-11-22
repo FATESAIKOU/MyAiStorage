@@ -29,7 +29,7 @@
 
 **本人 11-21 新提的兩件事**：
 - **同名孿生 session**（§12）：建議以它為主，用路徑 P；A-2 留作備案、不執行。V-1c 已做，下一步請本人裁定 A-3（取代 A-2）與 T-2′；V-1d（真的 PM）要 A-3。
-- **品質計算 CI 共用化**（§13）：本人已決（11-21，M4-5 選 A、M4-6 選 A）：獨立的公開小套件，放新的公開 repo MyCodeQuality（Q-O），先只報告。什麼時候開始讓 CI 失敗（Q1，QC-5），仍要本人決定。QC-1 已完成（MyCodeQuality PR #4，輸出 schema 2：無法判定一律 `null`，§13.2）；QC-2 進行中（§13.7）。
+- **品質計算 CI 共用化**（§13）：本人已決（11-21，M4-5 選 A、M4-6 選 A）：獨立的公開小套件，放新的公開 repo MyCodeQuality（Q-O），先只報告。Q1（QC-5，讓 CI 對兩項事件失敗）本人 11-22 選 A：QC-0 補驗通過後，先只在 MyCodeQuality、本 repo 兩個 repo 開，其他 repo 維持只報告。QC-1～QC-5 已完成（MyCodeQuality PR #4、#5、#9；輸出 schema 2：無法判定一律 `null`，§13.2）；本 repo 的接上為 #498（完成）、#505（進行中，§13.7）。
 
 **根因（實測，§1）**：長壽 PM 每個 request 重讀約 85 萬 token，93% 是開機時整份接回的舊對話，從沒壓縮過。
 
@@ -1382,7 +1382,7 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 | 階段 | 失敗條件 | 其他 |
 |---|---|---|
 | Q0（上線起） | **只有工具自己出錯**（例如讀不到 base、13.3 的 2 (g) 前置檢查不過）時，job 才失敗；指標一律只報告 | job summary 加 JSON artifact |
-| Q1（M3-11 校驗通過，而且本人同意之後） | 兩項**基準是 0** 的事件：檔案跨過 1000 行；出現和既有函式 AST 相同的新函式（G-4 已經寫了「交架構師判」）。CI 失敗；專案架構師判過之後，用一個固定的 label 放行（例如 `quality:arch-ok`），放行留在 PR 上 | 函式跨過 50 行、巢狀跨到 4 層、跨檔重複、`grew_over50`：只報告；比例由 M3 每個視窗判（G-4）。這兩項的計數是 `null`（13.2）時要不要讓 CI 失敗，QC-5 開工時定；建議當成失敗、用同一個 label 放行（推論） |
+| Q1（M3-11 校驗通過，而且本人同意之後） | 兩項**基準是 0** 的事件：檔案跨過 1000 行；出現和既有函式 AST 相同的新函式（G-4 已經寫了「交架構師判」）。CI 失敗；專案架構師判過之後，用一個固定的 label 放行（例如 `quality:arch-ok`），放行留在 PR 上 | 函式跨過 50 行、巢狀跨到 4 層、跨檔重複、`grew_over50`：只報告；比例由 M3 每個視窗判（G-4）。這兩項的計數是 `null`（13.2）時要不要讓 CI 失敗，QC-5 開工時定；建議當成失敗、用同一個 label 放行（推論）。計數是 `null` 時當成失敗、可用同一個 label 放行（QC-5 已定）。 |
 
 **為什麼「函式跨過 50 行」這類事件不設成失敗**：基準的 15 個改碼 PR 裡，跨 50 行的有 3／15 個 PR（6 個事件）；有任一項壞味道的是 5／15（§5.5 的 G-4）。一個 PR 一個 PR 地擋，會讓五分之一到三分之一的 PR 卡住；而 G-4 本來就是視窗比例的門檻。
 
@@ -1399,15 +1399,15 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 |---|---|---|---|
 | QC-0 | M3-11 校驗的第二項：人工對 5 個真的 PR | —（M3） | 無 |
 | QC-1 | 小套件：CLI 加 13.3 的確定性；7 個合成案例變成它的測試；加一個「跑兩次，輸出位元組相同」的測試，以及 13.3 的「刻意改本機設定仍同輸出」(i)～(vi) 與「歷史不乾淨時明確失敗」(vii)～(x) | 新的公開 repo MyCodeQuality（Q-O 已決） | 本人同意 (c) 與 repo。**已完成**（MyCodeQuality PR #4，schema 2） |
-| QC-2 | 可重用的 workflow（Q0：只報告） | 同 QC-1 | QC-1。**進行中**（MyCodeQuality#3） |
-| QC-3 | 本 repo 的 `.github/workflows/` 加一個呼叫 QC-2 的 workflow（Q0） | MAS（PM 的 PR；不在架構師能 commit 的路徑裡） | QC-2 |
+| QC-2 | 可重用的 workflow（Q0：只報告） | 同 QC-1 | QC-1。**已完成**（MyCodeQuality#3，PR #5） |
+| QC-3 | 本 repo 的 `.github/workflows/` 加一個呼叫 QC-2 的 workflow（Q0） | MAS（PM 的 PR；不在架構師能 commit 的路徑裡） | QC-2。**已完成**（本 repo #498） |
 | QC-4 | 本 repo 的 `uv run pytest` workflow（G-0） | MAS | 無，可以先做。要確認測試在 GitHub 的 runner 上能跑：測試隔離已經不讀真的家目錄（AGENTS.md），當時沒有在 runner 上跑過（實作前的狀態）。**已完成**（#494，PR #495；已在 runner 上跑過，見 §13.8） |
-| QC-5 | Q1：兩項失敗條件，加上放行的 label | QC-1 的 repo、MAS | QC-0 過了；本人同意 |
+| QC-5 | Q1：兩項失敗條件，加上放行的 label | QC-1 的 repo、MAS | QC-0 過了；本人同意。**已完成**（MyCodeQuality#8，PR #9）；本 repo 的接上：#505（進行中） |
 | QC-6 | 其他 repo 照 QC-3 接上 | 各 repo | QC-2；非 Python 的 repo 等「需另設」 |
 
 **SOLID**：
 - **單一職責**：工具只算數字。
-- **依賴反轉**：門檻與失敗條件寫在呼叫端的設定裡；工具不知道 G-4 的門檻。
+- **依賴反轉**：要不要失敗，寫在呼叫端的設定裡（可重用 workflow 的 `fail-on`，預設 `none`＝只報告）；`diff` 不知道任何門檻。Q1 的兩項事件、門檻 0 與放行 label `quality:arch-ok` 是 §13.5 定的固定政策，放在另一個子命令 `gate` 裡（只讀 `diff` 的 JSON，可測試）；要給各 repo 不同政策時，再加新的 `fail-on` 值或有預設值的參數。
 - **介面隔離**：輸出的 JSON 有版本號；M3 只依賴這個格式。
 
 ### 13.8 沒驗到（第 7 輪，§13）
@@ -1420,3 +1420,4 @@ sidecar 讀的是這台 worker 安裝的版本（`mlp-sidecar`，安裝紀錄的
 - 原型的 git 選項沒有固定時，結果實際上會不會不同：第 8 輪更新：在暫存 repo 用手動反例試過（13.3），會不同；在本 repo 的 15 個改碼 PR 上，當時算基準的環境有沒有受影響，沒查。
 - 13.3 的固定做法：只在暫存 repo 驗了 4 種反例；driver 的 `algorithm`、indent heuristic、別的 git 版本沒試。
 - 13.3 的 2 (g) 前置檢查（第 10 輪）：只在 git 2.43.0 的暫存 repo 驗了偵測指令與 grafts、shallow 的效果；QC-1 已照 (vii)～(ix) 實作並有測試（MyCodeQuality `tests/test_preflight.py`），同樣只在 git 2.43.0 跑過。GitHub 的 checkout 在 `fetch-depth: 0` 時會不會留下 `shallow` 檔、本 repo 的 15 個改碼 PR 算基準時用的 clone 是不是完整的：沒查。
+- QC-0 補驗（11-22）：10 個真 PR 80 格一致、22 個合成案例一致；Q1 兩項事件在真 PR 上沒有真實正例；改變數名的 AST 複製抓不到；只改 docstring 算改碼。
