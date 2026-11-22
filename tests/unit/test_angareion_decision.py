@@ -101,6 +101,9 @@ def _ask_with_deep_unknown_key(nest):
 @pytest.mark.parametrize('nest', [
     '['*(FLOW_DEPTH_MAX+1)+']'*(FLOW_DEPTH_MAX+1),
     '['*40000,
+    '{'*(FLOW_DEPTH_MAX+1),
+    '{['*(FLOW_DEPTH_MAX//2+1),
+    '{'*40000,
 ])
 def test_482_flow_nested_past_the_cap_is_bad_payload_and_the_rest_still_folds(nest):
     bad=ask(2); bad.message.content=_ask_with_deep_unknown_key(nest)
@@ -113,6 +116,16 @@ def test_482_a_legal_ask_with_a_cap_deep_unknown_key_still_reads():
     r.message.content=_ask_with_deep_unknown_key('['*FLOW_DEPTH_MAX+']'*FLOW_DEPTH_MAX)
     result=fold([r],use_snapshot=False)
     assert result.ignored==[] and result.decisions[0]['title']=='題 😀'
+
+def test_482_the_cap_is_32():
+    # The design (#482 section 1.2) fixes 32: legal payloads reach depth 5 at most, so the cap
+    # keeps a 6x margin. A different number is a design change, not a tweak.
+    assert FLOW_DEPTH_MAX==32
+
+def test_482_the_cap_covers_flow_mappings_and_mixed_nesting():
+    for nest in ('{'*(FLOW_DEPTH_MAX+1), '{['*(FLOW_DEPTH_MAX//2+1), '['*FLOW_DEPTH_MAX+'{'):
+        with pytest.raises(_TooDeep):
+            yaml.load(nest,Loader=_PayloadLoader)
 
 def test_482_the_scanner_stops_deep_nesting_before_recursion():
     with pytest.raises(_TooDeep):
