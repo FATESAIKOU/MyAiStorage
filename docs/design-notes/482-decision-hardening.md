@@ -82,7 +82,7 @@
   - `_parse_time(text) -> datetime | None`：從 `snapshot_for`（`:677-682`）抽出來，`Z` 換成 `+00:00` 後用 `fromisoformat` 解析。沒有時區、或解析失敗，回 `None`。`snapshot_for` 改用它，行為不變。
   - `_time_key(value: str | None) -> tuple`：
     - `None` → `(0, EPOCH)`；
-    - 解析得出 → `(1, 轉成 UTC 的時刻)`；
+    - 解析得出 → `(1, 帶時區的時刻)`：依時刻比較，不轉 UTC，以免邊界溢位（`astimezone(utc)` 對 `0001-01-01T00:00:00+01:00` 等會 OverflowError）。這是 #513（PR-3）的實作，架構師在 PR-3 結構審裁定（`REPORT-482pr3-arch.md`）；
     - 解析不出的字串 → `(2, EPOCH, 原字串)`。
     - 同一時刻、不同寫法的字串，排序鍵相同，交給 `channel`、`id` 決勝。
   - **公開** `order_key(q: Decision) -> tuple`，回傳 `(_time_key(q["asked_at"]), q["channel"], q["id"])`。`fold` 和 `decision_cli.py:322` 都用它；`plan_submit` 用 `(_time_key(asked_at), ref)`。
