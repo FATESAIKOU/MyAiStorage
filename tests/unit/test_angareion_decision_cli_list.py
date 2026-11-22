@@ -239,6 +239,21 @@ def test_c23_list_sorts_by_asked_at_then_channel_then_id(world):
     assert ids == [general, other_first]  # same backend time: channel name decides before id
 
 
+def test_482_list_orders_by_instant_across_time_formats(world):
+    def ask_at(stamp):
+        content = dec.build_payload("ask", ask_channel=CH, asker=P, **question())
+        return world.deliver(CH, P, H, content, created=stamp)
+
+    late_fraction = ask_at("2026-01-01T10:00:00.5+00:00")
+    earliest = ask_at("2026-01-01T09:30:00+09:00")
+    before = ask_at("2026-01-01T01:00:00Z")
+    same_instant_z = ask_at("2026-01-01T10:00:00Z")
+    same_instant_offset = ask_at("2026-01-01T19:00:00+09:00")
+    ids = [d["id"] for d in world.list_json("--all")["decisions"]]
+    tied = sorted([same_instant_z, same_instant_offset])  # equal instants: id decides
+    assert ids == [earliest, before, *tied, late_fraction]
+
+
 # -- C-27: App-written submits, judged by list --------------------------------
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections.abc import Mapping, Sequence
 from typing import Any, TypedDict
 import re
@@ -608,7 +608,12 @@ def _apply_change(r, p: dict, state: _FoldState) -> None:
 def _item_code(
     state: _FoldState, m: Message, p: dict, entry, ref, refs: set[str]
 ) -> str | None:
-    """The first problem with one `submit` item, in the order `plan_submit` uses (C-10/C-27)."""
+    """The first problem with one `submit` item, in the order `plan_submit` uses (C-10/C-27).
+
+    This is a second copy of `plan_submit`'s checks, on purpose (#482 §3). They must agree on
+    every case except a ref that is not a ULID (`bad_item` here, `unknown_ref` there); the
+    parametrized test `test_consistency_fold_and_plan_agree` (#482 PR-4) pins that.
+    """
     if isinstance(ref, str) and ref in refs:
         return "duplicate_ref"
     if not is_ulid(ref):
@@ -660,6 +665,36 @@ def _apply_submit(r, p: dict, state: _FoldState) -> None:
         state.closed.add(ref)
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _parse_time(text: str) -> datetime | None:
+    """An RFC 3339 time that carries a zone (`Z` is UTC), or None: a naive or unreadable time (#482)."""
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else None
+
+
+def _time_key(value: str | None) -> tuple:
+    """Sort key for an `asked_at`: no time first, then by instant, unreadable times last (#482).
+
+    Equal instants written differently compare equal; the caller breaks the tie.
+    """
+    if value is None:
+        return (0, _EPOCH)
+    moment = _parse_time(value)
+    if moment is None:
+        return (2, _EPOCH, value)
+    return (1, moment)  # aware datetimes compare by instant, whatever their zone
+
+
+def order_key(q: Decision) -> tuple:
+    """The order decisions are listed and planned in: asked time, then channel, then id (#482)."""
+    return (_time_key(q["asked_at"]), q["channel"], q["id"])
+
+
 def fold(records: Sequence[Record], *, use_snapshot: bool) -> FoldResult:
     records = sorted(records, key=lambda r: r.position)
     parsed = _parse_all(records)
@@ -669,9 +704,7 @@ def fold(records: Sequence[Record], *, use_snapshot: bool) -> FoldResult:
         _select_snapshots(records, parsed, state)
     for r, p, code in parsed:
         _apply(r, p, code, state)
-    ordered = sorted(
-        state.decisions.values(), key=lambda q: (q["asked_at"] or "", q["channel"], q["id"])
-    )
+    ordered = sorted(state.decisions.values(), key=order_key)
     if use_snapshot:
         ordered = [q for q in ordered if q["status"] == "open"]
     return FoldResult(
@@ -694,14 +727,11 @@ def snapshot_for(records: Sequence[Record], asker: str) -> str | None:
     if not records or any(r.received_at is None for r in records):
         return None
     try:
-        times = [
-            datetime.fromisoformat(r.received_at.replace("Z", "+00:00"))
-            for r in records
-        ]
-        if any(t.tzinfo is None for t in times):
+        times = [_parse_time(r.received_at) for r in records]
+        if any(t is None for t in times):
             return None
         limit = max(times) - timedelta(seconds=STABLE_WINDOW_SECONDS)
-    except (ValueError, TypeError, OverflowError):
+    except OverflowError:
         return None
     through = None
     for i, (r, t) in enumerate(zip(records, times)):
@@ -847,7 +877,7 @@ def plan_submit(
             if k in entry:
                 item[k] = entry[k]
         groups.setdefault((q["channel"], q["asker"]), []).append(
-            (q["asked_at"] or "", item)
+            (_time_key(q["asked_at"]), item)
         )
     if problems:
         raise SubmitRejected(problems)
