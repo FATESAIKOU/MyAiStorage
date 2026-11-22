@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from collections.abc import Mapping, Sequence
 from typing import Any, TypedDict
 import re
@@ -15,6 +15,8 @@ from angareion.messages import (
     MessageValidationError,
     MAX_MESSAGE_LENGTH,
     is_ulid,
+    parse_received_at,
+    received_at_key,
     validate_address,
     validate_channel_name,
 )
@@ -649,34 +651,9 @@ def _apply_submit(r, p: dict, state: _FoldState) -> None:
         state.closed.add(ref)
 
 
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-
-def _parse_time(text: str) -> datetime | None:
-    """An RFC 3339 time that carries a zone (`Z` is UTC), or None: a naive or unreadable time (#482)."""
-    try:
-        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return moment if moment.tzinfo is not None else None
-
-
-def _time_key(value: str | None) -> tuple:
-    """Sort key for an `asked_at`: no time first, then by instant, unreadable times last (#482).
-
-    Equal instants written differently compare equal; the caller breaks the tie.
-    """
-    if value is None:
-        return (0, _EPOCH)
-    moment = _parse_time(value)
-    if moment is None:
-        return (2, _EPOCH, value)
-    return (1, moment)  # aware datetimes compare by instant, whatever their zone
-
-
 def order_key(q: Decision) -> tuple:
     """The order decisions are listed and planned in: asked time, then channel, then id (#482)."""
-    return (_time_key(q["asked_at"]), q["channel"], q["id"])
+    return (received_at_key(q["asked_at"]), q["channel"], q["id"])
 
 
 def fold(records: Sequence[Record], *, use_snapshot: bool) -> FoldResult:
@@ -711,7 +688,7 @@ def snapshot_for(records: Sequence[Record], asker: str) -> str | None:
     if not records or any(r.received_at is None for r in records):
         return None
     try:
-        times = [_parse_time(r.received_at) for r in records]
+        times = [parse_received_at(r.received_at) for r in records]
         if any(t is None for t in times):
             return None
         limit = max(times) - timedelta(seconds=STABLE_WINDOW_SECONDS)
@@ -861,7 +838,7 @@ def plan_submit(
             if k in entry:
                 item[k] = entry[k]
         groups.setdefault((q["channel"], q["asker"]), []).append(
-            (_time_key(q["asked_at"]), item)
+            (received_at_key(q["asked_at"]), item)
         )
     if problems:
         raise SubmitRejected(problems)

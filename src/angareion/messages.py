@@ -72,6 +72,31 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def parse_received_at(text: str) -> datetime | None:
+    """An RFC 3339 time that carries a zone (`Z` is UTC), or None: a naive or unreadable time (#482)."""
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else None
+
+
+def received_at_key(value: str | None) -> tuple:
+    """Sort key for a `received_at`: no time first, then by instant, unreadable times last (#482, #510).
+
+    Equal instants written differently compare equal; the caller breaks the tie.
+    """
+    if value is None:
+        return (0, _EPOCH)
+    moment = parse_received_at(value)
+    if moment is None:
+        return (2, _EPOCH, value)
+    return (1, moment)  # aware datetimes compare by instant, whatever their zone
+
+
 class MessageValidationError(ValueError):
     """Raised when message fields, address, attachments, or length are invalid."""
 
