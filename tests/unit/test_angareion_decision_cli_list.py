@@ -60,6 +60,23 @@ def test_c15_bad_records_are_ignored_and_the_rest_still_counts(world):
     assert {d["id"]: d["status"] for d in data["decisions"]} == {qid: "answered", second: "open"}
 
 
+# -- #482 PR-2: a record with no `decision` key is bad_payload; a newer version is unsupported_version --
+
+
+def test_missing_decision_key_is_bad_payload_and_newer_version_stays_unsupported(world):
+    # A complete ask with only the `decision` line removed: only the missing key can make it bad.
+    full = dec.build_payload("ask", ask_channel=CH, asker=P, **question())
+    world.deliver(CH, H, H, full.replace("decision: 1\n", "", 1))
+    world.deliver(CH, H, H, "decision: 2\nop: ask\n")
+    result = world.run(P, "decision", "list", "--all", "--json")
+    assert result.code == 0
+    data = json.loads(result.out)
+    assert [(x["code"], x["item"], x["ref"]) for x in data["ignored"]] == [
+        ("bad_payload", None, None),
+        ("unsupported_version", None, None),
+    ]
+
+
 # -- C-18: the cursor and wait files are left alone ---------------------------
 
 
