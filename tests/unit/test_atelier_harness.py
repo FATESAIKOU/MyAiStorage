@@ -458,6 +458,37 @@ PMO_V7_KEY_SENTENCES = PMO_V6_KEY_SENTENCES + PMO_V7_NEW_SENTENCES
 #: cover the older lists).
 PMO_V8_NEW_SENTENCES = (REMEMBER_FALSE_SENTENCE,)
 PMO_V8_KEY_SENTENCES = PMO_V7_KEY_SENTENCES + PMO_V8_NEW_SENTENCES
+#: What pmo pm `v9` (owner 2026-11-22: the twin compaction is a fixed mechanism)
+#: adds: the same twin rules as worker-team pm v8／v9, applied to the PMO itself.
+#: The operator and the executor are roles here (a patrol teammate or a throwaway
+#: agent; a timed wake or an unattended script), not this session. Each entry is a
+#: whole sentence, so deleting or rewording one goes red. `v8` and earlier are
+#: append-only and not bound by these. v9 replaces no line of v8 (no REPLACED entry).
+PMO_V9_NEW_SENTENCES = (
+    "### 長對話壓縮（孿生）",
+    "本人 2026-11-22 決定：孿生壓縮是固定機制，不是每次單次授權的例外。",
+    "你不自己關自己，也不自己執行切換。",  # 「不自己關自己」是守門句，弱化就紅
+    "你的某個 request 的 K-1（input＋cached＋cache_write，來自 `/costs`）超過 N（預設 20 萬）時，"
+    "在安全點（沒有進行中的長指令、交接檔與決定檔剛更新、沒有寫到一半的派工）提出。",
+    "由巡檢隊員或拋棄式 agent 擔任，不是你自己的 session",
+    "切換（關舊 PMO、用 `session: T` 重開）由環境提供的定時叫醒或無人值守腳本執行。",
+    "更新交接檔最新一節（含在途的派工、各 PM 的待辦、已排的叫醒），"
+    "在派工 channel 或交接檔寫「交接已更新、已暫停」；之後不接新單、不派新工，直到切換完成。",
+    "做 T-5 自評（目前的單、做到哪、最近兩個決定與理由）；回報「已恢復」與自評，"
+    "並從 `/costs` 取你重開後第一個 request 的 K-1r。",
+    "事前探針「錯」就不切換",
+    "任一步不符就停下、不重試、回報本人。同一角色一天最多 2 次。",
+    "切換後 T-5「錯」，或 24 小時內被本人糾正／退回的次數超過基準＋1，就由執行者明指舊 session S 重開、暫停、回報本人；S 永遠不刪。",
+    "T 帶 tag `twin:<S 的 ULID>`；探針用的 fork 用完就刪；回退一律明指 `session`，不調 `updated_at`；"
+    "切換後的 T 不刪（等本人看過結果）。",
+    "由操作員與執行者記每次切換的 S、T、K-1p、K-1c、探針結果、切換與停機時刻、有無回退，"
+    "並交 `twin-switches.jsonl`；你只回報 K-1r 與 T-5 自評。",
+    "同一 harness 版本的 PMO 第一次之後不必再單次授權；碰到真機、憑證、被擋的動作的規矩不變，"
+    "不請別的 session 代做。",
+    "**孿生壓縮重開後的第一件事是 T-5 自評並回報**",
+    "K-1 超過 N 且在安全點才提出；探針「錯」、正在跑長指令、同一角色一天已 2 次，都不切，停下回報。",
+)
+PMO_V9_KEY_SENTENCES = PMO_V8_KEY_SENTENCES + PMO_V9_NEW_SENTENCES
 #: The v6:101 line the v7 rewrite must not keep whole (design §6): its「停太久」
 #: and「必要時」are replaced by the O-1／O-2 threshold and action. Compared after the
 #: bold markers are stripped, like the `pm` v5 guard.
@@ -593,6 +624,7 @@ PMO_V5_REL = "atelier/pmo/pm/v5.md"
 PMO_V6_REL = "atelier/pmo/pm/v6.md"
 PMO_V7_REL = "atelier/pmo/pm/v7.md"
 PMO_V8_REL = "atelier/pmo/pm/v8.md"
+PMO_V9_REL = "atelier/pmo/pm/v9.md"
 ARCH_REL = "atelier/worker-team/arch/v1.md"
 ARCH_V2_REL = "atelier/worker-team/arch/v2.md"
 ARCH_V3_REL = "atelier/worker-team/arch/v3.md"
@@ -826,6 +858,10 @@ def findings_for(path: str, text: str) -> Findings:
     # append-only and not bound by it.
     pmo_version_8_or_later = team == "pmo" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 8
+    # `pmo` v9 adds the twin-compaction section for the PMO; v8 and earlier are
+    # append-only and not bound by it.
+    pmo_version_9_or_later = team == "pmo" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) >= 9
     # `arch` is version-bound per file (#403): v1 keeps the「長期常駐」sentence,
     # v2 replaces it with「按需開」, so each list applies only to its own version.
     # `comm` (#236, #432): worker-team pm v4+, impl v2+, rev v2+, arch v3+
@@ -866,6 +902,7 @@ def findings_for(path: str, text: str) -> Findings:
             (pmo_version_6_or_later, PMO_V6_KEY_SENTENCES, "v6 起的 pmo pm"),
             (pmo_version_7_or_later, PMO_V7_NEW_SENTENCES, "v7 起的 pmo pm"),
             (pmo_version_8_or_later, PMO_V8_NEW_SENTENCES, "v8 起的 pmo pm"),
+            (pmo_version_9_or_later, PMO_V9_NEW_SENTENCES, "v9 起的 pmo pm"),
             (role == "impl" and is_v1_or_later, IMPL_KEY_SENTENCES, "v1 起的 impl"),
             (comm_required, (COMM_SENTENCE,), "宣告 comm 的版本（pm v4／impl v2／rev v2／arch v3／pmo v7 起）"),
             (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev"),
@@ -1854,14 +1891,64 @@ def test_pm_v7_has_matching_version_flags():
     assert not findings_for(PM_V7_REL, text).errors
 
 
-def test_pmo_v8_is_latest_and_has_matching_version_flags():
-    paths = list((HARNESS_ROOT / "pmo/pm").glob("v*.md"))
-    assert max(paths, key=lambda p: int(p.stem[1:])).name == "v8.md"
+def test_pmo_v8_has_matching_version_flags():
     text = (REPO / PMO_V8_REL).read_text(encoding="utf-8")
     assert "id: atelier:pmo-pm@v8\n" in text
     assert "version: v8\n" in text
     assert "# PMO（v8）\n" in text
     assert not findings_for(PMO_V8_REL, text).errors
+
+
+def test_pmo_v9_is_latest_and_has_matching_version_flags():
+    paths = list((HARNESS_ROOT / "pmo/pm").glob("v*.md"))
+    assert max(paths, key=lambda p: int(p.stem[1:])).name == "v9.md"
+    text = (REPO / PMO_V9_REL).read_text(encoding="utf-8")
+    assert "id: atelier:pmo-pm@v9\n" in text
+    assert "version: v9\n" in text
+    assert "# PMO（v9）\n" in text
+    assert not findings_for(PMO_V9_REL, text).errors
+
+
+@pytest.mark.parametrize("sentence", PMO_V9_NEW_SENTENCES)
+def test_pmo_v9_without_a_new_sentence_is_flagged(sentence):
+    """每個 pmo v9 新句刪掉就紅（負向測試）。"""
+    text = (REPO / PMO_V9_REL).read_text(encoding="utf-8")
+    assert sentence in text
+    assert findings_for(PMO_V9_REL, text.replace(sentence, "", 1)).errors
+
+
+@pytest.mark.parametrize("sentence", PMO_V8_KEY_SENTENCES)
+def test_pmo_v9_without_a_v8_sentence_is_flagged(sentence):
+    """pmo v9 必須保留 v8 的每一句；刪掉任一句就紅。"""
+    text = (REPO / PMO_V9_REL).read_text(encoding="utf-8")
+    assert findings_for(PMO_V9_REL, text.replace(sentence, "")).errors
+
+
+@pytest.mark.parametrize("old,new", [
+    ("你不自己關自己，也不自己執行切換。", "你可以自己關自己。"),
+    ("碰到真機、憑證、被擋的動作的規矩不變，不請別的 session 代做。",
+     "碰到真機、憑證、被擋的動作的規矩不變，可以請別的 session 代做。"),
+])
+def test_pmo_v9_weakening_the_no_self_close_rule_is_flagged(old, new):
+    text = (REPO / PMO_V9_REL).read_text(encoding="utf-8")
+    assert old in text
+    assert findings_for(PMO_V9_REL, text.replace(old, new, 1)).errors
+
+
+def test_pmo_v8_is_not_bound_by_the_v9_sentences():
+    """pmo v9 的新句只約束 pmo pm v9 起；v8 沒有它們時仍無錯。"""
+    text = (REPO / PMO_V8_REL).read_text(encoding="utf-8")
+    for sentence in PMO_V9_NEW_SENTENCES:
+        assert sentence not in text, f"pmo v8 不該有 v9 的句子：「{sentence}」"
+    assert not findings_for(PMO_V8_REL, text).errors
+
+
+@pytest.mark.parametrize("rel,old,new", [
+    (PMO_V9_REL, "@v9", "@v8"), (PMO_V9_REL, "version: v9", "version: v8"),
+])
+def test_a_wrong_version_flag_on_pmo_v9_is_flagged(tmp_path, rel, old, new):
+    text = (REPO / rel).read_text(encoding="utf-8")
+    assert findings_for(rel, text.replace(old, new, 1)).errors
 
 
 @pytest.mark.parametrize("rel,old,new", [
