@@ -58,6 +58,7 @@ class SyncAgent:
         self.collects = 0
         self.speak_rounds = 99      # how many collects answer with new content
         self.sleep = 0.7            # how long the "agent" holds the terminal
+        self.gate = None            # a path: the "agent" holds the terminal until it exists
 
     def _exported(self, sid):
         msgs = self.sessions[sid]
@@ -89,7 +90,11 @@ class SyncAgent:
         self.headless_calls.append((headless, headless_port))
         new = f"ses_n{len(self.sessions)}"
         self.sessions[new] = list(json.loads(raw)["m"])
-        launch = Launch(argv=["sleep", str(self.sleep)], cwd=str(workdir),
+        argv = ["sleep", str(self.sleep)]
+        if self.gate is not None:   # held by an event, not the clock; 120 s only bounds a lost gate
+            argv = ["sh", "-c", 'i=0; while [ ! -e "$1" ] && [ $i -lt 2400 ]; do sleep 0.05; i=$((i+1)); done',
+                    "agent", str(self.gate)]
+        launch = Launch(argv=argv, cwd=str(workdir),
                         agent_session_id=new, before_count=len(self.sessions[new]))
         self.launched.append(launch)
         return launch
@@ -988,10 +993,12 @@ def test_timeout_mint_clears_only_its_own_claim(env, capsys, monkeypatch):
     assert remote - {ulid} == {target.split(":")[1]}, f"still one rescue: {sorted(remote)}"
 
 
-def test_a_deletion_mid_run_moves_later_writes_to_the_rescue(env, capsys, monkeypatch):
+def test_a_deletion_mid_run_moves_later_writes_to_the_rescue(env, capsys, monkeypatch, tmp_path):
     """Scenario「途中被刪」: the uploader's rescue notices, the next round adopts it -
     exactly one new session, and every write after the deletion goes there."""
-    env.sleep = 2.6               # room for four rounds even with upload time between
+    # The "agent" is held by a gate the rounds open, not by a clock: under load a
+    # fixed sleep ends before round three ever runs (#496).
+    env.gate = tmp_path / "agent-may-end"
     _, a, _ = _import(capsys)
     _stage_spy(monkeypatch)
     real_round = cli._periodic_write
@@ -1002,11 +1009,14 @@ def test_a_deletion_mid_run_moves_later_writes_to_the_rescue(env, capsys, monkey
         if rounds["n"] == 2:
             shutil.rmtree(on_drive(a))         # another machine deletes it, online
         real_round(run_, agent)
+        if rounds["n"] >= 4:                   # two rounds after the deletion have run
+            env.gate.touch()
     monkeypatch.setattr(cli, "_periodic_write", delete_on_second)
 
     code, out, err = _continue(capsys, a)
 
-    assert rounds["n"] >= 3, "the deletion has to land between two rounds"
+    assert env.gate.exists(), "the gate opens only after round four; the agent must not end on its own cap"
+    assert rounds["n"] >= 4, "the deletion has to land between two rounds, with two more rounds after it"
     kept = _extra_sessions(a)
     assert len(kept) == 1, f"one rescue, not one per round: {[k['id'] for k in kept]}"
     assert kept[0]["id"] == out, "the final state lives in the rescue"
