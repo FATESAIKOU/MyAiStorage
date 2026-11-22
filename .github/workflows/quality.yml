@@ -1,14 +1,16 @@
 name: Quality
 
-# Deterministic diff metrics (qmetrics, from FATESAIKOU/MyCodeQuality), report only.
-# The reusable workflow fails only when the tool itself errors, never on metric values.
+# Deterministic diff metrics (qmetrics, from FATESAIKOU/MyCodeQuality).
+# The reusable workflow fails when the tool errors, and on Q1 (fail-on: q1) for pull_request;
+# other metric values are report only.
 #
 # The uses: line is pinned to a commit SHA so the same inputs keep producing the same
-# numbers. aebcd2e5912d1f7bfc3b7dc6508e5300af8f248a is MyCodeQuality's main at the time
-# of writing; to upgrade, change both the uses: ref and qmetrics-ref to the new SHA.
+# numbers. 7aa136eb73356893e35a9ae8959412a6ac6720bc is MyCodeQuality's main at the time
+# of writing (includes the QC-5 gate); to upgrade, change both the uses: ref and qmetrics-ref to the new SHA.
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches: [main]
 
@@ -17,9 +19,13 @@ permissions:
 
 jobs:
   quality:
-    uses: FATESAIKOU/MyCodeQuality/.github/workflows/quality.yml@aebcd2e5912d1f7bfc3b7dc6508e5300af8f248a
+    uses: FATESAIKOU/MyCodeQuality/.github/workflows/quality.yml@7aa136eb73356893e35a9ae8959412a6ac6720bc
     with:
       python-version: "3.12"
       src: src
       tests: tests
-      qmetrics-ref: aebcd2e5912d1f7bfc3b7dc6508e5300af8f248a
+      qmetrics-ref: 7aa136eb73356893e35a9ae8959412a6ac6720bc
+      # Q1 fails pull_request when a file exceeds 1000 lines, a new function is AST-identical
+      # to an existing one, or any of these is null (parse failure). After architect review,
+      # the PR gets the label quality:arch-ok to pass; the label change re-runs this check.
+      fail-on: q1
