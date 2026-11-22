@@ -10,6 +10,7 @@ import re
 import yaml
 
 from angareion.messages import (
+    FlowDepthLoader,
     Message,
     MessageValidationError,
     MAX_MESSAGE_LENGTH,
@@ -317,29 +318,9 @@ def _validate(p: Any, *, strict: bool) -> None:
             ids.add(ref)
 
 
-FLOW_DEPTH_MAX = 32  # legal records nest at most 5 (JSON-style); the cap leaves a wide margin (#482)
-
-
-class _TooDeep(yaml.YAMLError):
-    """A flow collection opened beyond `FLOW_DEPTH_MAX`; the reader treats it as `bad_payload`."""
-
-
-class _PayloadLoader(yaml.SafeLoader):
-    """Refuse deep flow nesting in the scanner, before the parser can recurse (#482).
-
-    Checking in the composer is too late: the scanner already looks ahead through the whole
-    nest. Depends on PyYAML's scanner internals; `tests/unit/test_angareion_decision.py` pins them.
-    """
-
-    def fetch_flow_collection_start(self, TokenClass):
-        if self.flow_level >= FLOW_DEPTH_MAX:
-            raise _TooDeep(f"flow collections nested deeper than {FLOW_DEPTH_MAX}")
-        super().fetch_flow_collection_start(TokenClass)
-
-
 def parse_payload(message: Message) -> dict:
     try:
-        p = yaml.load(message.content, Loader=_PayloadLoader)
+        p = yaml.load(message.content, Loader=FlowDepthLoader)
         if isinstance(p, dict):
             # No `decision` key at all cannot be any version's layout: the writer broke it (#482 Q-2).
             if "decision" not in p:
@@ -381,7 +362,7 @@ def build_payload(op: str, **fields: Any) -> str:
         )
     try:
         result = yaml.safe_dump(p, allow_unicode=True, sort_keys=False)
-        if yaml.load(result, Loader=_PayloadLoader) != p:
+        if yaml.load(result, Loader=FlowDepthLoader) != p:
             _fail()
         return result
     except yaml.YAMLError as exc:
