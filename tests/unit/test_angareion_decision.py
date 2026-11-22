@@ -748,3 +748,71 @@ def test_related_count_starts_after_the_current_snapshot():
     assert related_count([ask(1), ask(3), ask(10)], P) == 3
     assert related_count(records, P) == 1
     assert related_count(initial + [snap(initial)], P) == 0
+
+
+# `fold` (the log's `_item_code`) and `plan_submit` (the CLI preflight) judge one submit item
+# by two chains. They must give the same first code for every combination below, except the
+# non-ULID ref, which DIVERGES names on both sides (design 482 §3). The `answered` fixture
+# commits choice B, not A: with the same answerer, base, choice and no note, plan_submit would
+# skip the item as a re-run, and fold would say closed_ref. That case is not in this matrix.
+CONSISTENCY_STATES = {
+    'open': lambda: [ask(1)],
+    'answered': lambda: [ask(1), submit(2, 1, choice='B')],
+    'withdrawn': lambda: [ask(1), rec(2, 'withdraw', ref=uid(1))],
+}
+CONSISTENCY_REFS = {'correct': uid(1), 'nonexistent': uid(50), 'nonulid': 'not-a-ulid'}
+CONSISTENCY_SENDERS = {'answerer': H, 'other': H2}
+CONSISTENCY_BASES = {'correct': uid(1), 'stale': uid(7)}
+CONSISTENCY_CHOICES = {'valid': 'A', 'invalid': 'C'}
+DIVERGES = {'nonulid': ('bad_item', 'unknown_ref')}  # (fold, plan_submit)
+
+def consistency_expected(state, ref, sender, base, choice):
+    """The (fold, plan_submit) first codes for one item; None when it is accepted."""
+    if ref == 'nonulid':
+        return DIVERGES['nonulid']
+    if ref == 'nonexistent':
+        return 'unknown_ref', 'unknown_ref'
+    if state != 'open':
+        return 'closed_ref', 'closed_ref'
+    if sender == 'other':
+        code = 'not_answerer'
+    elif base == 'stale':
+        code = 'stale_base'
+    elif choice == 'invalid':
+        code = 'bad_item'
+    else:
+        code = None
+    return code, code
+
+@pytest.mark.parametrize('state,ref,sender,base,choice', [
+    (state, ref, sender, base, choice)
+    for state in CONSISTENCY_STATES for ref in CONSISTENCY_REFS
+    for sender in CONSISTENCY_SENDERS for base in CONSISTENCY_BASES
+    for choice in CONSISTENCY_CHOICES])
+def test_consistency_fold_and_plan_agree(state, ref, sender, base, choice):
+    fold_code, plan_code = consistency_expected(state, ref, sender, base, choice)
+    entry = dict(ref=CONSISTENCY_REFS[ref], base=CONSISTENCY_BASES[base], choice=CONSISTENCY_CHOICES[choice])
+    before = fold(CONSISTENCY_STATES[state](), use_snapshot=False)
+    after = fold(CONSISTENCY_STATES[state]() + [rec(10, 'submit', sender=CONSISTENCY_SENDERS[sender], asker=P, items=[entry])], use_snapshot=False)
+    assert codes(after) == ([fold_code] if fold_code else [])
+    try:
+        plan = plan_submit({CH: before}, CONSISTENCY_SENDERS[sender], [entry], render=render)
+    except SubmitRejected as e:
+        assert [x for x, _ in e.problems] == [CONSISTENCY_REFS[ref]]
+        assert [code for _, code in e.problems] == [plan_code]
+    else:
+        assert plan_code is None and plan.skipped == [] and len(plan.batches) == 1
+
+@pytest.mark.parametrize('state,expected', [
+    ('open', ['duplicate_ref']),
+    ('answered', ['closed_ref', 'duplicate_ref']),
+    ('withdrawn', ['closed_ref', 'duplicate_ref']),
+])
+def test_consistency_duplicate_ref(state, expected):
+    entry = dict(ref=uid(1), base=uid(1), choice='A')
+    before = fold(CONSISTENCY_STATES[state](), use_snapshot=False)
+    after = fold(CONSISTENCY_STATES[state]() + [rec(10, 'submit', sender=H, asker=P, items=[entry, entry])], use_snapshot=False)
+    assert codes(after) == expected
+    with pytest.raises(SubmitRejected) as e:
+        plan_submit({CH: before}, H, [entry, entry], render=render)
+    assert [code for _, code in e.value.problems] == expected
