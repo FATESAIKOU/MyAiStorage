@@ -523,3 +523,32 @@ def test_the_token_never_leaks_into_errors():
     with pytest.raises(BackendError) as excinfo:
         backend.read(GENERAL, Cursor())
     assert secret not in str(excinfo.value)
+
+
+def test_509_read_skips_a_deep_flow_comment_and_delivers_the_rest():
+    # (d): a comment whose front matter nests past the cap is not a message; the others still come.
+    deep = (
+        "---\nangareion: 1\nid: 01JDEEP\nat: '2026-10-10T12:00:00Z'\n"
+        f'from: "{PM}"\nto: "{ME}"\nchannel: general\nurgency: 5\nattachments: []\n'
+        "future_key: " + "[" * 40000 + "\n---\nbody\n"
+    )
+    transport = FakeTransport()
+    transport.set_route(
+        "GET",
+        COMMENTS_URL,
+        HttpResponse(
+            200,
+            {},
+            json.dumps(
+                [
+                    _comment(_make_msg(msg_id="01AAAA"), comment_id=101, created_at="2026-10-10T12:00:01Z"),
+                    {"id": 102, "body": deep, "created_at": "2026-10-10T12:00:02Z"},
+                    _comment(_make_msg(msg_id="01CCCC"), comment_id=103, created_at="2026-10-10T12:00:03Z"),
+                ]
+            ).encode("utf-8"),
+        ),
+    )
+    backend = _backend(transport)
+
+    result = backend.read(GENERAL, Cursor(), recipient=ME)
+    assert [m.id for m in result.messages] == ["01AAAA", "01CCCC"]

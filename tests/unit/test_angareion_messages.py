@@ -443,3 +443,84 @@ def test_509_flow_depth_loader_reads_up_to_the_cap_and_refuses_one_more():
     assert yaml.load('[' * FLOW_DEPTH_MAX + ']' * FLOW_DEPTH_MAX, Loader=FlowDepthLoader) is not None
     with pytest.raises(FlowTooDeep):
         yaml.load('[' * (FLOW_DEPTH_MAX + 1) + ']' * (FLOW_DEPTH_MAX + 1), Loader=FlowDepthLoader)
+
+
+# -- #509 PR-2: parse_message reads front matter through the flow-depth loader (C-2, C-3, C-4) --
+
+VECTOR_DIR = _p.Path(__file__).resolve().parent.parent / "vectors" / "angareion-interop" / "ts-written"
+
+
+def _with_extra_line(extra: str) -> str:
+    """A message whose front matter has one more line (`extra`) before the closing delimiter."""
+    return _front_matter(PM, ME).replace("\nchannel:", f"\n{extra}\nchannel:", 1)
+
+
+def _nest(depth: int) -> str:
+    """A flow list nested `depth` deep, closed, as a value under an unknown key."""
+    return "future_key: " + "[" * depth + "]" * depth
+
+
+def test_509_an_unknown_key_over_the_cap_is_not_a_message(): # C-2 (a)
+    text = _with_extra_line(_nest(33))
+    assert parse_message(text) is None
+    with pytest.raises(MessageValidationError, match="Invalid YAML in front matter") as info:
+        parse_message(text, strict=True)
+    assert isinstance(info.value.__cause__, FlowTooDeep)
+
+
+def test_509_an_unknown_key_over_the_cap_is_not_a_message_for_a_mapping_either(): # C-2 (a), `{`
+    text = _with_extra_line("future_key: " + "{a: " * 33 + "1" + "}" * 33)
+    assert parse_message(text) is None
+    with pytest.raises(MessageValidationError) as info:
+        parse_message(text, strict=True)
+    assert isinstance(info.value.__cause__, FlowTooDeep)
+
+
+def test_509_an_unknown_key_at_the_cap_still_reads(): # C-3 (b)
+    text = _with_extra_line(_nest(32))
+    parsed = parse_message(text, strict=True)
+    assert parsed is not None
+    assert parsed.id == "01JABC"
+    assert parsed.channel == "general"
+
+
+def test_509_a_64_kb_inline_attachment_still_reads(): # C-3 (b)
+    content = "x" * (64 * 1024 - 200)
+    text = (
+        "---\nangareion: 1\nid: 01JABC\nat: '2026-10-10T00:00:00Z'\n"
+        f"from: \"{PM}\"\nto: \"{ME}\"\nchannel: general\nurgency: 5\n"
+        f"attachments:\n  - name: big\n    inline: \"{content}\"\n---\nbody\n"
+    )
+    parsed = parse_message(text, strict=True)
+    assert parsed is not None
+    assert parsed.attachments[0]["inline"] == content
+
+
+def test_509_an_inline_attachment_of_only_brackets_still_reads(): # C-3 (b)
+    brackets = "[" * 40
+    text = (
+        "---\nangareion: 1\nid: 01JABC\nat: '2026-10-10T00:00:00Z'\n"
+        f"from: \"{PM}\"\nto: \"{ME}\"\nchannel: general\nurgency: 5\n"
+        f"attachments:\n  - name: br\n    inline: \"{brackets}\"\n---\n{brackets}\n"
+    )
+    parsed = parse_message(text, strict=True)
+    assert parsed is not None
+    assert parsed.attachments[0]["inline"] == brackets
+    assert parsed.content.strip() == brackets
+
+
+@pytest.mark.parametrize("path", sorted(VECTOR_DIR.glob("*.md")), ids=lambda p: p.name)
+def test_509_the_ts_written_vectors_read_as_before(path): # C-3 (b)
+    parsed = parse_message(path.read_text(encoding="utf-8"), strict=True)
+    assert parsed is not None
+    assert parsed.id and parsed.channel and parsed.from_
+
+
+def test_509_a_deep_flow_front_matter_is_refused_before_the_parser_recurses(): # C-4
+    # The scanner refuses at the cap, so the error is FlowTooDeep, not RecursionError from the parser.
+    text = "---\n" + "[" * 40000 + "\n---\nbody\n"
+    assert parse_message(text) is None
+    with pytest.raises(MessageValidationError) as info:
+        parse_message(text, strict=True)
+    assert isinstance(info.value.__cause__, FlowTooDeep)
+    assert not isinstance(info.value.__cause__, RecursionError)

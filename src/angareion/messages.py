@@ -470,7 +470,8 @@ def parse_message(text: str, *, strict: bool = False) -> Message | None:
     try:
         raw_yaml, body = split_front_matter(text)
         try:
-            data = yaml.safe_load(raw_yaml)
+            # FlowTooDeep is a YAMLError: a flow nest past the cap reads as unreadable front matter (#509).
+            data = yaml.load(raw_yaml, Loader=FlowDepthLoader)
         except Exception as e:
             raise MessageValidationError(f"Invalid YAML in front matter: {e}") from e
 
