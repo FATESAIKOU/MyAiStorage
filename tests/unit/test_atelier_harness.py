@@ -173,6 +173,31 @@ PM_V7_DISPATCH_SENTENCE = (
 #: earlier are append-only and not bound by these.
 PM_V7_NEW_SENTENCES = (REMEMBER_FALSE_SENTENCE, PM_V7_DISPATCH_SENTENCE)
 PM_V7_KEY_SENTENCES = PM_V6_KEY_SENTENCES + PM_V7_NEW_SENTENCES
+#: What worker-team pm `v8` (owner 2026-11-22, MyPMO decision PR #506) adds: the
+#: twin compaction (T-2'／T-9) as a fixed mechanism. One sentence per rule, so
+#: deleting or rewording any of them goes red. `v7` and earlier are append-only
+#: and not bound by these.
+PM_V8_NEW_SENTENCES = (
+    "### 長對話壓縮（孿生）",
+    "**你不能自己關自己，也不自己動 PM 層。**",
+    "你的某個 request 的 K-1（input＋cached＋cache_write，來自 `/costs`）超過 N（預設 20 萬）時，"
+    "在安全點（沒有進行中的長指令、交接檔剛更新）向 PMO 提出孿生壓縮",
+    "回 PMO「交接已更新、已暫停」",
+    "操作員從你的 session S fork 出 T，在 T 上送 `/compact 保留：目前的單、決定與理由、未決、下一步；交接檔路徑是 …` 並送探針",
+    "**事前探針「錯」就不切換**；任一步不符就停下、不重試、回報 PMO。同一角色一天最多 2 次。",
+    "做 T-5 自評（目前的單、做到哪、最近兩個決定與理由），回報 PMO「已恢復」與自評，"
+    "並從 `/costs` 取你第一個 request 的 K-1r 一起回報",
+    "切換後 T-5「錯」，或 24 小時內被糾正／退回的次數超過基準＋1，就由 PMO 明指舊 session S 重開、暫停、回報；S 永遠不刪。",
+    "T 帶 tag `twin:<S 的 ULID>`；探針用的 fork 用完就刪；回退一律明指 `session`，不調 `updated_at`；"
+    "切換後的 T 不刪（等本人看過結果）。",
+    "每次切換記 S、T、K-1p／K-1c／K-1r、探針結果、有沒有回退、停機時間。",
+    "同一 harness 版本的 PM 第一次之後不必再單次授權；碰到真機、憑證、被擋的動作的規矩不變，"
+    "PM 不自己關自己、不請別的 session 代做。",
+    "**孿生壓縮重開後的第一件事是 T-5 自評並回報**",
+    "什麼時候提出孿生壓縮、什麼時候不切**：K-1 超過 N 且在安全點才向 PMO 提出；"
+    "探針「錯」、正在跑長指令、同一角色一天已 2 次，都不切，停下回報。",
+)
+PM_V8_KEY_SENTENCES = PM_V7_KEY_SENTENCES + PM_V8_NEW_SENTENCES
 #: The sentence v6:162 (`dont`) keeps and v7 must not weaken: teammates never
 #: dispatch workflows. Only the PM's own `ci.yml` exception above is new.
 PM_V6_TEAMMATE_DISPATCH_SENTENCE = (
@@ -541,6 +566,7 @@ PM_V4_REL = "atelier/worker-team/pm/v4.md"
 PM_V5_REL = "atelier/worker-team/pm/v5.md"
 PM_V6_REL = "atelier/worker-team/pm/v6.md"
 PM_V7_REL = "atelier/worker-team/pm/v7.md"
+PM_V8_REL = "atelier/worker-team/pm/v8.md"
 IMPL_V2_REL = "atelier/worker-team/impl/v2.md"
 REV_V2_REL = "atelier/worker-team/rev/v2.md"
 IMPL_V3_REL = "atelier/worker-team/impl/v3.md"
@@ -754,6 +780,9 @@ def findings_for(path: str, text: str) -> Findings:
     # `remember:false` sentence; v6 and earlier are append-only and not bound.
     pm_version_7_or_later = team == "worker-team" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 7
+    # `pm` v8 adds the twin-compaction section; v7 and earlier are not bound.
+    pm_version_8_or_later = team == "worker-team" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) >= 8
     pmo_version_4_or_later = team == "pmo" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 4
     # The H4 trigger sentence is version-bound (see its list above): v3 and v4
@@ -807,6 +836,7 @@ def findings_for(path: str, text: str) -> Findings:
             (pm_version_5_or_later, PM_V5_NEW_SENTENCES, "v5 起的 worker-team pm"),
             (pm_version_6_or_later, PM_V6_NEW_SENTENCES, "v6 起的 worker-team pm"),
             (pm_version_7_or_later, PM_V7_NEW_SENTENCES, "v7 起的 worker-team pm"),
+            (pm_version_8_or_later, PM_V8_NEW_SENTENCES, "v8 起的 worker-team pm"),
             (pmo_version_4_or_later, PMO_V4_KEY_SENTENCES, "v4 起的 pmo pm"),
             (pmo_version_5, PMO_V5_KEY_SENTENCES, "v5 的 pmo pm"),
             (pmo_version_6_or_later, PMO_V6_KEY_SENTENCES, "v6 起的 pmo pm"),
@@ -1113,6 +1143,7 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     + [(PM_V5_REL, sentence, "關鍵句") for sentence in PM_V5_KEY_SENTENCES]
     + [(PM_V6_REL, sentence, "關鍵句") for sentence in PM_V6_KEY_SENTENCES]
     + [(PM_V7_REL, sentence, "關鍵句") for sentence in PM_V7_KEY_SENTENCES]
+    + [(PM_V8_REL, sentence, "關鍵句") for sentence in PM_V8_KEY_SENTENCES]
     + [(PMO_V8_REL, sentence, "關鍵句") for sentence in PMO_V8_KEY_SENTENCES]
     + [(IMPL_V2_REL, sentence, "關鍵句") for sentence in IMPL_V2_KEY_SENTENCES]
     + [(REV_V2_REL, sentence, "關鍵句") for sentence in REV_V2_KEY_SENTENCES]
@@ -1790,9 +1821,7 @@ def test_the_pm_v7_dispatch_relaxation_keeps_the_real_machine_limits():
         "v7 沒有原樣保留「不讓隊員 … dispatch workflow」那句"
 
 
-def test_pm_v7_is_latest_and_has_matching_version_flags():
-    paths = list((HARNESS_ROOT / "worker-team/pm").glob("v*.md"))
-    assert max(paths, key=lambda p: int(p.stem[1:])).name == "v7.md"
+def test_pm_v7_has_matching_version_flags():
     text = (REPO / PM_V7_REL).read_text(encoding="utf-8")
     assert "id: atelier:worker-team-pm@v7\n" in text
     assert "version: v7\n" in text
@@ -1820,3 +1849,55 @@ def test_a_wrong_version_flag_on_the_newest_harness_is_flagged(tmp_path, rel, ol
     copy = tmp_path / Path(rel).name
     copy.write_text(text.replace(old, new, 1), encoding="utf-8")
     assert findings_for(rel, copy.read_text(encoding="utf-8")).errors
+
+
+def test_pm_v7_is_not_bound_by_the_v8_sentences():
+    """v8 的新句只約束 worker-team pm v8 起；v7 沒有它們時仍無錯。"""
+    text = (REPO / PM_V7_REL).read_text(encoding="utf-8")
+    for sentence in PM_V8_NEW_SENTENCES:
+        assert sentence not in text, f"v7 不該有 v8 的句子：「{sentence}」"
+    assert not findings_for(PM_V7_REL, text).errors
+
+
+def test_pm_v8_is_latest_and_has_matching_version_flags():
+    paths = list((HARNESS_ROOT / "worker-team/pm").glob("v*.md"))
+    assert max(paths, key=lambda p: int(p.stem[1:])).name == "v8.md"
+    text = (REPO / PM_V8_REL).read_text(encoding="utf-8")
+    assert "id: atelier:worker-team-pm@v8\n" in text
+    assert "version: v8\n" in text
+    assert "# PM（v8）\n" in text
+    assert not findings_for(PM_V8_REL, text).errors
+
+
+@pytest.mark.parametrize("sentence", PM_V8_NEW_SENTENCES)
+def test_pm_v8_without_a_new_sentence_is_flagged(sentence):
+    """每個 v8 新句刪掉就紅（負向測試）。"""
+    text = (REPO / PM_V8_REL).read_text(encoding="utf-8")
+    assert sentence in text
+    assert findings_for(PM_V8_REL, text.replace(sentence, "", 1)).errors
+
+
+@pytest.mark.parametrize("sentence", PM_V7_KEY_SENTENCES)
+def test_pm_v8_without_a_v7_sentence_is_flagged(sentence):
+    """v8 必須保留 v7 的每一句；刪掉任一句就紅。"""
+    text = (REPO / PM_V8_REL).read_text(encoding="utf-8")
+    # some v7 key sentences occur twice (e.g. in `do` and `judge`): drop them all
+    assert findings_for(PM_V8_REL, text.replace(sentence, "")).errors
+
+
+@pytest.mark.parametrize("old,new", [
+    ("你不能自己關自己，也不自己動 PM 層。", "你可以自己關自己。"),
+    ("PM 不自己關自己、不請別的 session 代做。", "PM 可以請別的 session 代做。"),
+])
+def test_pm_v8_weakening_the_no_self_close_rule_is_flagged(old, new):
+    text = (REPO / PM_V8_REL).read_text(encoding="utf-8")
+    assert old in text
+    assert findings_for(PM_V8_REL, text.replace(old, new, 1)).errors
+
+
+@pytest.mark.parametrize("rel,old,new", [
+    (PM_V8_REL, "@v8", "@v7"), (PM_V8_REL, "version: v8", "version: v7"),
+])
+def test_a_wrong_version_flag_on_pm_v8_is_flagged(tmp_path, rel, old, new):
+    text = (REPO / rel).read_text(encoding="utf-8")
+    assert findings_for(rel, text.replace(old, new, 1)).errors
