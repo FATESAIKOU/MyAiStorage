@@ -1010,6 +1010,7 @@ def test_a_deletion_mid_run_moves_later_writes_to_the_rescue(env, capsys, monkey
             shutil.rmtree(on_drive(a))         # another machine deletes it, online
         real_round(run_, agent)
         if rounds["n"] >= 4:                   # two rounds after the deletion have run
+            rounds.setdefault("opened_at", rounds["n"])
             env.gate.touch()
     monkeypatch.setattr(cli, "_periodic_write", delete_on_second)
 
@@ -1017,6 +1018,7 @@ def test_a_deletion_mid_run_moves_later_writes_to_the_rescue(env, capsys, monkey
 
     assert env.gate.exists(), "the gate opens only after round four; the agent must not end on its own cap"
     assert rounds["n"] >= 4, "the deletion has to land between two rounds, with two more rounds after it"
+    assert rounds["opened_at"] >= 4, "the gate may open only once round four has completed"
     kept = _extra_sessions(a)
     assert len(kept) == 1, f"one rescue, not one per round: {[k['id'] for k in kept]}"
     assert kept[0]["id"] == out, "the final state lives in the rescue"
