@@ -98,7 +98,7 @@
 | PR | 行為變更 | 介面契約 | 測試（行為描述） | 改壞驗證 |
 |---|---|---|---|---|
 | PR-1（#509）搬 loader | 無 | C-1：`messages.FlowDepthLoader` 讀 `"["*40000` 丟 `messages.FlowTooDeep`，是 `yaml.YAMLError`，不是 RecursionError；32 層可讀、33 層丟 | 既有 `test_angareion_decision.py` 的 PR-1 測試只改 import，全部照過 | 刪掉 `decision` 裡的 import → 測試失敗 |
-| PR-2（#509）front matter 用上限 | flow 深度 > 32 的 front matter → 非訊息 | C-2：`parse_message`（未知鍵下接 33 層 flow）→ `None`；`strict=True` → `MessageValidationError`。C-3：32 層、64 KB 的 inline 附件、內文全是 `[` 的 inline、`ts-written` 向量都照常讀，欄位不變。C-4：`"["*40000` 的 front matter 回 `None`，而且一則在 0.1 s 內（寬鬆門檻，防止退回 RecursionError 的慢路徑） | (a) C-2 兩個模式；(b) C-3 的邊界；(c) C-4；(d) `read`（假後端）略過深層的那一則，其他照常遞送 | 換回 `yaml.safe_load` → (a)(c) 失敗；門檻差一 → (a)/(b) 之一失敗 |
+| PR-2（#509）front matter 用上限 | flow 深度 > 32 的 front matter → 非訊息 | C-2：`parse_message`（未知鍵下接 33 層 flow）→ `None`；`strict=True` → `MessageValidationError`。C-3：32 層、64 KB 的 inline 附件、內文全是 `[` 的 inline、`ts-written` 向量都照常讀，欄位不變。C-4：`"["*40000` 的 front matter：`strict=False` 回 `None`；`strict=True` 丟 `MessageValidationError`，而且它的 `__cause__` 是 `FlowTooDeep`（不是 `RecursionError`）——**不靠牆上時間**，直接鎖住「scanner 層提早中止、不退回慢路徑」（審查 REVIEW-509d.md 建議；剛修過同類的 #496） | (a) C-2 兩個模式；(b) C-3 的邊界；(c) C-4；(d) `read`（假後端）略過深層的那一則，其他照常遞送 | 換回 `yaml.safe_load` → (a)(c) 失敗；門檻差一 → (a)/(b) 之一失敗 |
 | PR-3（#510）搬時刻鍵 | 無 | C-5：`messages.received_at_key`：`None` < 解析得出的（依時刻）< 解析不出、無時區的（依原字串）；同一時刻不同寫法 → 鍵相等；`0001-01-01T00:00:00+01:00` 不丟例外。`parse_received_at` 沒有時區 → `None` | 直接測 C-5；既有 `decision`／`decision_cli` 測試全部照過 | `(1, moment)` 改成 `astimezone(utc)` → 邊界案丟 OverflowError |
 | PR-4（#510）跨頻道排序 | `log`（多頻道）、`read`（寄給我的）依時刻排 | C-6：`log_query.select` 在多頻道下，依 `(received_at_key, channel, id)` 排；`--limit` 取這個順序的尾端。C-7：`Angareion.read` 在不給 channel 時，跨頻道合併的順序同 C-6 | 混用 `Z`、`+00:00`、`+09:00`、小數秒、`None`；同一時刻不同寫法 → 依 channel、id；`--limit 1` 取時刻最新的那一則；單一頻道仍依 `comment_id` | 換回字串鍵 → 混用格式的案失敗 |
 
@@ -114,7 +114,7 @@
 
 - 風險：
   - PyYAML 內部掛點：同 #482 §5，由 C-1 釘住，`uv.lock` 鎖版本。
-  - C-4 的時間門檻在負載高的 CI 上可能不穩，所以設成寬鬆的 0.1 s（實測約 2 ms，現況約 2 s）。
+  - C-4 不用時間門檻（負載高的 CI 上不穩，見 #496）；改斷言丟的是 `FlowTooDeep`、不是 `RecursionError`。實測約 2 ms，現況約 2 s，只當說明，不進測試。
 - 沒驗到：
   - App（TS）以外的寫者：只看了 interop 向量與 `serialize_message`。
   - 舊版讀者遇到深層 front matter 的行為：不受本單影響。
