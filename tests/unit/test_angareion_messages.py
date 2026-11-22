@@ -5,8 +5,12 @@ from __future__ import annotations
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
 import pytest
+import yaml
 
 from angareion.messages import (
+    FLOW_DEPTH_MAX,
+    FlowDepthLoader,
+    FlowTooDeep,
     ANGAREION_VERSION,
     LEGACY_AGENT_NAME_RE,
     MAX_MESSAGE_LENGTH,
@@ -422,3 +426,20 @@ def test_parse_non_messages():
         "attachments: []\n---\n"
     )
     assert parse_message(text_v0) is None
+
+
+# -- #509 PR-1: the flow-depth loader lives here (contract C-1) --
+
+def test_509_flow_depth_loader_refuses_past_the_cap_as_a_yaml_error():
+    # Scanner-level refusal: the exception is a YAMLError, not RecursionError from the parser.
+    with pytest.raises(FlowTooDeep) as info:
+        yaml.load('[' * 40000, Loader=FlowDepthLoader)
+    assert isinstance(info.value, yaml.YAMLError)
+    assert not isinstance(info.value, RecursionError)
+
+
+def test_509_flow_depth_loader_reads_up_to_the_cap_and_refuses_one_more():
+    assert FLOW_DEPTH_MAX == 32
+    assert yaml.load('[' * FLOW_DEPTH_MAX + ']' * FLOW_DEPTH_MAX, Loader=FlowDepthLoader) is not None
+    with pytest.raises(FlowTooDeep):
+        yaml.load('[' * (FLOW_DEPTH_MAX + 1) + ']' * (FLOW_DEPTH_MAX + 1), Loader=FlowDepthLoader)

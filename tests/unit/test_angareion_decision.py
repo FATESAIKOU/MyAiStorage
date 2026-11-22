@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from angareion.decision import (FLOW_DEPTH_MAX, Record, fold, snapshot_for, plan_submit, build_payload,
-                                parse_payload, PayloadError, SubmitRejected, related_count,
-                                _PayloadLoader, _TooDeep)
-from angareion.messages import Message, MessageValidationError
+from angareion.decision import (Record, fold, snapshot_for, plan_submit, build_payload,
+                                parse_payload, PayloadError, SubmitRejected, related_count)
+from angareion.messages import (FLOW_DEPTH_MAX, FlowDepthLoader as _PayloadLoader, FlowTooDeep as _TooDeep,
+                                Message, MessageValidationError)
 
 P = 'mystore-pm-w1'
 H = 'mystore-impl-w1-1'

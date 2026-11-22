@@ -311,6 +311,26 @@ def split_front_matter(text: str) -> tuple[str, str]:
     return raw_yaml, body
 
 
+FLOW_DEPTH_MAX = 32  # legal records nest at most 5 (JSON-style); the cap leaves a wide margin (#482)
+
+
+class FlowTooDeep(yaml.YAMLError):
+    """A flow collection opened beyond `FLOW_DEPTH_MAX`; readers treat it as an unreadable record."""
+
+
+class FlowDepthLoader(yaml.SafeLoader):
+    """Refuse deep flow nesting in the scanner, before the parser can recurse (#482).
+
+    Checking in the composer is too late: the scanner already looks ahead through the whole
+    nest. Depends on PyYAML's scanner internals; `tests/unit/test_angareion_decision.py` pins them.
+    """
+
+    def fetch_flow_collection_start(self, TokenClass):
+        if self.flow_level >= FLOW_DEPTH_MAX:
+            raise FlowTooDeep(f"flow collections nested deeper than {FLOW_DEPTH_MAX}")
+        super().fetch_flow_collection_start(TokenClass)
+
+
 def serialize_message(msg: Message) -> str:
     """Serialize a message into YAML front matter + Markdown content.
 
