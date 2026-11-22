@@ -344,15 +344,25 @@ def test_merge_pending_has_no_parent_raw_and_the_exact_saved_md5(env, capsys, mo
 
 # --- the spec's scenarios ---------------------------------------------------------
 
-def test_a_round_writes_while_the_agent_is_still_running(env, capsys, monkeypatch):
-    """Scenario「執行中看得到進度」: the sleep holds the terminal across two rounds, so
-    the first stage is a version the agent was still writing after."""
+def test_a_round_writes_while_the_agent_is_still_running(env, capsys, monkeypatch, tmp_path):
+    """Scenario「執行中看得到進度」: the agent is held by a gate the rounds open after
+    the second round, so the first stage is a version the agent was still writing after."""
+    env.gate = tmp_path / "agent-may-end"
     _, a, _ = _import(capsys)
     staged = _stage_spy(monkeypatch)
-    env.sleep = 0.85
+    real_round = cli._periodic_write
+    rounds = {"n": 0}
+
+    def open_after_two_rounds(run_, agent):
+        real_round(run_, agent)
+        rounds["n"] += 1
+        if rounds["n"] == 2:                   # the agent has lived through two rounds
+            env.gate.touch()
+    monkeypatch.setattr(cli, "_periodic_write", open_after_two_rounds)
 
     code, out, _ = _continue(capsys, a)
 
+    assert env.gate.exists(), "the gate opens only after two rounds; the agent must not end on its own cap"
     assert code == 0 and out == a
     assert len(staged) >= 2, f"a round before the final: {len(staged)}"
     assert "ZZ 第 1 次發言" in staged[0][1], "the first stage is the round's version"
@@ -388,11 +398,11 @@ def test_nothing_new_is_not_written(env, capsys, monkeypatch):
     assert (paths().outbox / a.split(":")[1]).exists() is False, "nothing left waiting"
 
 
-def test_the_final_round_rescues_even_with_nothing_new(env, capsys, monkeypatch):
+def test_the_final_round_rescues_even_with_nothing_new(env, capsys, monkeypatch, tmp_path):
     """Scenario「最後一次沒有新內容但已被刪」: after the last write the session goes away;
     the quiet agent still has to leave its work somewhere alive."""
     env.speak_rounds = 1
-    env.sleep = 0.5
+    env.gate = tmp_path / "agent-may-end"
     _, a, _ = _import(capsys)
     _stage_spy(monkeypatch)
     real_round = cli._periodic_write
@@ -405,10 +415,12 @@ def test_the_final_round_rescues_even_with_nothing_new(env, capsys, monkeypatch)
             shutil.rmtree(on_drive(a))
             # make this machine see it gone too, the way a sync would
             store.sync(paths())
+            env.gate.touch()                   # the deletion is in place: the agent may end
     monkeypatch.setattr(cli, "_periodic_write", round_then_delete)
 
     code, out, err = _continue(capsys, a)
 
+    assert env.gate.exists(), "the gate opens only once the round has deleted; the agent must not end on its own cap"
     assert deleted["done"], "the round has to have happened"
     assert code == 0 and out != a, err
     kept = _extra_sessions(a)
@@ -1435,10 +1447,10 @@ def test_a_rescue_with_broken_parents_does_not_break_the_final_write(env, capsys
     assert [p["id"] for p in h.agora_of(header_of(target))["parents"]] == [a]
 
 
-def test_an_offline_deletion_is_adopted_once_the_uploader_frees_it(env, capsys, monkeypatch):
+def test_an_offline_deletion_is_adopted_once_the_uploader_frees_it(env, capsys, monkeypatch, tmp_path):
     """Scenario「離線期間被刪」: while Drive cannot be listed the rounds stage updates; when
     the line is back the uploader rescues once, and the following round adopts it."""
-    env.sleep = 2.6
+    env.gate = tmp_path / "agent-may-end"
     _, a, _ = _import(capsys)
     _stage_spy(monkeypatch)
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "lsjson")     # offline: no listing, no rescue
@@ -1451,10 +1463,13 @@ def test_an_offline_deletion_is_adopted_once_the_uploader_frees_it(env, capsys, 
             monkeypatch.delenv("FAKE_RCLONE_FAIL")
             shutil.rmtree(on_drive(a))
         real_round(run_, agent)
+        if rounds["n"] == 3:                   # one round after the deletion has adopted it
+            env.gate.touch()
     monkeypatch.setattr(cli, "_periodic_write", online_and_delete_on_second)
 
     code, out, err = _continue(capsys, a)
 
+    assert env.gate.exists(), "the gate opens only after round three; the agent must not end on its own cap"
     assert rounds["n"] >= 3
     kept = _extra_sessions(a)
     assert len(kept) == 1, f"the uploader and the foreground must agree on one: {[k['id'] for k in kept]}"
@@ -1463,15 +1478,25 @@ def test_an_offline_deletion_is_adopted_once_the_uploader_frees_it(env, capsys, 
     assert not on_drive(a).exists()
 
 
-def test_a_failed_round_is_counted_and_named(env, capsys, monkeypatch):
+def test_a_failed_round_is_counted_and_named(env, capsys, monkeypatch, tmp_path):
     """Scenario「不弄亂畫面」 (the count half): a round whose upload does not get through is
     counted, the agent is not disturbed, and the end says where the log is."""
-    env.sleep = 0.5
+    env.gate = tmp_path / "agent-may-end"
     _, a, _ = _import(capsys)
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")
+    real_round = cli._periodic_write
 
-    code, out, err = _continue(capsys, a)
+    def open_after_one_round(run_, agent):
+        real_round(run_, agent)
+        env.gate.touch()                       # the agent may end: "failed 1 times" counts this round only
+    monkeypatch.setattr(cli, "_periodic_write", open_after_one_round)
 
+    # The count is exact, so no second round may come due before the agent ends. A
+    # longer period than the usual test floor keeps the next round well away from
+    # the agent's exit (which follows the gate within a poll or two).
+    code, out, err = _continue(capsys, a, "--sync-period", "0.02")
+
+    assert env.gate.exists(), "the gate opens only after the round; the agent must not end on its own cap"
     assert code == cli.EXIT_IN_OUTBOX
     assert "定期寫回失敗 1 次" in err and str(paths().state / cli.CONTINUE_LOG) in err
     assert "定期寫回：已寫回" in log_text() and "上傳失敗" in log_text()
@@ -1517,9 +1542,11 @@ def test_an_exception_waits_for_the_agent_before_it_leaves(env, capsys, monkeypa
     decide. An exception in the loop never leaves while the agent is alive: it waits for
     it to finish first, then goes."""
     marker = tmp_path / "agent-finished"
-    env.sleep = 0.5
+    env.gate = tmp_path / "agent-may-end"
     _, a, _ = _import(capsys)
-    launch_argv = ["/bin/sh", "-c", f"sleep 0.5; touch {marker}"]   # the agent's whole life
+    # the agent's whole life: held by the gate, then it finishes (touches the marker)
+    launch_argv = ["/bin/sh", "-c", 'i=0; while [ ! -e "$1" ] && [ $i -lt 2400 ]; do sleep 0.05; i=$((i+1)); done; touch "$2"',
+                   "agent", str(env.gate), str(marker)]
 
     def start_native(raw, workdir):
         launch = SyncAgent.start_native(env, raw, workdir)
@@ -1529,11 +1556,13 @@ def test_an_exception_waits_for_the_agent_before_it_leaves(env, capsys, monkeypa
     monkeypatch.setattr(env, "start_native", start_native)
 
     def boom(run_, agent):
+        env.gate.touch()                       # the agent may finish now; this round still breaks
         raise RuntimeError("the round itself broke")
 
     monkeypatch.setattr(cli, "_periodic_write", boom)
     code, out, err = _continue(capsys, a)
 
+    assert env.gate.exists(), "the round has to have run while the agent was alive"
     assert code == cli.EXIT_ERROR and "非預期" in err
     assert marker.exists(), "agora left before the agent it started had finished"
 
@@ -2098,12 +2127,12 @@ def test_a_hard_kill_leaves_the_work_and_the_recovery_writes_it_back(claude_lab,
     assert len(_extra_sessions(a)) == 0, "the recovery did not invent a second session"
 
 
-def test_final_write_rescues_when_target_queued_in_outbox_and_deleted_on_drive(env, capsys, monkeypatch):
+def test_final_write_rescues_when_target_queued_in_outbox_and_deleted_on_drive(env, capsys, monkeypatch, tmp_path):
     """T1 / T4: target has a queued .update in outbox, and Drive lost it.
     The final write-back must check Drive (not short-circuit), rescue into a new ID,
     print the new ID, and not duplicate rescues."""
     env.speak_rounds = 1
-    env.sleep = 0.5
+    env.gate = tmp_path / "agent-may-end"
     _, a, _ = _import(capsys)
     ulid = a.split(":")[1]
 
@@ -2121,10 +2150,12 @@ def test_final_write_rescues_when_target_queued_in_outbox_and_deleted_on_drive(e
             assert ulid in store.outbox_ulids(paths())
             shutil.rmtree(on_drive(a))
             # store.sync(paths()) is NOT called
+            env.gate.touch()                   # queued and deleted: the agent may end
 
     monkeypatch.setattr(cli, "_periodic_write", round_then_queue_and_delete)
     code, out, err = _continue(capsys, a)
 
+    assert env.gate.exists(), "the gate opens only once the round has queued and deleted"
     assert deleted["done"]
     assert code == 0
     assert out != a, f"expected rescued id, got {out}"
@@ -2386,12 +2417,12 @@ def test_continue_fork_pending_kept_message(env, capsys, monkeypatch):
     assert pending_file.exists()
 
 
-def test_write_one_resets_pending_kept_signal_not_sticky(env, capsys, monkeypatch):
+def test_write_one_resets_pending_kept_signal_not_sticky(env, capsys, monkeypatch, tmp_path):
     """Signal not sticky: periodic write-back sets pending_kept,
     but final write-back succeeds -> pending is unlinked and continue exits 0."""
+    env.gate = tmp_path / "agent-may-end"
     _, a, _ = _import(capsys)
     env.speak_rounds = 1
-    env.sleep = 0.5
     env.sessions["ses_a"].append("ZZ 定期與最終發言")
 
     round_called = False
@@ -2400,12 +2431,14 @@ def test_write_one_resets_pending_kept_signal_not_sticky(env, capsys, monkeypatc
         nonlocal round_called
         round_called = True
         run.pending_kept = True
+        env.gate.touch()                       # the round has run: the agent may end
 
     monkeypatch.setattr(cli, "_periodic_write", mock_periodic)
 
     capsys.readouterr()
     code, out, err = _continue(capsys, a)
 
+    assert env.gate.exists(), "the gate opens only once the round has run"
     assert round_called is True, "periodic write must have been called"
     assert code == 0, f"code={code}, err={err}"
     assert not list(paths().pending.glob("*.json")), "pending file must be deleted when final write succeeds"
