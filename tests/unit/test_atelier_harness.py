@@ -1901,3 +1901,239 @@ def test_pm_v8_weakening_the_no_self_close_rule_is_flagged(old, new):
 def test_a_wrong_version_flag_on_pm_v8_is_flagged(tmp_path, rel, old, new):
     text = (REPO / rel).read_text(encoding="utf-8")
     assert findings_for(rel, text.replace(old, new, 1)).errors
+
+
+# --- 通用的版本包含檢查（#524）---------------------------------------------------
+#
+# A newer version of a harness must keep every content line of the older one, so
+# deleting a non-key sentence by accident goes red (not only the key sentences of
+# `PM_*_KEY_SENTENCES`). Added lines are always fine. A deliberate rewrite is listed
+# in `REPLACED_SENTENCES` for that one pair of versions. The check is gated per
+# `<team>/<role>` (`GATED_FROM`): the versions below the gate were rewritten before
+# this check existed, and their published files are kept by the append-only check.
+
+#: Frontmatter keys that differ between versions by design (identity, date,
+#: title, description). Everything else in the frontmatter is content.
+VERSION_BOOKKEEPING_KEYS = ("id:", "version:", "generated:", "description:", "title:")
+VERSION_HEADING_RE = re.compile(r"^# .*（v\d+）$")
+
+
+def content_lines(text: str) -> list[str]:
+    """The stripped, non-empty content lines of one harness file.
+
+    The `---` fences and the bookkeeping frontmatter keys are skipped, and so is
+    the `# 標題（vN）` heading; every other line counts.
+    """
+    lines: list[str] = []
+    in_front = False
+    for i, raw in enumerate(text.split("\n")):
+        s = raw.strip()
+        if i == 0 and s == "---":
+            in_front = True
+            continue
+        if in_front and s == "---":
+            in_front = False
+            continue
+        if not s:
+            continue
+        if in_front and s.startswith(VERSION_BOOKKEEPING_KEYS):
+            continue
+        if VERSION_HEADING_RE.match(s):
+            continue
+        lines.append(s)
+    return lines
+
+
+def dropped_sentences(old: str, new: str, replaced: dict[str, str] | None = None) -> list[str]:
+    """Content lines of the older version that the newer one no longer has.
+
+    `replaced` is the deliberate rewrites of this one pair of versions (old line →
+    reason). Only a line listed verbatim is allowed; nothing matches by prefix.
+    """
+    allowed = replaced or {}
+    new_lines = set(content_lines(new))
+    return [line for line in content_lines(old)
+            if line not in new_lines and line not in allowed]
+
+
+#: Deliberate rewrites, keyed by `(<team>/<role>, from, to)`. One entry per
+#: replaced line, verbatim (as the older file writes it), with the reason. A pair
+#: that is not listed gets no replacement at all.
+REPLACED_SENTENCES: dict[tuple[str, int, int], dict[str, str]] = {
+    ("worker-team/impl", 2, 3): {
+        "4. 寫完只回覆報告路徑給 PM；不在訊息裡重貼整份報告。":
+            "#434 D-1：v3 用「報告寫完…就一定發訊息給 PM」取代 v2 的這句",
+    },
+    ("worker-team/rev", 2, 3): {
+        "4. 寫完只回覆報告路徑給 PM。":
+            "#434 D-1：v3 用同一句取代 v2 的這句（impl、rev 共用）",
+    },
+    ("worker-team/arch", 3, 4): {
+        "- **審查什麼算做完**：每條發現有位置與證據；結論明確；沒驗到的寫「沒驗到」。":
+            "#434 D-2：v4 在同一條末尾補「訊息已送出」",
+    },
+}
+
+#: The version gate per `<team>/<role>`: a pair (vN, vN+1) is checked only when
+#: N+1 is at least this number. Each entry says why it starts there (PM ruling on
+#: #524, option b: history before the check is not whitelisted line by line).
+#:
+#: Unguarded on purpose - these pairs drop content lines and were rewritten before
+#: this check existed (15 pairs, 120 lines in all):
+#:   worker-team/pm    v0→v1 (48 dropped), v1→v2 (7), v2→v3 (12), v4→v5 (10),
+#:                     v5→v6 (3), v6→v7 (2)
+#:   pmo/pm            v1→v2 (9), v2→v3 (1), v3→v4 (8), v4→v5 (1), v5→v6 (4),
+#:                     v6→v7 (5)
+#:   life-team/pm      v1→v2 (6), v2→v3 (1)
+#:   worker-team/arch  v1→v2 (3)
+#: Below-gate pairs that drop no line (e.g. pm v3→v4, arch v2→v3, impl v1→v2,
+#: rev v1→v2) are not checked either.
+GATED_FROM: dict[str, int] = {
+    # v7→v8 is the first pair checked; v7→v8 drops no line.
+    "worker-team/pm": 8,
+    "pmo/pm": 8,
+    # v2→v3 is checked; its one replacement is in REPLACED_SENTENCES.
+    "worker-team/impl": 3,
+    "worker-team/rev": 3,
+    # v3→v4 is checked; its one replacement is in REPLACED_SENTENCES.
+    "worker-team/arch": 4,
+    # no v4 on the tree yet, so no real pair is checked; the gate is ready for it.
+    "life-team/pm": 4,
+}
+#: A `<team>/<role>` not in the table (a new role, or one first seen later) is
+#: gated from its second version: the pair (v1, v2) is checked.
+DEFAULT_GATE = 2
+
+
+def gate_for(team_role: str) -> int:
+    return GATED_FROM.get(team_role, DEFAULT_GATE)
+
+
+def _replacements_for(rel: str) -> dict[str, str]:
+    """The listed rewrites for the pair that ends at the file `rel` (`v<N>.md`)."""
+    team, role, new = parse_path(rel)
+    return REPLACED_SENTENCES.get((f"{team}/{role}", new - 1, new), {})
+
+
+def _older(rel: str) -> str:
+    team, role, new = parse_path(rel)
+    return f"atelier/{team}/{role}/v{new - 1}.md"
+
+
+def is_gated(newer_rel: str) -> bool:
+    team, role, n = parse_path(newer_rel)
+    return n >= gate_for(f"{team}/{role}")
+
+
+def pair_violations(newer_rel: str, old: str, new: str) -> list[str] | None:
+    """None when the pair is below its gate (not checked); else the dropped lines."""
+    if not is_gated(newer_rel):
+        return None
+    return dropped_sentences(old, new, _replacements_for(newer_rel))
+
+
+def _adjacent_pairs() -> list[tuple[str, str]]:
+    """(older, newer) repo-relative paths of every connected pair on the tree."""
+    files: dict[tuple[str, str], dict[int, str]] = {}
+    for path in _harness_paths():
+        rel = path.relative_to(REPO).as_posix()
+        team, role, n = parse_path(rel)
+        files.setdefault((team, role), {})[n] = rel
+    return sorted((versions[n - 1], versions[n])
+                  for versions in files.values()
+                  for n in versions if n - 1 in versions)
+
+
+REAL_PAIRS = _adjacent_pairs()
+GATED_REAL_PAIRS = [(o, n) for o, n in REAL_PAIRS if is_gated(n)]
+UNGATED_REAL_PAIRS = [(o, n) for o, n in REAL_PAIRS if not is_gated(n)]
+
+
+def test_the_gated_real_pairs_include_the_five_known_ones():
+    newer = {n for _, n in GATED_REAL_PAIRS}
+    assert {PM_V8_REL, PMO_V8_REL, IMPL_V3_REL, REV_V3_REL, ARCH_V4_REL} <= newer
+
+
+@pytest.mark.parametrize("older,newer", GATED_REAL_PAIRS)
+def test_a_gated_real_pair_keeps_every_older_content_line(older, newer):
+    """真實檔：基準以上的每一對相鄰版本，下一版不掉前一版的內容行（白名單除外）。"""
+    old = (REPO / older).read_text(encoding="utf-8")
+    new = (REPO / newer).read_text(encoding="utf-8")
+    assert pair_violations(newer, old, new) == []
+
+
+@pytest.mark.parametrize("older,newer", UNGATED_REAL_PAIRS)
+def test_an_ungated_real_pair_is_not_checked(older, newer):
+    """基準以下的組合不檢查（PM 裁定 (b)）；它們有的會掉行，所以要排除。"""
+    old = (REPO / older).read_text(encoding="utf-8")
+    new = (REPO / newer).read_text(encoding="utf-8")
+    assert pair_violations(newer, old, new) is None
+
+
+@pytest.mark.parametrize("rel", [IMPL_V3_REL, REV_V3_REL, ARCH_V4_REL])
+def test_a_listed_replacement_needs_its_own_pair(rel):
+    """白名單精準到版本組：拿掉白名單，那一對版本就紅（替換句確實被用到）。"""
+    old = (REPO / _older(rel)).read_text(encoding="utf-8")
+    new = (REPO / rel).read_text(encoding="utf-8")
+    assert _replacements_for(rel), rel
+    assert dropped_sentences(old, new) != []
+
+
+def test_a_deleted_non_key_sentence_of_v7_is_flagged_in_v8():
+    """負向 (a)：v8 刪掉 v7 的一個非關鍵句（真實檔）→ 回報掉句。"""
+    sentence = "- CI 紅了不沉默重跑，先講原因。"
+    old = (REPO / PM_V7_REL).read_text(encoding="utf-8")
+    new = (REPO / PM_V8_REL).read_text(encoding="utf-8")
+    assert sentence in old and sentence in new
+    assert pair_violations(PM_V8_REL, old, new.replace(sentence + "\n", "", 1)) == [sentence]
+
+
+def test_a_deleted_key_sentence_of_v7_is_flagged_in_v8():
+    """負向 (b)：v8 刪掉 v7 的一個關鍵句（真實檔）→ 同樣回報掉句。"""
+    sentence = "不是權限"   # PM_KEY_SENTENCES: written in v7 and still in v8
+    old = (REPO / PM_V7_REL).read_text(encoding="utf-8")
+    new = (REPO / PM_V8_REL).read_text(encoding="utf-8")
+    assert sentence in old and sentence in new
+    dropped = pair_violations(PM_V8_REL, old, new.replace(sentence, "", 1))
+    assert dropped and any(sentence in line for line in dropped)
+
+
+def test_an_added_sentence_is_not_a_violation():
+    """負向 (c)：只加新句、不刪舊句 → 不違規。"""
+    old = "a 句\nb 句\n"
+    assert dropped_sentences(old, old + "c 新句\n") == []
+
+
+def test_a_listed_replacement_is_not_a_violation():
+    """負向 (d)：白名單內的替換句 → 不違規。"""
+    old = "a 句\nb 句\n"
+    new = "a 句\nb 改寫\n"
+    assert dropped_sentences(old, new) == ["b 句"]
+    assert dropped_sentences(old, new, {"b 句": "測試用的替換"}) == []
+
+
+def test_an_unlisted_replacement_is_a_violation():
+    """負向 (e)：白名單外的替換 → 違規；白名單精準到句，不是到組。"""
+    old = "a 句\nb 句\n"
+    new = "a 句\nb 改寫\n"
+    assert dropped_sentences(old, new, {"別的句": "不相關"}) == ["b 句"]
+
+
+def test_the_gate_starts_at_the_listed_version():
+    """記憶體案例：pm 基準是 v8 → v7→v8 查，v6→v7 不查。"""
+    old, new = "a\nb\n", "a\n"
+    assert pair_violations("atelier/worker-team/pm/v8.md", old, new) == ["b"]
+    assert pair_violations("atelier/worker-team/pm/v7.md", old, new) is None
+
+
+def test_a_later_version_of_a_listed_role_is_gated_automatically():
+    """記憶體案例：pm v9 不用改測試，v8→v9 自動納入。"""
+    assert pair_violations("atelier/worker-team/pm/v9.md", "a\nb\n", "a\n") == ["b"]
+
+
+def test_a_new_role_not_in_the_table_is_gated_from_its_second_version():
+    """記憶體案例：樹上沒有、表裡也沒有的 role：第二版（v1→v2）起守，v1 不守。"""
+    assert "mac/pm" not in GATED_FROM
+    old, new = "a\nb\n", "a\n"
+    assert pair_violations("atelier/mac/pm/v2.md", old, new) == ["b"]
+    assert pair_violations("atelier/mac/pm/v1.md", old, new) is None
