@@ -84,6 +84,23 @@ def test_c15_bad_payload_and_partial_submit():
     bad=ask(5); bad.message.content='decision: 2\nop: ask'
     assert codes(fold([bad],use_snapshot=False))==['unsupported_version']
 
+# -- #482 PR-2: a missing `decision` key is a broken record; a present-but-wrong one is a newer version --
+
+@pytest.mark.parametrize('extra', ['', 'other: {decision: 1}\n'])
+def test_missing_decision_key_is_bad_payload(extra):
+    # A complete ask with only the `decision` line removed: only the missing key can make it bad.
+    full=build_payload('ask',ask_channel=CH,asker=P,**question())
+    bad=ask(5); bad.message.content=full.replace('decision: 1\n','',1)+extra
+    assert 'decision' not in yaml.safe_load(bad.message.content)
+    assert codes(fold([bad],use_snapshot=False))==['bad_payload']
+    with pytest.raises(PayloadError) as e: parse_payload(bad.message)
+    assert e.value.code=='bad_payload'
+
+@pytest.mark.parametrize('value', ['2', '"1"', 'null', 'true'])
+def test_present_decision_key_not_integer_one_is_unsupported_version(value):
+    bad=ask(5); bad.message.content=f'decision: {value}\nop: ask\n'
+    assert codes(fold([bad],use_snapshot=False))==['unsupported_version']
+
 def test_payload_strict_and_unicode():
     p=build_payload('ask',ask_channel=CH,asker=P,**question())
     m=ask(1).message; m.content=p

@@ -340,10 +340,13 @@ class _PayloadLoader(yaml.SafeLoader):
 def parse_payload(message: Message) -> dict:
     try:
         p = yaml.load(message.content, Loader=_PayloadLoader)
-        if isinstance(p, dict) and (
-            type(p.get("decision")) is not int or p.get("decision") != 1
-        ):
-            raise PayloadError("unsupported_version")
+        if isinstance(p, dict):
+            # No `decision` key at all cannot be any version's layout: the writer broke it (#482 Q-2).
+            if "decision" not in p:
+                raise PayloadError("bad_payload")
+            # A key that is there but not the integer 1 is a version this reader does not know (#468 §4.3).
+            if type(p["decision"]) is not int or p["decision"] != 1:
+                raise PayloadError("unsupported_version")
         if not _utf8_text(p):
             # Such a record cannot be written out as UTF-8 text, so no view may carry it (R2-2).
             raise PayloadError("bad_payload")
