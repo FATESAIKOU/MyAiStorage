@@ -521,6 +521,47 @@ def test_ordering_and_message_length_boundary():
         plan_submit({CH:result}, H, entries[:1], render=lambda *args: 'x'*65537)
 
 
+def at_time(n, received_at):
+    return Record(ask(n).message, n, received_at)
+
+
+def test_482_order_is_by_instant_across_time_formats():
+    # String order would give 3,2,1,4 (`.5` and `Z` compare as text); by instant it is 2,3,4,1.
+    records = [
+        at_time(1, '2026-01-01T10:00:00.5+00:00'),
+        at_time(2, '2026-01-01T09:30:00+09:00'),
+        at_time(3, '2026-01-01T01:00:00Z'),
+        at_time(4, '2026-01-01T10:00:00Z'),
+    ]
+    assert [q['id'] for q in fold(records, use_snapshot=False).decisions] == [uid(2), uid(3), uid(4), uid(1)]
+
+
+def test_482_the_same_instant_written_twice_is_a_tie_broken_by_id():
+    # Arrival puts id 5 first, so only the id tie-break can give 4 before 5.
+    records = [Record(ask(5).message, 1, '2026-01-01T10:00:00Z'), Record(ask(4).message, 2, '2026-01-01T19:00:00+09:00')]
+    assert [q['id'] for q in fold(records, use_snapshot=False).decisions] == [uid(4), uid(5)]
+
+
+def test_482_no_time_comes_first_and_unreadable_times_come_last():
+    # No zone is unreadable, not UTC: the naive 00:00 sorts after the zoned 01:00Z.
+    records = [
+        at_time(1, '2026-01-01T00:00:00'),
+        at_time(2, 'not a time'),
+        at_time(3, '2026-01-01T01:00:00Z'),
+        at_time(4, None),
+        at_time(5, 'another'),
+    ]
+    assert [q['id'] for q in fold(records, use_snapshot=False).decisions] == [uid(4), uid(3), uid(1), uid(5), uid(2)]
+
+
+def test_482_plan_submit_orders_a_batch_by_instant():
+    records = [at_time(1, '2026-01-01T12:00:00+09:00'), at_time(2, '2026-01-01T04:00:00Z')]
+    result = fold(records, use_snapshot=False)
+    entries = [dict(ref=uid(2), base=uid(2), choice='A'), dict(ref=uid(1), base=uid(1), choice='A')]
+    plan = plan_submit({CH: result}, H, entries, render=render)
+    assert [i['ref'] for i in plan.batches[0][2]] == [uid(1), uid(2)]
+
+
 def test_snapshot_preserves_forged_tombstone_in_next_projection():
     initial = [ask(1), normal(2)]
     s = snap(initial, 3)

@@ -319,7 +319,7 @@ def cmd_list(args: Any, config: Config, app: Any, backend: DecisionBackend, toke
         result = dec.fold(_sync(config, backend, entity), use_snapshot=not args.all)
         decisions.extend(result.decisions)
         ignored.extend(result.ignored)
-    decisions.sort(key=lambda q: (q["asked_at"] or "", q["channel"], q["id"]))
+    decisions.sort(key=dec.order_key)
 
     if args.json:
         sys.stdout.write(json.dumps({"decisions": decisions, "ignored": ignored}, indent=2, ensure_ascii=False) + "\n")
