@@ -1,12 +1,14 @@
 import _guard
 
 import ast
+import json
 from pathlib import Path
 import pytest
 import yaml
 
-from angareion.decision import (Record, fold, snapshot_for, plan_submit, build_payload,
-                                parse_payload, PayloadError, SubmitRejected, related_count)
+from angareion.decision import (FLOW_DEPTH_MAX, Record, fold, snapshot_for, plan_submit, build_payload,
+                                parse_payload, PayloadError, SubmitRejected, related_count,
+                                _PayloadLoader, _TooDeep)
 from angareion.messages import Message, MessageValidationError
 
 P = 'mystore-pm-w1'
@@ -89,6 +91,41 @@ def test_payload_strict_and_unicode():
     with pytest.raises(MessageValidationError): build_payload('ask',ask_channel=CH,asker=P,extra=1,**question())
     m.content='[bad'
     with pytest.raises(PayloadError): parse_payload(m)
+
+# -- #482 PR-1: flow nesting is capped at the scanner (FLOW_DEPTH_MAX) --
+
+def _ask_with_deep_unknown_key(nest):
+    # A complete ask, so that only the nesting depth can make it bad.
+    return build_payload('ask',ask_channel=CH,asker=P,**question())+'extra: '+nest+'\n'
+
+@pytest.mark.parametrize('nest', [
+    '['*(FLOW_DEPTH_MAX+1)+']'*(FLOW_DEPTH_MAX+1),
+    '['*40000,
+])
+def test_482_flow_nested_past_the_cap_is_bad_payload_and_the_rest_still_folds(nest):
+    bad=ask(2); bad.message.content=_ask_with_deep_unknown_key(nest)
+    result=fold([ask(1),bad,ask(3)],use_snapshot=False)
+    assert codes(result)==['bad_payload']
+    assert [d['status'] for d in result.decisions]==['open','open']
+
+def test_482_a_legal_ask_with_a_cap_deep_unknown_key_still_reads():
+    r=ask(1)
+    r.message.content=_ask_with_deep_unknown_key('['*FLOW_DEPTH_MAX+']'*FLOW_DEPTH_MAX)
+    result=fold([r],use_snapshot=False)
+    assert result.ignored==[] and result.decisions[0]['title']=='題 😀'
+
+def test_482_the_scanner_stops_deep_nesting_before_recursion():
+    with pytest.raises(_TooDeep):
+        yaml.load('['*40000,Loader=_PayloadLoader)
+    assert yaml.load('['*FLOW_DEPTH_MAX+']'*FLOW_DEPTH_MAX,Loader=_PayloadLoader)is not None
+    with pytest.raises(_TooDeep):
+        yaml.load('['*(FLOW_DEPTH_MAX+1)+']'*(FLOW_DEPTH_MAX+1),Loader=_PayloadLoader)
+
+def test_482_a_json_style_submit_is_still_accepted():
+    s=submit(2,1,choice='A')
+    s.message.content=json.dumps(yaml.safe_load(s.message.content),ensure_ascii=False)
+    result=fold([ask(1),s],use_snapshot=False)
+    assert codes(result)==[] and result.decisions[0]['status']=='answered'
 
 def snap(records, n=9):
     content=snapshot_for(records,P); assert content
