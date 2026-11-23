@@ -19,6 +19,7 @@ import re
 from typing import Any, Iterable, Mapping
 
 from .runtime import Ctx, assert_pmo_identity
+from .timeutil import received_at_key
 
 __all__ = [
     "DECISION_FENCE",
@@ -175,7 +176,7 @@ def latest_decision_answers(messages: Iterable) -> dict:
         parsed = parse_decision_answer(str(raw.get("content") or ""))
         if parsed is None:
             continue
-        key = (str(raw.get("received_at") or ""), order)
+        key = (received_at_key(raw.get("received_at")), order)
         decision_id = parsed["decision_id"]
         if decision_id not in latest or key >= latest[decision_id][0]:
             latest[decision_id] = (key, raw, parsed)

@@ -398,6 +398,61 @@ def test_inbox_list_sorts_by_received_at_not_by_key(pmo_env):
     assert out.index(ULID_2) < out.index(ULID_1)
 
 
+def test_inbox_list_sorts_mixed_received_at_spellings_by_moment(pmo_env):
+    """`Z`／`+09:00`／小數秒混用時，順序依時刻，不是依字串（#522）。
+
+    字串順序（舊鍵）會把 `10:00:00.5+00:00` 排在 `19:00:00+09:00` 前面；
+    時刻順序是 `19:00+09:00`（＝10:00Z）在前。
+    """
+    E.seed_items(
+        pmo_env,
+        [
+            E.item_data(ULID_2, received_at="2026-10-20T19:00:00+09:00", title="先到"),
+            E.item_data(ULID_1, received_at="2026-10-20T10:00:00.5+00:00", title="後到"),
+        ],
+    )
+
+    rc, out, err = run_cli(["inbox", "list"], pmo_env)
+    assert (rc, err) == (0, "")
+    assert out.index(ULID_2) < out.index(ULID_1)
+
+    # 文字與 JSON 共用 `_items_by_creation`：同一個順序
+    rc, out, err = run_cli(["inbox", "list", "--json"], pmo_env)
+    assert (rc, err) == (0, "")
+    assert [item["id"] for item in json.loads(out)] == [ULID_2, ULID_1]
+
+
+def test_inbox_list_same_moment_written_differently_falls_back_to_id(pmo_env):
+    """同一時刻不同寫法：鍵相等，由 id 決定（字串鍵會排成 ULID_2 在前）。"""
+    E.seed_items(
+        pmo_env,
+        [
+            E.item_data(ULID_2, received_at="2026-10-20T10:00:00Z"),
+            E.item_data(ULID_1, received_at="2026-10-20T19:00:00+09:00"),
+        ],
+    )
+
+    rc, out, err = run_cli(["inbox", "list", "--json"], pmo_env)
+    assert (rc, err) == (0, "")
+    assert [item["id"] for item in json.loads(out)] == [ULID_1, ULID_2]
+
+
+def test_items_by_creation_puts_items_without_received_at_first():
+    """沒有 `received_at`（或空字串）的留在最前；其餘依時刻，同一時刻依 id。
+
+    帳本 schema 要求 `received_at`，這裡直接餵 `_items_by_creation`，守住
+    「文字與 JSON 共用」的那個順序本身。
+    """
+    st = {
+        "items": {
+            "b": {"id": "b", "received_at": "2026-10-20T10:00:00Z"},
+            "c": {"id": "c", "received_at": ""},
+            "a": {"id": "a"},
+        }
+    }
+    assert [item["id"] for item in cli._items_by_creation(st)] == ["a", "c", "b"]
+
+
 def test_inbox_list_empty(pmo_env):
     rc, out, err = run_cli(["inbox", "list"], pmo_env)
     assert rc == 0

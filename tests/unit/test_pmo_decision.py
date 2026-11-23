@@ -280,6 +280,31 @@ def test_inbox_read_keeps_only_latest_answer_per_decision(pmo_env):
     assert len(_sends(pmo_env)) == 2
 
 
+def test_latest_decision_answers_compares_the_moment_not_the_text():
+    """新的那則寫成 `+09:00`：字串鍵會選到舊的，時刻鍵選新的（#522）。
+
+    `19:00:00+09:00` 是 10:00Z（較早），`10:30:00Z` 是較晚的一則；字串順序
+    剛好相反（`10:30:00Z` < `19:00:00+09:00`）。
+    """
+    older = answer_msg(
+        f"# 回答決定題：{ULID_1}\n- q1：a\n",
+        msg_id=ULID_2,
+        received_at="2026-10-27T19:00:00+09:00",
+    )
+    newer = answer_msg(
+        f"# 回答決定題：{ULID_1}\n- q1：b\n",
+        msg_id=ULID_3,
+        received_at="2026-10-27T10:30:00Z",
+    )
+
+    kept = decision.latest_decision_answers([older, newer])
+    assert list(kept) == [id(newer)]
+    assert kept[id(newer)]["answers"] == {"q1": ["b"]}
+
+    # 順序反過來也一樣（先後不該由串列位置決定）
+    assert list(decision.latest_decision_answers([newer, older])) == [id(newer)]
+
+
 def test_inbox_read_ignores_malformed_answer_as_normal_message(pmo_env):
     msg = answer_msg(f"# 回答決定題：{ULID_1}\n- q1 A\n", msg_id=ULID_3)
     rc, out, _ = run_cli(["inbox", "read"], pmo_env, msgs=[msg])
