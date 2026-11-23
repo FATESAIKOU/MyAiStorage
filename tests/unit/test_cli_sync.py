@@ -1466,6 +1466,7 @@ def test_an_offline_deletion_is_adopted_once_the_uploader_frees_it(env, capsys, 
     rounds = {"n": 0}
     round_targets = []         # per round: the ids that round staged, i.e. the target it wrote to
     shell_targets = []         # per round: the target the outer shell follows after the round
+    alive_when_written = []    # per round: the agent had not been let go yet (the gate is what ends it)
 
     def online_and_delete_on_second(run_, agent):
         rounds["n"] += 1
@@ -1476,6 +1477,7 @@ def test_an_offline_deletion_is_adopted_once_the_uploader_frees_it(env, capsys, 
         real_round(run_, agent)
         round_targets.append({hdr_id for hdr_id, _body in staged[before:]})
         shell_targets.append(run_.target)
+        alive_when_written.append(not env.gate.exists())
         if rounds["n"] == 3:                   # one round after the deletion has adopted it
             env.gate.touch()
     monkeypatch.setattr(cli, "_periodic_write", online_and_delete_on_second)
@@ -1484,6 +1486,8 @@ def test_an_offline_deletion_is_adopted_once_the_uploader_frees_it(env, capsys, 
 
     assert env.gate.exists(), "the gate opens only after round three; the agent must not end on its own cap"
     assert rounds["n"] >= 3
+    assert len(alive_when_written) >= 3, f"round three never ran: {alive_when_written}"
+    assert alive_when_written[2], "round three wrote after the agent had been let go"
     kept = _extra_sessions(a)
     assert len(kept) == 1, f"the uploader and the foreground must agree on one: {[k['id'] for k in kept]}"
     assert kept[0]["id"] == out and [p["id"] for p in h.agora_of(kept[0])["parents"]] == [a]
