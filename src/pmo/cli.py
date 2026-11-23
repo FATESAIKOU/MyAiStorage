@@ -45,7 +45,7 @@ from .ports import (
 )
 from .round import read_round
 from .runtime import Ctx, Deps, assert_pmo_identity
-from .timeutil import iso_utc
+from .timeutil import iso_utc, received_at_key
 
 __all__ = ["build_parser", "main"]
 
@@ -208,12 +208,17 @@ def cmd_inbox_read(ctx: Ctx) -> int:
 def _items_by_creation(st: dict) -> list[dict]:
     """The ledger's items, oldest first — the one order the text and JSON share.
 
-    `received_at` is the back end's time, so it sorts the same way the text
-    output always did; items without one keep their place at the front.
+    `received_at` is the back end's time, so it sorts by the moment itself
+    (`received_at_key`), not by its text: mixed `Z`／offset／fractional-second
+    spellings still order correctly. Items without one keep their place at the
+    front; the same moment falls back to the id.
     """
     return sorted(
         st.get("items", {}).values(),
-        key=lambda item: (str(item.get("received_at") or ""), str(item.get("id") or "")),
+        key=lambda item: (
+            received_at_key(item.get("received_at")),
+            str(item.get("id") or ""),
+        ),
     )
 
 
