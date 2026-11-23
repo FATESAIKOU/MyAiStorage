@@ -95,7 +95,7 @@ agents/agy_restore   → store, agents.agy_store, agents.agy_summaries, agents.a
 
 | 模組 | 行數 | 職責 |
 |---|---|---|
-| `cli.py` | 938 | `pmo` 的入口與各子指令；把錯誤對到結束碼；不實作行為 |
+| `cli.py` | 946 | `pmo` 的入口與各子指令；把錯誤對到結束碼；不實作行為 |
 | `inbox.py` | 669 | 派工信／叫人／急件／決定題的解析、去重、ack 與回報的本文、事件行 |
 | `dispatch.py` | 494 | `check` 的逐項預檢、`send` 的指示信組裝與 team 狀態寫入、`[wake-hint]` |
 | `ops.py` | 650 | `reply`／`poke`／`status`／`close`（Close SOP）與 job 的辨識 |
@@ -114,12 +114,12 @@ agents/agy_restore   → store, agents.agy_store, agents.agy_summaries, agents.a
 | `runtime.py` | 122 | `Ctx`／`Deps`、身分守門、`sidecar_port` |
 | `ports.py` | 415 | 四個埠的介面與資料形狀（Angareion、aicomm、sidecar、GitHub） |
 | `adapters.py` | 634 | 四個埠的實作（子行程與 HTTP） |
-| `decision.py` | 211 | 決定題的建構與作答解析 |
+| `decision.py` | 212 | 決定題的建構與作答解析 |
 | `sanitize.py` | 99 | 輸出與內容的憑證樣式掃描 |
 | `paths.py` | 35 | `PMO_SKILL_CONFIG`／`PMO_SKILL_STATE_DIR`（沒設就拒絕） |
 | `errors.py` | 55 | 共用例外（`UsageError`、`SchemaError`、`SentButNotRecorded`…） |
 | `_io.py`／`_jsonutil.py`／`_lock.py` | 43／181／145 | 原子寫入、JSON 欄位驗證、`path_lock` |
-| `timeutil.py` | 44 | 時刻的格式與解析（一個格式一個函式） |
+| `timeutil.py` | 74 | 時刻的格式與解析（一個格式一個函式）；#522 起多一個 `received_at` 的排序鍵 `received_at_key(value) -> tuple`（沒有時刻的最前、讀得出的依時刻比較而不轉 UTC、讀不出的最後且彼此依原字串；同鍵由呼叫方決勝），`cli._items_by_creation` 與 `decision.latest_decision_answers` 用它；與 angareion `messages.received_at_key` 的差別見 decisions D-33 |
 | `fakes.py` | 404 | 測試用的同名方法假物件（只依賴 `ports`） |
 
 ### `src/pmo` 的依賴方向
@@ -136,7 +136,7 @@ schema／I/O：_io → errors；_jsonutil → errors；_lock → errors；paths 
 埠與執行環境：adapters → ports；runtime → ainame, config, errors, ports, sanitize, timeutil
               fakes → ports（測試用）
 核心：inbox → ledger, sanitize, decision, errors, ports, runtime, timeutil
-      decision → runtime
+      decision → runtime, timeutil
       dispatch → ainame, teamstate, tickstate, config, errors, ports, runtime, timeutil
       open → teamstate, config, errors, ports, runtime
       ops → teamstate, config, errors, ports, runtime, timeutil
