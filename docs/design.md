@@ -389,7 +389,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
    - 載入的對話最後接兩則：user「從 <A 的 id>（<A 的標頭一行>）fork」與一則固定的 assistant 回覆；A 以沒有回覆的 user 結尾時，先補一則 assistant「（這一段在這裡結束，當時沒有回覆）」。同 agent 時 A 的 raw 原樣載入（這兩則用 `append_native` 接在尾巴）；跨 agent 與 merge 出來的過 `native()`。
    - B 在啟動 agent 之前就先存檔（和 import 同一形狀）。agent 結束、沒有新內容時，B 照樣留著：stdout 印 B 的 id，exit 0。B 在接續途中被刪掉、有新內容時，照第 6 點的規則另存。
    - A 有 fork 出來的孩子不算分岔：再匯入 A 的來源時，A 仍然原地更新（5.2 的 S7）。
-8. **接續期間定期寫回**：agent 還在跑時，每隔 `--sync-period` 分鐘把目前的整份對話寫回接續的那個 Session（`--fork` 一樣適用：寫到 B；其他動作給了也被忽略）。沒給就是 5 分鐘；`0` 就是不自動同步，只有 agent 結束時的寫回。接受小數（`0.5` 是 30 秒）；負數或不是數字在開 agent 之前就拒絕（exit 1）。和上一次成功寫回（或啟動時載入的內容）比，沒有新內容就不寫、不 stage。
+8. **接續期間定期寫回**：agent 還在跑時，每隔 `--sync-period` 分鐘（間隔從上一輪寫回結束算起）把目前的整份對話寫回接續的那個 Session（`--fork` 一樣適用：寫到 B；其他動作給了也被忽略）。沒給就是 5 分鐘；`0` 就是不自動同步，只有 agent 結束時的寫回。接受小數（`0.5` 是 30 秒）；負數或不是數字在開 agent 之前就拒絕（exit 1）。和上一次成功寫回（或啟動時載入的內容）比，沒有新內容就不寫、不 stage。
    - 定期寫回**不連 Drive**：只看本機索引，目標還在就寫；別台的刪除交給背景上傳發現，背景另存之後，下一輪寫回就沿用那個新 Session。**沿用的搜尋不只在索引**：索引以外，也在 outbox（含上傳器正在比對的 `.done-`）找「只 staged、還沒被 `store.remember` 索引」的另存——同樣是 `relation: continue`、`source` 是這次的 agent session、`parents` 含目前的目標；兩邊都有時取 ULID 較新的那個。途中被刪、背景另存、最後一次、補存，同一段工作只會多出**一個**新 Session，之後的寫回都寫到它。
    - 最後一次寫回照原本的規則，但一定先確認目標還在（若目標在 outbox 中有未完成的上傳，最多等 15 秒讓其 settle）：和上一輪相同就不必再寫（但仍踢一下背景上傳，exit 照 0／3 的規則給），目標被刪了就照樣另存（工作不能只留在被刪的 Session 裡）；沿用到的另存如果還只在 outbox（stage 完、還沒索引），讀它的 header 直接寫到它，stdout 印的就是沿用後的那個 id。
    - **靜音**：定期寫回在終端機不印任何東西、也不讀鍵盤（rclone 與 `opencode export` 的 stdin 都是 DEVNULL；rclone 加 `--ask-password=false`）。訊息寫到 `<state>/continue.log`（每行有時間與 Session id，大小上限和 `upload.log` 一樣）；失敗只記數、不中斷 agent，下一輪再試。agent 結束後，有失敗過就印「定期寫回失敗 N 次，見 `<state>/continue.log`」。
