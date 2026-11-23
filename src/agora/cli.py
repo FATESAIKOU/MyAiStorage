@@ -1926,7 +1926,9 @@ def _wait_agent(proc, run: "_Run", agent: Agent, interval: float,
     a real round boundary writes back. Known limit (#107 L5): the deadline is
     checked between waits, so a round that is already running - including an inline
     upload in it - is not cut short by it. An exception here waits first (design
-    P9a) - the caller does that.
+    P9a) - the caller does that. The period runs from a round's end to the next
+    round's start (design P9), so a slow round is followed by a full rest, not by
+    the next round at once.
     """
     said_writing = False
     due = time.monotonic() + interval
@@ -1941,8 +1943,8 @@ def _wait_agent(proc, run: "_Run", agent: Agent, interval: float,
             return said_writing
         if time.monotonic() < due:
             continue                 # the slice ended early, not the round
-        due = time.monotonic() + interval
         _periodic_write(run, agent)
+        due = time.monotonic() + interval
         store._fault("after-periodic-write")
         if not said_writing and proc.poll() is not None:
             said_writing = True

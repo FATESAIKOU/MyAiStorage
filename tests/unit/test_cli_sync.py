@@ -1508,15 +1508,18 @@ def test_a_failed_round_is_counted_and_named(env, capsys, monkeypatch, tmp_path)
     _, a, _ = _import(capsys)
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")
     real_round = cli._periodic_write
+    rounds = []
 
     def open_after_one_round(run_, agent):
+        if rounds:
+            return                             # the count is exact: later rounds do nothing
+        rounds.append(1)
         real_round(run_, agent)
         env.gate.touch()                       # the agent may end: "failed 1 times" counts this round only
     monkeypatch.setattr(cli, "_periodic_write", open_after_one_round)
 
-    # The count is exact, so no second round may come due before the agent ends. A
-    # longer period than the usual test floor keeps the next round well away from
-    # the agent's exit (which follows the gate within a poll or two).
+    # The count no longer depends on the period: only the first round does anything. The
+    # longer period is a margin so the agent is still there when that round is due.
     code, out, err = _continue(capsys, a, "--sync-period", "0.02")
 
     assert env.gate.exists(), "the gate opens only after the round; the agent must not end on its own cap"
