@@ -310,8 +310,10 @@ while True:
         break
     data += chunk
 os.close(fd)
-with open(out, "wb") as f:
+# Write under a temporary name and rename: `out` appears only once it is whole.
+with open(out + ".part", "wb") as f:
     f.write(data)
+os.replace(out + ".part", out)
 """
 
 
@@ -338,7 +340,10 @@ class _RecordingReaper:
             if self.out.exists():
                 return self.out.read_bytes()
             time.sleep(0.01)
-        raise AssertionError("the stand-in reaper never reported: agora said no goodbye")
+        got = self.out.read_bytes() if self.out.exists() else None
+        raise AssertionError(
+            f"the stand-in reaper never reported within {timeout}s: "
+            f"got {got!r}, reaper exit {self.proc.poll()!r}")
 
 
 @pytest.fixture
