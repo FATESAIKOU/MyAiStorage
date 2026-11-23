@@ -352,9 +352,14 @@ def test_a_round_writes_while_the_agent_is_still_running(env, capsys, monkeypatc
     staged = _stage_spy(monkeypatch)
     real_round = cli._periodic_write
     rounds = {"n": 0}
+    round_bodies = []          # per round: what it staged
+    alive_when_written = []    # per round: the agent had not been let go yet (the gate is what ends it)
 
     def open_after_two_rounds(run_, agent):
+        before = len(staged)
         real_round(run_, agent)
+        round_bodies.append([body for _hdr_id, body in staged[before:]])
+        alive_when_written.append(not env.gate.exists())
         rounds["n"] += 1
         if rounds["n"] == 2:                   # the agent has lived through two rounds
             env.gate.touch()
@@ -364,6 +369,9 @@ def test_a_round_writes_while_the_agent_is_still_running(env, capsys, monkeypatc
 
     assert env.gate.exists(), "the gate opens only after two rounds; the agent must not end on its own cap"
     assert code == 0 and out == a
+    assert len(round_bodies) >= 2 and alive_when_written[1], "round two wrote while the agent was still running"
+    assert any("ZZ 第 2 次發言" in body for body in round_bodies[1]), (
+        f"round two's own stage, not the final write's: {round_bodies}")
     assert len(staged) >= 2, f"a round before the final: {len(staged)}"
     assert "ZZ 第 1 次發言" in staged[0][1], "the first stage is the round's version"
     assert staged[0] != staged[-1], "the final stage is newer than the round"
@@ -1452,17 +1460,22 @@ def test_an_offline_deletion_is_adopted_once_the_uploader_frees_it(env, capsys, 
     the line is back the uploader rescues once, and the following round adopts it."""
     env.gate = tmp_path / "agent-may-end"
     _, a, _ = _import(capsys)
-    _stage_spy(monkeypatch)
+    staged = _stage_spy(monkeypatch)
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "lsjson")     # offline: no listing, no rescue
     real_round = cli._periodic_write
     rounds = {"n": 0}
+    round_targets = []         # per round: the ids that round staged, i.e. the target it wrote to
+    shell_targets = []         # per round: the target the outer shell follows after the round
 
     def online_and_delete_on_second(run_, agent):
         rounds["n"] += 1
         if rounds["n"] == 2:
             monkeypatch.delenv("FAKE_RCLONE_FAIL")
             shutil.rmtree(on_drive(a))
+        before = len(staged)
         real_round(run_, agent)
+        round_targets.append({hdr_id for hdr_id, _body in staged[before:]})
+        shell_targets.append(run_.target)
         if rounds["n"] == 3:                   # one round after the deletion has adopted it
             env.gate.touch()
     monkeypatch.setattr(cli, "_periodic_write", online_and_delete_on_second)
@@ -1474,6 +1487,12 @@ def test_an_offline_deletion_is_adopted_once_the_uploader_frees_it(env, capsys, 
     kept = _extra_sessions(a)
     assert len(kept) == 1, f"the uploader and the foreground must agree on one: {[k['id'] for k in kept]}"
     assert kept[0]["id"] == out and [p["id"] for p in h.agora_of(kept[0])["parents"]] == [a]
+    # the rescue is adopted by a round, not only by the final write: round three
+    # (the one after the deletion) stages into the rescued session, not the gone one
+    assert round_targets[2] == {out}, f"round three must write the rescued session: {round_targets}"
+    # and the shell follows the rescue: after round three its target is the rescued session
+    # (the round child's own copy is not enough - `_apply_diff` has to bring it back)
+    assert shell_targets[0] == a and shell_targets[2] == out, f"shell targets: {shell_targets}"
     assert f"ZZ 第 {env.collects} 次發言" in document_of(out)
     assert not on_drive(a).exists()
 
@@ -2007,14 +2026,25 @@ def test_the_pending_file_follows_the_rescue_and_the_lock_goes_with_it(env, caps
         lock.close()
 
 
-def test_previous_sources_do_not_accumulate_across_rounds(env, capsys, monkeypatch):
+def test_previous_sources_do_not_accumulate_across_rounds(env, capsys, monkeypatch, tmp_path):
     """design P5: one entry per old source, however many rounds write."""
-    env.sleep = 0.85
+    env.gate = tmp_path / "agent-may-end"
     _, a, _ = _import(capsys)
     env.sessions["ses_launch_old"] = ["舊的", "好"]     # give it something to list once
+    real_round = cli._periodic_write
+    rounds = {"n": 0}
+
+    def open_after_three_rounds(run_, agent):
+        real_round(run_, agent)
+        rounds["n"] += 1
+        if rounds["n"] == 3:                   # several rounds have each written the source
+            env.gate.touch()
+    monkeypatch.setattr(cli, "_periodic_write", open_after_three_rounds)
 
     code, out, _ = _continue(capsys, a)
 
+    assert env.gate.exists(), "the gate opens only after three rounds; the agent must not end on its own cap"
+    assert rounds["n"] >= 3, f"the count below means nothing without several rounds: {rounds['n']}"
     assert code == 0
     hdr = header_of(out)
     assert hdr["agora"].get("previous_sources", []).count("opencode:ses_a") <= 1
