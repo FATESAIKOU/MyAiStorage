@@ -1199,14 +1199,26 @@ def test_a_rescue_the_uploader_remembered_carries_the_rest_of_the_run(claude_lab
     assert all(b in l for l in quiet_after), f"quiet round prefixes followed rescue to {b}: {quiet_after}"
 
 
-def test_final_write_waits_for_inflight_uploader_to_adopt_rescue(claude_lab, capsys, monkeypatch, clean_subprocesses):
+def test_final_write_waits_for_inflight_uploader_to_adopt_rescue(claude_lab, capsys, monkeypatch, tmp_path, clean_subprocesses):
     """If the agent exits while the outbox entry for run.target is in flight and the uploader
     is rescuing it into B, the final write must wait for it to settle and adopt B,
-    instead of prematurely minting a duplicate rescue or returning A."""
+    instead of prematurely minting a duplicate rescue or returning A.
+
+    The result alone does not say who made the rescue (issue #538): the final write's
+    own mint (`cli.py:1550`, 「這次的對話另存成 B」) leaves exactly one rescue too, so the
+    check below asks for `store.py:2486`'s 「X 已被別台刪除，這次的修改存成了 B」 - a line
+    only an uploader prints, in its stderr or in upload.log."""
     monkeypatch.delenv("AGORA_UPLOAD", raising=False)
     a = _import_claude(capsys)
     ulid = a.split(":")[1]
-    _script(claude_lab, monkeypatch, "append:ZZ 第 1 次發言,wait-sync,exit")
+    release = tmp_path / "uploader-started"
+    # `wait-file`, not `wait-sync`: under load the first round can land before the fake
+    # has appended (it imports the claude adapter first), and then the only round before
+    # the agent leaves is a quiet one - the round this test stages from never happens.
+    # The hook touches the file once it has staged and started the uploader, so the
+    # agent leaves only after the in-flight uploader the final write must wait for exists.
+    _script(claude_lab, monkeypatch, f"append:ZZ 第 1 次發言,wait-file:{release},exit")
+    monkeypatch.setenv("FAKE_SYNC_TIMEOUT", "60")
     real_round = cli._periodic_write
     done = {"staged": False}
 
@@ -1218,24 +1230,35 @@ def test_final_write_waits_for_inflight_uploader_to_adopt_rescue(claude_lab, cap
         hdr = store.Index(paths()).header(ulid)
         raw = (paths().mirror / ulid / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes()
         body = (paths().mirror / ulid / "session.md").read_text(encoding="utf-8")
-        # Nothing may be uploading A while it is staged and deleted on Drive: this hook runs
-        # on the main thread, the only one that starts uploaders, so waiting here is enough.
+        # Nothing may be uploading A while it is staged and deleted on Drive. `_wait_spawned`
+        # covers the uploaders this process started (the import's, and the one
+        # `_periodic_write` starts after a quiet round); the round child's own uploader lives
+        # in that child, so only the upload lock `_wait_for` looks at is visible for it. One
+        # that slips that check finds A gone after the delete below and rescues it anyway -
+        # still the uploader's rescue this test asks for (issue #538).
+        _wait_spawned([p for p in clean_subprocesses if "agora.background" in p.args],
+                      "uploaders before staging")
         _wait_for(lambda: not store.uploader_is_running(paths()), what="no uploader before staging")
         store.stage(paths(), hdr, body, raw, update=True, kind="continue")
         shutil.rmtree(on_drive(a), ignore_errors=True)   # another machine deleted A, before any uploader
-        import threading
+
         def delayed_uploader():
             # Started only after the deletion, so every uploader from here on finds A gone
             # and rescues it - there is no order in which one uploads A first.
-            subprocess.run([sys.executable, "-m", "agora.background"], env=dict(os.environ), check=True)
+            done["uploader"] = subprocess.run(
+                [sys.executable, "-m", "agora.background"], env=dict(os.environ),
+                capture_output=True, text=True)
+
         t = threading.Thread(target=delayed_uploader, daemon=True)
         done["thread"] = t
         t.start()
+        release.touch()      # staged, deleted, uploader in flight: the agent may leave
 
     monkeypatch.setattr(cli, "_periodic_write", round_then_delay_uploader)
     code, out, err = _continue_claude(capsys, claude_lab, a)
     assert done["staged"]
     done["thread"].join(timeout=30.0)
+    assert not done["thread"].is_alive(), "the uploader thread did not finish"
     _wait_for(lambda: not store.uploader_is_running(paths()), timeout=10.0, what="uploader finished")
     kept = _extra_sessions(a)
     assert len(kept) == 1, f"exactly one rescue: {[k['id'] for k in kept]}"
@@ -1243,6 +1266,18 @@ def test_final_write_waits_for_inflight_uploader_to_adopt_rescue(claude_lab, cap
     assert code == 0, err
     assert out == b, f"out was {out}, expected {b}"
     assert "另存" in err, err
+    uploader = done["uploader"]
+    assert uploader.returncode == 0, uploader.stderr
+    try:
+        upload_log = (paths().state / "upload.log").read_text(encoding="utf-8")
+    except OSError:
+        upload_log = ""
+    # Only an uploader says this (`store._rescue_deleted`, store.py:2486); a mint of the
+    # final write says 「這次的對話另存成」 (cli.py:1550) and leaves the uploader quiet.
+    rescue_notice = f"{ulid} 已被別台刪除，這次的修改存成了 {b.split(':')[1]}"
+    uploader_output = f"{uploader.stdout}{uploader.stderr}{upload_log}"
+    assert rescue_notice in uploader_output, \
+        f"the uploader must have made the rescue, not the final write: {rescue_notice}\n{uploader_output}"
 
 
 def test_final_write_does_not_block_full_timeout_on_normal_upload_or_offline(claude_lab, capsys, monkeypatch, clean_subprocesses):
