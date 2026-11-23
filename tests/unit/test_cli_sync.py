@@ -1218,11 +1218,15 @@ def test_final_write_waits_for_inflight_uploader_to_adopt_rescue(claude_lab, cap
         hdr = store.Index(paths()).header(ulid)
         raw = (paths().mirror / ulid / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes()
         body = (paths().mirror / ulid / "session.md").read_text(encoding="utf-8")
+        # Nothing may be uploading A while it is staged and deleted on Drive: this hook runs
+        # on the main thread, the only one that starts uploaders, so waiting here is enough.
+        _wait_for(lambda: not store.uploader_is_running(paths()), what="no uploader before staging")
         store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+        shutil.rmtree(on_drive(a), ignore_errors=True)   # another machine deleted A, before any uploader
         import threading
         def delayed_uploader():
-            time.sleep(0.15)
-            shutil.rmtree(on_drive(a), ignore_errors=True)
+            # Started only after the deletion, so every uploader from here on finds A gone
+            # and rescues it - there is no order in which one uploads A first.
             subprocess.run([sys.executable, "-m", "agora.background"], env=dict(os.environ), check=True)
         t = threading.Thread(target=delayed_uploader, daemon=True)
         done["thread"] = t
