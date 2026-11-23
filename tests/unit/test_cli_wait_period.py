@@ -146,3 +146,38 @@ def test_a_forwarded_stop_takes_the_agent_down_at_its_deadline(monkeypatch, grac
 
     assert taken == [pytest.approx(deadline)], taken
     assert agent.returncode == -9, "the agent was taken down, not waited on"
+
+
+def test_a_slow_round_that_ends_before_the_deadline_does_not_delay_take_down(monkeypatch):
+    """C-2 (slow-round boundary): a round that ends not yet overdue, with the next round
+    crossing the deadline, still takes the agent down exactly at the deadline.
+
+    interval 1, round cost 1.5, deadline 3.0, forwarded at t=0. The first round runs
+    1.0 -> 2.5 and ends before the deadline. The next round would start at 3.5, past it,
+    so take_down must happen at 3.0 and no second round may run. With the old order
+    (`due` set before the round) the next round starts at 2.5 and take_down moves to
+    4.0, one whole round late.
+    """
+    monkeypatch.setenv("AGORA_ORPHAN_GRACE", "3.0")
+    stop = cli._GentleStop()
+    clock = FakeClock()
+    monkeypatch.setattr(cli, "time", clock)
+    stop.forwarded()                              # the signal reached the agent at t=0
+
+    taken: list[float] = []
+    real_take_down = stop.take_down
+
+    def record(proc):
+        taken.append(clock.now)
+        real_take_down(proc)
+    monkeypatch.setattr(stop, "take_down", record)
+
+    rounds = Rounds(clock, 1.5 * INTERVAL)
+    monkeypatch.setattr(cli, "_periodic_write", rounds)
+    agent = FakeAgent(clock, ends_at=float("inf"))   # an agent that never leaves on its own
+
+    cli._wait_agent(agent, None, None, INTERVAL, stop)
+
+    assert rounds.spans == [(1.0, 2.5)], rounds.spans
+    assert taken == [pytest.approx(3.0)], taken
+    assert agent.returncode == -9, "the agent was taken down, not waited on"
