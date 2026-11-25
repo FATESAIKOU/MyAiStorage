@@ -13,15 +13,17 @@ git runner and the clocks, so nothing here touches the network by itself.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
 from typing import Any, Callable, Protocol, Sequence
 
-from angareion.backend import BackendRef, ChannelNotFoundError, Entity
+from angareion.backend import BackendRef, ChannelNotFoundError, Entity, RetiredPage
 from angareion.config import CONFIG_PULL_INTERVAL_DEFAULT, ConfigError
 
 try:
@@ -86,11 +88,54 @@ class SubprocessGitRunner:
 
 @dataclass(frozen=True)
 class ChannelRef:
-    """One channels.json entry: the backend entity a channel name points to."""
+    """One channels.json entry: the backend entity a channel name points to.
+
+    `issue` is the current page; `retired` are the pages it moved off, oldest first.
+    """
 
     name: str
     backend: str
     issue: int
+    retired: tuple[RetiredPage, ...] = ()
+
+
+_RFC3339 = re.compile(r"\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})")
+
+
+def _is_offset_time(value: Any) -> bool:
+    """Whether a value is an RFC 3339 time with its offset written (design 542 C-6)."""
+    if not isinstance(value, str) or not _RFC3339.fullmatch(value):
+        return False
+    text = value[:-1] + "+00:00" if value[-1] in "Zz" else value
+    try:
+        datetime.fromisoformat(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _retired_pages(name: str, raw: Any, current: int) -> tuple[RetiredPage, ...]:
+    """The `retired` list of one channels.json entry (design 542 C-6), in file order."""
+    where = f"channel '{name}' in {CHANNELS_PATH}"
+    if not isinstance(raw, list):
+        raise ChannelConfigError(f"the 'retired' of {where} is not a list")
+    pages: list[RetiredPage] = []
+    numbers = {current}
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ChannelConfigError(f"a 'retired' entry of {where} is not an object")
+        issue = item.get("issue")
+        if not isinstance(issue, int) or isinstance(issue, bool) or issue <= 0:
+            raise ChannelConfigError(f"a 'retired' entry of {where} has no entity number")
+        if not _is_offset_time(item.get("until")):
+            raise ChannelConfigError(f"a 'retired' entry of {where} has no 'until' with a time zone")
+        if "side" in item and item["side"] is not True:
+            raise ChannelConfigError(f"a 'retired' entry of {where} has a 'side' that is not true")
+        if issue in numbers:
+            raise ChannelConfigError(f"'retired' of {where} repeats entity number {issue}")
+        numbers.add(issue)
+        pages.append(RetiredPage(issue=issue, until=item["until"], side="side" in item))
+    return tuple(pages)
 
 
 def _default_warn(message: str) -> None:
@@ -277,7 +322,8 @@ class ChannelStore:
                 raise ChannelConfigError(f"channel '{name}' in {CHANNELS_PATH} has no backend name")
             if not isinstance(issue, int) or isinstance(issue, bool) or issue <= 0:
                 raise ChannelConfigError(f"channel '{name}' in {CHANNELS_PATH} has no entity number")
-            channels[name] = ChannelRef(name=name, backend=backend, issue=issue)
+            retired = _retired_pages(name, entry["retired"], issue) if "retired" in entry else ()
+            channels[name] = ChannelRef(name=name, backend=backend, issue=issue, retired=retired)
         return channels
 
     def backends(self) -> dict[str, BackendRef]:
@@ -337,7 +383,9 @@ class ChannelStore:
         if ref is None:
             raise ChannelNotFoundError(f"channel '{name}' does not exist")
         backend = self.backend(ref.backend)
-        return Entity(channel=name, backend=backend.name, repo=backend.repo, issue=ref.issue)
+        return Entity(
+            channel=name, backend=backend.name, repo=backend.repo, issue=ref.issue, retired=ref.retired
+        )
 
     def entities(self) -> list[Entity]:
         """Every channel as a target ("to me" spans them all)."""
@@ -351,7 +399,11 @@ class ChannelStore:
                 raise ChannelConfigError(
                     f"unsupported backend type {backend.type!r} for backend '{backend.name}'"
                 )
-            entities.append(Entity(channel=name, backend=backend.name, repo=backend.repo, issue=ref.issue))
+            entities.append(
+                Entity(
+                    channel=name, backend=backend.name, repo=backend.repo, issue=ref.issue, retired=ref.retired
+                )
+            )
         return entities
 
     def channel_names(self) -> list[str]:

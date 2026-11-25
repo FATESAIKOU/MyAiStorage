@@ -9,7 +9,8 @@ recipient filter; a message without `to` is a broadcast and counts for everyone.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
@@ -59,6 +60,11 @@ class RateLimitError(BackendError):
 PAGE_WARN_AT = 2000
 PAGE_ROLLOVER_AT = 2400
 PAGE_COMMENT_LIMIT = 2500
+
+# A retired page stays readable this long after it was retired (design 542 §1.3, §2.1).
+RETIRED_READ_GRACE = timedelta(hours=48)
+# How long after a rollover a writer may still write the old page (design 542 §1.3, Q-2).
+PAGE_FILL_WINDOW = timedelta(hours=24)
 
 
 def page_level(count: int | None) -> str:
@@ -124,13 +130,31 @@ class BackendRef:
 
 
 @dataclass(frozen=True)
+class RetiredPage:
+    """A page a channel has moved off (channels.json `retired`, design 542 §1.1).
+
+    `until` is the RFC 3339 time it was retired, as written in channels.json;
+    compare it with `parse_backend_time`. `side` marks a page that was opened
+    by a race and never became the current page.
+    """
+
+    issue: int
+    until: str
+    side: bool = False
+
+
+@dataclass(frozen=True)
 class Entity:
-    """A resolved channel: the backend entity a command may act on."""
+    """A resolved channel: the backend entity a command may act on.
+
+    `issue` is the current page; `retired` are the pages it moved off, oldest first.
+    """
 
     channel: str
     backend: str
     repo: str
     issue: int
+    retired: tuple[RetiredPage, ...] = ()
 
 
 class EntityResolver(Protocol):
@@ -197,11 +221,16 @@ class Cursor:
     id, a decimal string); `at` is the backend-recorded time of the last read
     message (RFC 3339, UTC); `seen` are the backend ids already read within
     `at - margin`. The sender's `at` and ULID take no part in any of this.
+
+    `pages` (design 542 §2.1) is each page's own cursor, keyed by issue number;
+    None means the entry has none (an old file, or a new cursor). A page's own
+    cursor never has `pages` of its own.
     """
 
     position: str | None = None
     at: str | None = None
     seen: list[str] = field(default_factory=list)
+    pages: dict[int, Cursor] | None = None
 
 
 def cursor_since(cursor: Cursor, *, margin: float = CURSOR_SEEN_MARGIN_SECONDS) -> str | None:
@@ -266,6 +295,87 @@ def advance_cursor(previous: Cursor, entries: list[tuple[int, str]]) -> Cursor:
     boundary = parse_backend_time(at) - timedelta(seconds=CURSOR_SEEN_MARGIN_SECONDS)
     seen = sorted({str(cid) for cid, created in entries if parse_backend_time(created) >= boundary})
     return Cursor(position=str(position), at=at, seen=seen)
+
+
+def _plain(cursor: Cursor) -> Cursor:
+    """A copy of a cursor's three columns, without its per-page map (no shared lists)."""
+    return Cursor(position=cursor.position, at=cursor.at, seen=list(cursor.seen))
+
+
+def page_entity(entity: Entity, issue: int) -> Entity:
+    """The same channel on one of its pages, with no retired pages of its own."""
+    return replace(entity, issue=issue, retired=())
+
+
+def pages_to_read(entity: Entity, cursor: Cursor) -> tuple[Entity, ...]:
+    """The pages a read of this channel covers, in reading order (design 542 §2.1, C-9).
+
+    Retired pages come first (oldest first), the current page last; it is always read.
+    A retired page is read while the cursor's time is inside its grace period,
+    `cursor.at < until + RETIRED_READ_GRACE`. A new cursor (no `at`) instead
+    reads only the pages retired within the grace period of the latest
+    rollover (`until + RETIRED_READ_GRACE > U`, U the latest `until`), so the
+    pages read do not grow with the number of rollovers (A-12).
+    """
+    latest = max((parse_backend_time(r.until) for r in entity.retired), default=None)
+    pages: list[Entity] = []
+    for retired in entity.retired:
+        until = parse_backend_time(retired.until) + RETIRED_READ_GRACE
+        if cursor.at is None:
+            wanted = latest is not None and until > latest
+        else:
+            wanted = parse_backend_time(cursor.at) < until
+        if wanted:
+            pages.append(page_entity(entity, retired.issue))
+    pages.append(page_entity(entity, entity.issue))
+    return tuple(pages)
+
+
+def page_base(cursor: Cursor, issue: int) -> Cursor:
+    """Where reading one page starts (design 542 §2.1, C-10).
+
+    `pages` is None: the main cursor is the start for every page (old files, new
+    cursors). `pages` holds the page: that page's own cursor. `pages` does not
+    hold it: the page was never read, so it starts empty and is read from the start.
+    """
+    if cursor.pages is None:
+        return _plain(cursor)
+    own = cursor.pages.get(issue)
+    return _plain(own) if own is not None else Cursor()
+
+
+def pages_after_read(
+    prev: Cursor,
+    to_read: Sequence[int],
+    entries_by_page: Mapping[int, list[tuple[int, str]]],
+) -> dict[int, Cursor]:
+    """Each page's cursor after a read (design 542 §2.1, C-10).
+
+    A page read this time advances on its own entries. A page that was skipped
+    (missing from `entries_by_page`) keeps its place: its cursor does not move,
+    and a page never read stays empty (read from the start later).
+    """
+    return {
+        page: advance_cursor(page_base(prev, page), entries_by_page.get(page, []))
+        for page in to_read
+    }
+
+
+def cursor_after_read(
+    prev: Cursor,
+    to_read: Sequence[int],
+    entries_by_page: Mapping[int, list[tuple[int, str]]],
+) -> Cursor:
+    """The cursor after a read across pages (design 542 §2.1, C-10).
+
+    The main cursor advances on the entries of all pages read together; its
+    `pages` is `pages_after_read`.
+    """
+    merged = [entry for page in to_read for entry in entries_by_page.get(page, [])]
+    return replace(
+        advance_cursor(_plain(prev), merged),
+        pages=pages_after_read(prev, to_read, entries_by_page),
+    )
 
 
 class ReadResult(NamedTuple):
@@ -480,11 +590,16 @@ def new_reader_counts(
 
 @dataclass(frozen=True)
 class FakeComment:
-    """A comment as the fake backend stores it: arrival id and backend time."""
+    """A comment as the fake backend stores it: arrival id and backend time.
+
+    `page` is the (repo, issue) it was posted on; None (a comment added to the
+    list directly) is on every page of its channel.
+    """
 
     id: int
     created_at: str
     message: Message
+    page: tuple[str, int] | None = None
 
 
 def _utc_now() -> str:
@@ -566,8 +681,13 @@ class FakeBackend:
         *,
         comment_id: int | None = None,
         created_at: str | None = None,
+        page: int | None = None,
     ) -> FakeComment:
-        """Record a message as a backend comment; tests may pin id/created_at."""
+        """Record a message as a backend comment; tests may pin id/created_at.
+
+        The comment goes on the entity's page; `page` posts it on another page
+        of the same repo instead (design 542 C-15).
+        """
         self._check_injected_error()
         message.validate()
         if message.channel != entity.channel:
@@ -577,7 +697,10 @@ class FakeBackend:
         cid = self._next_comment_id if comment_id is None else comment_id
         if cid >= self._next_comment_id:
             self._next_comment_id = cid + 1
-        comment = FakeComment(id=cid, created_at=created_at or self._clock(), message=message)
+        on_page = self._key(entity.repo, entity.issue if page is None else page)
+        comment = FakeComment(
+            id=cid, created_at=created_at or self._clock(), message=message, page=on_page
+        )
         self._comments.append(comment)
         return comment
 
@@ -632,6 +755,10 @@ class FakeBackend:
         self.deliver(entity, message)
         return message.id
 
+    def _on_page(self, comment: FakeComment, entity: Entity) -> bool:
+        """Whether a comment is on the entity's page (untagged comments are on every page)."""
+        return comment.page is None or comment.page == self._key(entity.repo, entity.issue)
+
     def _comments_for(
         self, entity: Entity, recipient: str | None, mentioned: str | None = None
     ) -> list[FakeComment]:
@@ -639,6 +766,7 @@ class FakeBackend:
             comment
             for comment in self._comments
             if comment.message.channel == entity.channel
+            and self._on_page(comment, entity)
             and scope_matches(comment.message, recipient, mentioned)
         ]
 
@@ -702,6 +830,8 @@ class FakeBackend:
         for comment in self._comments:
             msg = comment.message
             if msg is not None and getattr(msg, "channel", None) != entity.channel:
+                continue
+            if not self._on_page(comment, entity):
                 continue
             if since is not None:
                 try:
