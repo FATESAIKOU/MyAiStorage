@@ -1716,3 +1716,78 @@ def test_read_json_carries_datatype_message_for_a_plain_message(cli_env, capsys)
     assert run(cli_env, ["read", "--channel", "general", "--json"]) == 0
     listed = json.loads(capsys.readouterr().out)
     assert [m["datatype"] for m in listed] == ["message"]
+
+
+# -- channel delete after a rollover (C-8, design 542 §1.2 and §6.3 2b) -----
+
+
+class _PosterOnly:
+    """A registry seam with no `all_comments`: the staleness check has no evidence (C-8)."""
+
+    def __init__(self):
+        self.posted: list[str] = []
+
+    def post_comment(self, body: str) -> None:
+        self.posted.append(body)
+
+
+class _UnreadableRegistry(FakeRegistryClient):
+    """The registry thread cannot be read right now (C-8: no evidence, delete proceeds)."""
+
+    def all_comments(self):
+        from angareion.registry import RegistryError
+
+        raise RegistryError("the comment listing failed")
+
+
+def _register_and_roll_over(registry, *, from_issue: int, to_issue: int) -> None:
+    from angareion.registry import register_comment, rollover_comment
+
+    registry.add_comment(register_comment("general", "github-main", from_issue), author_association="OWNER")
+    registry.add_comment(
+        rollover_comment("general", "github-main", to_issue, from_issue), author_association="OWNER"
+    )
+
+
+def test_c8_delete_refuses_when_the_registry_retired_the_local_page(cli_env, capsys):
+    _register_and_roll_over(cli_env["registry"], from_issue=10, to_issue=20)
+    fetches_before = cli_env["git"].fetch_calls
+
+    ret = run(cli_env, ["channel", "delete", "general"])
+
+    assert ret == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "was not deleted" in captured.err
+    assert "try again later" in captured.err
+    assert cli_env["git"].fetch_calls == fetches_before + 1  # the forced fetch before the staleness check (M-4)
+    assert cli_env["backend"].entity_state(10) == "open"  # close_channel was not called
+    assert cli_env["registry"].posted == []  # no new unregister
+
+
+def test_c8_delete_proceeds_when_the_registry_agrees_with_the_local_page(cli_env, capsys):
+    from angareion.registry import register_comment
+
+    cli_env["registry"].add_comment(register_comment("general", "github-main", 10), author_association="OWNER")
+
+    assert run(cli_env, ["channel", "delete", "general"]) == 0
+    assert capsys.readouterr().out == "general\n"
+    assert cli_env["backend"].entity_state(10) == "closed"
+
+
+def test_c8_delete_proceeds_when_the_registry_cannot_be_read(cli_env, capsys):
+    registry = _UnreadableRegistry()
+    cli_env["registry"] = registry
+
+    assert run(cli_env, ["channel", "delete", "general"]) == 0
+    assert capsys.readouterr().out == "general\n"
+    assert cli_env["backend"].entity_state(10) == "closed"
+
+
+def test_c8_delete_proceeds_when_the_registry_seam_has_no_all_comments(cli_env, capsys):
+    registry = _PosterOnly()
+    cli_env["registry"] = registry
+
+    assert run(cli_env, ["channel", "delete", "general"]) == 0
+    assert capsys.readouterr().out == "general\n"
+    assert len(registry.posted) == 1 and '"action": "unregister"' in registry.posted[0]

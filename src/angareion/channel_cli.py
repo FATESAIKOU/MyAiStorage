@@ -25,12 +25,14 @@ from angareion.config import Config, mask_token
 from angareion.messages import MessageValidationError, validate_channel_name
 from angareion.registry import (
     CommentPoster,
+    RegistryComments,
     RegistryCounter,
     RegistryError,
     post_with_retries,
     register_comment,
     unregister_comment,
 )
+from angareion.registry_rules import rebuild_channels
 
 # The same exit codes as cli.py (cli imports this module, so they are not imported back).
 EXIT_OK = 0
@@ -112,6 +114,26 @@ def cmd_channel_create(
     return EXIT_OK
 
 
+def _current_page_moved(registry: Any, backend_names: set[str], name: str, local_issue: int) -> bool:
+    """True only when the registry says the local current page of `name` has been retired (C-8).
+
+    Reads the registry thread and recomputes the mapping. Anything it cannot
+    establish (no registry read, a seam without `all_comments`, the name missing
+    from the recomputed mapping, the same current page) is no evidence: False.
+    """
+    if not isinstance(registry, RegistryComments):
+        return False
+    try:
+        comments = registry.all_comments()
+    except RegistryError:
+        return False
+    channels, _ = rebuild_channels(comments, backend_names)
+    entry = channels.get(name)
+    if entry is None:
+        return False
+    return any(page["issue"] == local_issue for page in entry.get("retired", []))
+
+
 def cmd_channel_delete(
     args: argparse.Namespace,
     config: Config,
@@ -129,7 +151,15 @@ def cmd_channel_delete(
         return EXIT_USAGE
 
     store.ensure_fresh()
+    store.fetch()  # the staleness check below needs the newest registry view, not the periodic one
     entity = store.entity_for(args.name)  # a missing channel raises ChannelNotFoundError
+
+    if _current_page_moved(registry, set(store.backends()), args.name, entity.issue):
+        sys.stderr.write(
+            f"Error: channel '{args.name}' was not deleted: its current page changed and the local "
+            "configuration has not caught up yet; try again later\n"
+        )
+        return EXIT_BACKEND
 
     try:
         app.close_channel(entity)

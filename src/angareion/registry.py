@@ -6,6 +6,7 @@ helpers on a bare runner (`PYTHONPATH=src`, no third-party packages).
 The format (design section 9/10) is one line of JSON:
 
     {"schema": 1, "action": "register"|"unregister", "channel": ..., "backend": ..., "issue": N}
+    {"schema": 1, "action": "rollover", "channel": ..., "backend": ..., "issue": N, "from": M}
 
 Everything else is not an action. A comment that *looks like* an attempt (it
 starts with `{`) but fails validation is reported by the rebuild workflow when
@@ -24,7 +25,7 @@ from typing import Any, Callable, Protocol, runtime_checkable
 from angareion.transport import DefaultHttpTransport, HttpTransport, HttpResponse
 
 ACTION_SCHEMA = 1
-ACTIONS = ("register", "unregister")
+ACTIONS = ("register", "unregister", "rollover")
 AUTHORIZED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 REGISTRY_RETRY_ATTEMPTS = 3
 REGISTRY_RETRY_INTERVAL_SECONDS = 1.0
@@ -42,16 +43,21 @@ class RegistryWriteConflict(RegistryError):
     """The file changed while rebuilding (sha mismatch): re-read and retry."""
 
 
+def _action_json(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(", ", ": "))
+
+
 def action_comment(action: str, channel: str, backend: str, issue: int) -> str:
     """The one-line JSON a register/unregister comment carries."""
-    payload = {
-        "schema": ACTION_SCHEMA,
-        "action": action,
-        "channel": channel,
-        "backend": backend,
-        "issue": issue,
-    }
-    return json.dumps(payload, ensure_ascii=False, separators=(", ", ": "))
+    return _action_json(
+        {
+            "schema": ACTION_SCHEMA,
+            "action": action,
+            "channel": channel,
+            "backend": backend,
+            "issue": issue,
+        }
+    )
 
 
 def register_comment(channel: str, backend: str, issue: int) -> str:
@@ -62,14 +68,29 @@ def unregister_comment(channel: str, backend: str, issue: int) -> str:
     return action_comment("unregister", channel, backend, issue)
 
 
+def rollover_comment(channel: str, backend: str, issue: int, from_issue: int) -> str:
+    """The one-line JSON that moves a channel from `from_issue` to `issue` (design 542 §1.2)."""
+    return _action_json(
+        {
+            "schema": ACTION_SCHEMA,
+            "action": "rollover",
+            "channel": channel,
+            "backend": backend,
+            "issue": issue,
+            "from": from_issue,
+        }
+    )
+
+
 @dataclass(frozen=True)
 class Action:
-    """A valid register/unregister comment."""
+    """A valid register/unregister/rollover comment; `from_issue` only for rollover."""
 
     action: str
     channel: str
     backend: str
     issue: int
+    from_issue: int | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +122,8 @@ def parse_comment(body: Any) -> Action | InvalidAction | None:
         return InvalidAction("the comment is not a JSON object")
 
     required = {"schema", "action", "channel", "backend", "issue"}
+    if data.get("action") == "rollover":
+        required = required | {"from"}  # only rollover carries `from`; the others still reject it
     missing = required - set(data)
     if missing:
         return InvalidAction(f"missing fields: {', '.join(sorted(missing))}")
@@ -119,7 +142,20 @@ def parse_comment(body: Any) -> Action | InvalidAction | None:
     issue = data["issue"]
     if not isinstance(issue, int) or isinstance(issue, bool) or issue <= 0:
         return InvalidAction(f"the issue number must be a positive integer, got {issue!r}")
-    return Action(action=data["action"], channel=data["channel"], backend=data["backend"], issue=issue)
+    from_issue = None
+    if data["action"] == "rollover":
+        from_issue = data["from"]
+        if not isinstance(from_issue, int) or isinstance(from_issue, bool) or from_issue <= 0:
+            return InvalidAction(f"the from issue number must be a positive integer, got {from_issue!r}")
+        if from_issue == issue:
+            return InvalidAction("the from issue number must differ from the issue number")
+    return Action(
+        action=data["action"],
+        channel=data["channel"],
+        backend=data["backend"],
+        issue=issue,
+        from_issue=from_issue,
+    )
 
 
 class CommentPoster(Protocol):
@@ -134,6 +170,14 @@ class RegistryCounter(Protocol):
     """What `channel status` needs from a registry client: how many comments the issue has."""
 
     def comment_count(self) -> int:
+        ...
+
+
+@runtime_checkable
+class RegistryComments(Protocol):
+    """What `channel delete` needs from a registry client: the whole comment thread (C-8)."""
+
+    def all_comments(self) -> list[dict[str, Any]]:
         ...
 
 
