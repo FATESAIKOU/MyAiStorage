@@ -234,7 +234,7 @@ def test_fake_check_and_read_by_entity():
     res = backend.read(general, Cursor())
     assert isinstance(res, ReadResult)
     assert res.messages == []
-    assert res.cursor == Cursor()
+    assert res.cursor == Cursor(pages={10: Cursor()})  # C-15: the one page is recorded, not read yet
 
     first = _make_msg(channel="general", msg_id="01AAAA")
     second = _make_msg(channel="general", msg_id="01BBBB")

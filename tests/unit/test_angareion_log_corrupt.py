@@ -19,7 +19,7 @@ from angareion.backend import FakeBackend
 from angareion.channel_config import BACKENDS_PATH, CHANNELS_PATH, ChannelStore
 from angareion.cli import main
 from angareion.config import Config, save_config
-from angareion.log_cache import log_cache_path
+from angareion.log_cache import LogCache, log_cache_path
 from angareion.messages import Message
 from angareion.registry import FakeRegistryClient
 
@@ -147,4 +147,34 @@ def test_unparseable_comment_id_rebuilds_instead_of_dropping_the_message(cli_env
     data["messages"][0]["comment_id"] = "not-a-number"
     path.write_text(json.dumps(data), encoding="utf-8")
 
+    assert_full_rebuild(cli_env, capsys)
+
+
+@pytest.mark.parametrize(
+    "bad_state",
+    [
+        "x",
+        ["x"],
+        None,
+        {"last_created_at": 5, "etag": None},
+        {"last_created_at": None, "etag": "not-a-dict"},
+        {"last_created_at": None, "etag": {"url": 1, "etag": "e"}},
+    ],
+    ids=["string", "list", "null", "time-not-str", "etag-not-dict", "etag-url-not-str"],
+)
+def test_a_bad_pages_entry_rebuilds_instead_of_a_traceback(cli_env, capsys, bad_state):
+    """PR-2c review 中-1: each `pages` entry is checked, so a bad one voids the file (no AttributeError in sync)."""
+    seed_two_hours_apart(cli_env)
+    assert run(cli_env, ["log", "--channel", "general", "--json"]) == 0
+    capsys.readouterr()
+
+    path = cache_file(cli_env)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert set(data["pages"]) == {"10"}
+    assert LogCache(cli_env["state_dir"], IDENTITY).load("general") is not None
+    data["pages"]["10"] = bad_state
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    # The etag shapes are not seen by the Fake backend, so refuse them at load too.
+    assert LogCache(cli_env["state_dir"], IDENTITY).load("general") is None
     assert_full_rebuild(cli_env, capsys)

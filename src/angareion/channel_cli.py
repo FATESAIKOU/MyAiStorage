@@ -9,12 +9,23 @@ decision_cli.py does.
 from __future__ import annotations
 
 import argparse
+from datetime import timedelta
 import json
 import sys
 import time
 from typing import Any, Callable
 
-from angareion.backend import PAGE_COMMENT_LIMIT, BackendError, PageBackend, page_level
+from angareion.backend import (
+    PAGE_COMMENT_LIMIT,
+    PAGE_FILL_WINDOW,
+    BackendError,
+    Cursor,
+    PageBackend,
+    format_backend_time,
+    page_entity,
+    page_level,
+    parse_backend_time,
+)
 from angareion.channel_config import (
     BackendChoiceError,
     ChannelConfigError,
@@ -39,9 +50,9 @@ EXIT_OK = 0
 EXIT_USAGE = 1
 EXIT_BACKEND = 2
 
-# PR-1: a channel is one page until rollover exists (C-26 fills in the real page count).
-PAGES_UNTIL_ROLLOVER = 1
 REGISTRY_ROW = "registry"
+# Only retired pages this recent get the flags (design 542 C-26); older ones are not looked at.
+FLAG_WINDOW = timedelta(days=7)
 
 
 def cmd_channel_create(
@@ -180,18 +191,50 @@ def cmd_channel_delete(
     return EXIT_OK
 
 
-def _page_count(backend: Any, entity: Any, token: str) -> tuple[int | None, bool]:
-    """(messages on the current page or None, ok). A backend without page sizes is a failed read (C-5)."""
+def _page_count(backend: Any, entity: Any, token: str) -> tuple[int | None, str | None, bool]:
+    """(messages on the current page or None, the backend's time or None, ok). A backend without page sizes is a failed read (C-5)."""
     if not isinstance(backend, PageBackend):
         sys.stderr.write(f"Warning: channel '{entity.channel}': the page size is not available from this backend\n")
-        return None, False
+        return None, None, False
     try:
-        return backend.page_size(entity), True
+        count, now = backend.page_size_at(entity)
+        return count, now, True
     except BackendError as e:
         sys.stderr.write(
             f"Warning: channel '{entity.channel}': the page size could not be read: {mask_token(str(e), token)}\n"
         )
-        return None, False
+        return None, None, False
+
+
+def _page_flags(backend: Any, entity: Any, now: str | None, token: str) -> tuple[list[str], bool]:
+    """(flags, ok) for a channel's older pages (design 542 C-26).
+
+    `side`: a side page that holds messages. `late`: the last non-side retired
+    page holds messages after its `until + PAGE_FILL_WINDOW`. Only retired
+    pages retired within FLAG_WINDOW of `now` (the backend's own time) are read,
+    one request each, from a cursor that is never saved. A read that fails gives
+    `unknown` and ok False. `now` None (no backend time) gives no flags and no failure.
+    """
+    if now is None or not entity.retired:
+        return [], True
+    today = parse_backend_time(now)
+    recent = [r for r in entity.retired if today - parse_backend_time(r.until) <= FLAG_WINDOW]
+    flags: list[str] = []
+    try:
+        if any(r.side and backend.read(page_entity(entity, r.issue), Cursor(at=r.until)).messages for r in recent):
+            flags.append("side")
+        non_side = [r for r in entity.retired if not r.side]
+        if non_side and non_side[-1] in recent:
+            last = non_side[-1]
+            since = format_backend_time(parse_backend_time(last.until) + PAGE_FILL_WINDOW)
+            if backend.read(page_entity(entity, last.issue), Cursor(at=since)).messages:
+                flags.append("late")
+    except BackendError as e:
+        sys.stderr.write(
+            f"Warning: channel '{entity.channel}': the page flags could not be read: {mask_token(str(e), token)}\n"
+        )
+        return ["unknown"], False
+    return flags, True
 
 
 def _registry_count(registry: Any, token: str) -> tuple[int | None, bool]:
@@ -206,14 +249,14 @@ def _registry_count(registry: Any, token: str) -> tuple[int | None, bool]:
         return None, False
 
 
-def _status_row(name: str, count: int | None, pages: int) -> dict[str, Any]:
+def _status_row(name: str, count: int | None, pages: int, flags: list[str]) -> dict[str, Any]:
     return {
         "name": name,
         "count": count,
         "limit": PAGE_COMMENT_LIMIT,
         "level": page_level(count),
         "pages": pages,
-        "flags": [],
+        "flags": flags,
     }
 
 
@@ -261,12 +304,14 @@ def cmd_channel_status(
     rows: list[dict[str, Any]] = []
     failed = False
     for entity in targets:
-        count, ok = _page_count(app.backend, entity, token)
+        count, now, ok = _page_count(app.backend, entity, token)
         failed = failed or not ok
-        rows.append(_status_row(entity.channel, count, PAGES_UNTIL_ROLLOVER))
+        flags, flags_ok = _page_flags(app.backend, entity, now, token)
+        failed = failed or not flags_ok
+        rows.append(_status_row(entity.channel, count, 1 + len(entity.retired), flags))
     count, ok = _registry_count(registry, token)
     failed = failed or not ok
-    rows.append(_status_row(REGISTRY_ROW, count, PAGES_UNTIL_ROLLOVER))
+    rows.append(_status_row(REGISTRY_ROW, count, 1, []))  # the registry never rolls over
 
     if args.json:
         sys.stdout.write(json.dumps(rows, ensure_ascii=False) + "\n")

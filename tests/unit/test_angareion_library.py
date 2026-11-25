@@ -236,7 +236,7 @@ def test_read_uses_the_local_cursor_and_advances_it(tmp_path):
     batch.commit()
     stored = json.loads(app.cursors.path.read_text(encoding="utf-8"))
     entry = stored["channel:general"]
-    assert set(entry) == {"position", "at", "seen"}
+    assert set(entry) == {"position", "at", "seen", "pages"}  # C-15: the per-page cursor is added
     assert entry["position"] == "2"
     assert entry["at"] == "2026-10-10T12:00:01Z"
     assert entry["seen"] == ["1", "2"]

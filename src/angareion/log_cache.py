@@ -10,13 +10,22 @@ from pathlib import Path
 
 from datetime import timedelta
 
-from angareion.backend import EnumerableBackend, format_backend_time, parse_backend_time
+from angareion.backend import (
+    EnumerableBackend,
+    PageUnavailableError,
+    format_backend_time,
+    page_entity,
+    parse_backend_time,
+    skipped_page_warning,
+)
 from angareion.config import channel_slug, identity_slug
 from angareion.messages import DEFAULT_DATATYPE, Message, message_to_dict
 
 
-# 2: messages carry `datatype` (#468). A version 1 file is rebuilt whole.
-LOG_CACHE_VERSION = 2
+# 2: messages carry `datatype` (#468). 3: one mirror per channel over all its
+# pages (design 542 §2.2): `pages` holds each page's own last time and etag,
+# and every message names its page. An older file is rebuilt whole.
+LOG_CACHE_VERSION = 3
 
 
 def log_cache_dir(state_dir, identity):
@@ -29,6 +38,12 @@ def log_cache_path(state_dir, identity, channel):
 
 def _warn_to_stderr(message):
     sys.stderr.write(f"Warning: {message}\n")
+
+
+def _same_repo(cached, repo):
+    """Whether a cached file was written for this repo (the entity's issue may have moved, the repo may not)."""
+    cached_entity = cached.get("entity")
+    return isinstance(cached_entity, dict) and cached_entity.get("repo") == repo
 
 
 def _etag_to_dict(record):
@@ -47,16 +62,15 @@ def _etag_to_dict(record):
     return {"url": url, "etag": etag}
 
 
-def _etag_from_dict(value):
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        return None
-    url = value.get("url")
-    etag = value.get("etag")
-    if not isinstance(url, str) or not url or not isinstance(etag, str) or not etag:
-        return None
-    return {"url": url, "etag": etag}
+def _page_state_ok(state):
+    """Whether one entry of `pages` has the shape `sync` writes (a dict; a str-or-None time; an etag in `_etag_to_dict`'s shape or None)."""
+    if not isinstance(state, dict):
+        return False
+    last_created = state.get("last_created_at")
+    if last_created is not None and not isinstance(last_created, str):
+        return False
+    etag = state.get("etag")
+    return etag is None or _etag_to_dict(etag) == etag
 
 
 class LogCache:
@@ -108,12 +122,18 @@ class LogCache:
             return None
         if not isinstance(data.get("messages"), list):
             return None
+        if not isinstance(data.get("pages"), dict):
+            return None
+        if not all(_page_state_ok(state) for state in data["pages"].values()):
+            return None
         for _m in data.get("messages"):
             if not isinstance(_m, dict):
                 return None
             try:
                 int(_m.get("comment_id"))
             except (TypeError, ValueError):
+                return None
+            if not isinstance(_m.get("page"), int) or isinstance(_m.get("page"), bool):
                 return None
             if not isinstance(_m.get("created_at"), str):
                 return None
@@ -145,33 +165,52 @@ class LogCache:
             return None
         return data
 
-    def load_messages(self, channel=None, entity=None):
-        data = self.load(channel, entity)
-        if not data:
-            return [], None, None, None
-        return (
-            list(data.get("messages", [])),
-            data.get("last_comment_id"),
-            data.get("last_created_at"),
-            _etag_from_dict(data.get("etag")),
-        )
-
     def sync(self, backend: EnumerableBackend, entity):
+        """Bring the mirror up to date from every page of the channel, then return its messages.
+
+        The current page and each retired page are listed with their own
+        `since`/etag (`pages`); a retired page that cannot be listed is skipped
+        with a warning and keeps its place (C-22). Messages of a page the entity
+        no longer has are dropped (design 542 §2.2).
+        """
         ch = entity.channel
-        cached_entity = {"repo": entity.repo, "issue": entity.issue}
-        cached_msgs, _last_cid, last_created, etag = self.load_messages(ch, cached_entity)
-        mirror = list(cached_msgs)
-        if last_created is None:
-            since = None
-        else:
-            since_dt = parse_backend_time(last_created) - timedelta(seconds=60)
-            since = format_backend_time(since_dt)
-        enumerated, new_etag, not_modified = backend.enumerate_conditional(entity, since=since, etag=etag)
-        by_id = {}
-        for m in mirror:
-            by_id[int(m["comment_id"])] = m
-        had_new_message = False
-        if not not_modified:
+        cached = self.load(ch)
+        if cached is not None and not _same_repo(cached, entity.repo):
+            cached = None  # another repo: the mirror is rebuilt whole
+        pages_state = dict(cached.get("pages", {})) if cached else {}
+        numbers = [retired.issue for retired in entity.retired] + [entity.issue]
+        by_id: dict[int, dict] = {}
+        for m in cached.get("messages", []) if cached else []:
+            if int(m["page"]) in numbers:
+                by_id[int(m["comment_id"])] = m
+
+        new_pages: dict[str, dict] = {}
+        listed = False
+        for number in numbers:
+            state = pages_state.get(str(number)) or {}
+            last_created = state.get("last_created_at")
+            if last_created is None:
+                since = None
+            else:
+                since = format_backend_time(parse_backend_time(last_created) - timedelta(seconds=60))
+            try:
+                enumerated, new_etag, not_modified = backend.enumerate_conditional(
+                    page_entity(entity, number), since=since, etag=state.get("etag")
+                )
+            except PageUnavailableError as error:
+                if number == entity.issue:
+                    raise
+                self._warn(skipped_page_warning(ch, error.status))
+                if state:
+                    new_pages[str(number)] = state
+                continue
+            if not_modified:
+                if state:
+                    new_pages[str(number)] = state
+                continue
+
+            listed = True
+            page_had_new = False
             for cid, created_at, parsed in enumerated:
                 if parsed is None:
                     continue
@@ -181,24 +220,36 @@ class LogCache:
                     "created_at": created_at,
                     "comment_url": getattr(parsed, "comment_url", "") or "",
                     "message": message_to_dict(parsed),
+                    "page": number,
                 }
                 existing = by_id.get(cid_int)
                 is_new = existing is None or existing.get("message") != msg_dict["message"] or existing.get("created_at") != created_at
                 if is_new:
-                    had_new_message = True
+                    page_had_new = True
                     by_id[cid_int] = msg_dict
-            if by_id:
-                max_created = max((m["created_at"] for m in by_id.values()), key=lambda t: parse_backend_time(t))
-                max_cid = max(int(m["comment_id"]) for m in by_id.values())
-            else:
-                max_created = last_created
-                max_cid = None
-            if had_new_message:
-                new_etag = None
-            messages_list = sorted(by_id.values(), key=lambda m: int(m["comment_id"]))
-            self.save(ch, cached_entity, str(max_cid) if max_cid is not None else None, max_created, new_etag, messages_list)
-        else:
-            messages_list = list(mirror)
+            page_times = [m["created_at"] for m in by_id.values() if m["page"] == number]
+            page_last = max(page_times, key=parse_backend_time) if page_times else last_created
+            new_pages[str(number)] = {
+                "last_created_at": page_last,
+                "etag": _etag_to_dict(None if page_had_new else new_etag),
+            }
+
+        messages_list = sorted(by_id.values(), key=lambda m: int(m["comment_id"]))
+        if listed:
+            max_cid = max(by_id) if by_id else None
+            max_created = (
+                max((m["created_at"] for m in by_id.values()), key=parse_backend_time) if by_id else None
+            )
+            current = new_pages.get(str(entity.issue)) or {}
+            self.save(
+                ch,
+                {"repo": entity.repo, "issue": entity.issue},
+                str(max_cid) if max_cid is not None else None,
+                max_created,
+                current.get("etag"),
+                messages_list,
+                pages=new_pages,
+            )
 
         msgs_for_query = []
         for m in messages_list:
@@ -222,7 +273,7 @@ class LogCache:
             msgs_for_query.append(msg)
         return msgs_for_query
 
-    def save(self, channel, entity, last_comment_id, last_created_at, etag, messages):
+    def save(self, channel, entity, last_comment_id, last_created_at, etag, messages, pages=None):
         path = self.path_for(channel)
         payload = {
             "version": LOG_CACHE_VERSION,
@@ -232,6 +283,7 @@ class LogCache:
             "last_created_at": last_created_at,
             "etag": _etag_to_dict(etag),
             "messages": messages if messages is not None else [],
+            "pages": pages if pages is not None else {},
         }
         try:
             parent = path.parent
