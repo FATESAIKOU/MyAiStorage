@@ -194,6 +194,19 @@ stdout MUST 只放結果（`channel create`／`channel delete` 印 channel 名�
 - **WHEN** 後端回 HTTP 錯誤（例如 403 次級限制或網路中斷）
 - **THEN** exit 2，stderr 說明狀態碼，不自動重試；輸出裡沒有 token
 
+#### Scenario: 後端回 rate limit 與「這一頁滿了」（#542）
+- **WHEN** `send` 的寫入被後端以 403／429 拒絕，而回應表示是 rate limit（primary 或 secondary）
+- **THEN** exit 2，stderr 說明是 rate limit（含狀態碼與 `not retrying`；有重試時間就帶上），不自動重試
+- **WHEN** `send` 的寫入被拒、不是 rate limit，而且該頁的留言數已達上限（2500）
+- **THEN** exit 2，stderr 說這個 channel 已滿
+- **WHEN** 寫入被拒、不是 rate limit，而該頁留言數在 2400～2499
+- **THEN** exit 2，stderr 說「看起來滿了（或 token 被拒）」
+- **THEN** 這三種訊息都不含 issue 編號、repo 名或 token
+
+#### Scenario: send 前的頁數警告（#542）
+- **WHEN** `send` 之前查到現頁留言數已達 2000
+- **THEN** stderr 印一行警告，`send` 照常進行；查不到頁數（或後端不提供）時不警告也不擋
+
 #### Scenario: HTTP 逾時
 - **WHEN** 後端請求超過逾時（固定 30 秒；`wait` 另受剩餘時間限制）沒有回應
 - **THEN** exit 2，stderr 說明逾時，不自動重試；`wait --timeout N` 不會因為一次卡住的請求而遠超過 N 秒
