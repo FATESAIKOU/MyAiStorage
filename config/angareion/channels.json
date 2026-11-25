@@ -72,6 +72,10 @@
       "backend": "aicompany-channel",
       "issue": 29
     },
+    "team-mylinuxpool-w3-b": {
+      "backend": "aicompany-channel",
+      "issue": 37
+    },
     "team-mylinuxpool-w4": {
       "backend": "aicompany-channel",
       "issue": 30
