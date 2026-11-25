@@ -5,6 +5,7 @@
 - 修訂：
   - 第 2 版（2026-11-25），依非作者審查（Sonnet，H-1、M-1～M-6、L-1～L-9、A-1～A-6）修正。改動對照在 §12。
   - 第 3 版（2026-11-25），依重審（Sonnet，H-1、M-1～M-5、L-1～L-6、A-7～A-9）修正，並同步 PR-1 實作已定的 7 點（不改 PR-1 契約的意義）。改動對照在 §13。
+  - 第 4 版（2026-11-25），依第 2 次重審（Sonnet，M-1～M-3、L-1～L-3、nit-1～3、A-10、A-11）修正；游標改成每頁一份（A-10）。PR-1 的範圍與 C-1～C-5 不動。改動對照在 §14。
 - 範圍：只設計。動到的模組：`backend`、`github`、`state`、`channel_config`、`registry`、`registry_rebuild`、`client`、`log_cache`、`decision_cli`、`cli`；新增 `channel_cli`、`registry_rules`、`rollover`。主 spec（`openspec/specs/angareion/spec.md`、`angareion/channel-config/spec.md`）要補的地方列在 §9，由 PM 決定與撰寫。
 - 實測：只讀。`gh api` 讀得到註冊簿 MyAiStorage#47（2026-11-25 有 52 則留言）。AiCompany-channel 是私有 repo，這台 worker 的 `gh` 讀不到（404），所以各頁的留言數照 issue 本文引用，沒有自己量。沒有對真 GitHub 寫入。
 - 名詞：
@@ -24,12 +25,12 @@
      - 同時開出的第二頁記成旁頁，照樣被讀。
    - 寫入端開新頁前，先在本機用**同一個純函式** `registry_rules.rebuild_channels` 重算註冊簿，所以「已經有人換頁、只是還沒落地」不會再開一頁。
    - 貼完 `rollover` 後**再重算一次**：自己的頁成了旁頁，就改寫贏家那一頁，所以旁頁通常是空的（§1.3）。
-3. **讀者游標的 key 不變，值多一個選填的 `pages`**（讀過、而且還在追蹤的頁）。
+3. **讀者游標的 key 不變，值多一個選填的 `pages`：每一頁自己的游標**（頁號→`{position, at, seen}`；第 4 版，A-10）。
    - 游標的 key 本來就是頻道名（`channel:`／`to:`／`mention:` 加頻道），position 是 GitHub 的 comment id。
-   - 一次讀取把「現頁＋還在寬限期內的退役頁」合在一起，當成同一個實體處理：依 comment id 排序，`advance_cursor` 吃合併後的 entries。
+   - 一次讀取讀「現頁＋還在寬限期內的退役頁」，每一頁用自己的游標照單頁的現行規則讀，回傳的訊息合併後依 comment id 排序。主游標照舊存在，吃合併後的 entries，只用來判斷寬限期、給舊檔與舊版用。
    - **游標沒讀過的頁一律從頭讀**（`pages` 不含它）。這是不丟訊息的關鍵：讀者的設定檔晚到時，它看到的頁集合會變大，新加進來的頁上可能有 id 比游標小的訊息（§2.1、§2.3）。
-   - 讀過的頁某一輪讀失敗而被略過，仍留在 `pages` 裡，並凍結它自己的游標（`held`）；恢復後從凍結處接續，不從頭讀、也不漏（第 3 版，§2.1）。
-   - 跨頁靠 comment id 全站遞增（推論；D4 只依賴同一實體內遞增，跨 issue 是這份設計**新增**的依賴，見 §10）。
+   - 讀過的頁某一輪讀失敗而被略過，它的游標就不動；恢復後從那裡接續，不從頭讀、也不漏（§2.1）。
+   - 每一頁的游標只靠它自己的訊息前進，所以讀取不依賴 comment id 跨 issue 遞增；只有「同一次讀取回傳的訊息跨頁的相對順序」依賴它（§10 第 4 項）。
 4. **寫入端「舊頁先寫滿」**（Q-2，建議）：換頁發生在 2400 則。之後的 24 小時內，新寫者仍寫舊頁，直到 2490 則。
    - 好處：換頁剛落地時，config 還沒拉新的讀者也收得到，不會出現「被 poke 叫醒、讀到空的、又閒下來」。
    - 落地之後，新讀者兩頁都讀。
@@ -102,6 +103,7 @@
 
 - `register` 判斷「同一個實體」只比 `backend`＋`issue`（現頁）。`unregister` 指向現頁時整筆移除（含 `retired`）；指向退役頁是 no-op，並回報。
 - 回報照現行做法貼成註冊簿留言。**引用某一則留言的回報，同一段文字只貼一次**：`Rebuilder.run` 貼之前先看留言串裡有沒有一模一樣的本文，有就不貼（C-25）。
+  - `RebuildSummary.reports` 照舊是這一輪產生的**全部**回報（含沒貼的），新增 `RebuildSummary.posted` 是這一輪**實際貼出**的（重審 nit-1）。既有測試 `fake.posted == summary.reports` 都是第一輪（沒有可去重的），照舊成立；C-25 的測試對兩者分開斷言。
   - 只對「引用某一則留言」的回報去重（`report_text(reason, body)` 的 `body` 不是空的）。這種回報描述的是那則留言本身，留言不變，回報就不變；每次 run 都會再產生一次。
   - 固定文字的回報（`body` 是空的，例如 `the repository file kept changing while writing; this run did not update it`）描述的是這一次 run 發生的事，每次發生都要貼，不去重（重審 L-4）。
   - 現行程式每次 run 都把全部回報再貼一遍（`registry_rebuild.py` 的 `for report in reports: self.api.post_comment(report)`）。這份設計新增了幾種會永久存在的回報（上表的「回報」列），不去重的話，每次觸發與每天的排程都會讓註冊簿多一則。
@@ -163,7 +165,8 @@
 | S-3 | 重算 | 現頁 ≠ P，而且 P 在 `retired` | 回傳重算實體，不開頁 |
 | S-4 | 重算 | 現頁＝P | 待註冊紀錄有 `(C, backend, from=P)` 的頁 N → **不開新頁**，用 N 接著做 S-6；沒有 → `open_page`（標題＝C，本文「continued from #P」），成功後立刻把 N 記進待註冊紀錄 |
 | S-5 | `open_page` | 失敗 | 失敗 |
-| S-6 | `verify_channel(N)` | 失敗 | 失敗；N 留在 backend，沒有註冊。N 來自待註冊紀錄時，同時刪掉那筆紀錄（N 可能已被刪或關，下次重開） |
+| S-6 | `verify_channel(N)` | 回 `False`（404，或標題不是 C） | 失敗；N 留在 backend，沒有註冊。N 來自待註冊紀錄時，同時刪掉那筆紀錄（N 確定不能用，下次重開） |
+| S-6′ | `verify_channel(N)` | 丟 `BackendError`（網路、5xx、rate limit 等暫時性錯誤） | 失敗；**待註冊紀錄保留**，下次再驗同一頁（重審 L-2） |
 | S-7 | `post_with_retries(rollover_comment(C, backend, N, P))` | 失敗 | 失敗（「opened a new page but could not register it」）；N 上 0 則訊息；待註冊紀錄保留，下一次 S-4 重試註冊同一頁 |
 | S-8 | 貼成功 → **事後重算**：再讀一次註冊簿，把自己貼出的那則（`post_with_retries` 回傳的留言：`id`、`created_at`、`author_association`）併進去（同 id 去重） | 讀成功 | 刪掉待註冊紀錄；回傳重算實體：N 是現頁就是 N；N 成了旁頁就是贏家的實體，N 保持空的 |
 | S-9 | 事後重算 | 讀失敗 | 刪掉待註冊紀錄；用 S-1 的留言加上自己那則重算，回傳（N 是現頁） |
@@ -188,7 +191,7 @@
   - 紀錄的 `backend` 或 `from` 與這一次不同 → 當作沒有紀錄，並覆寫（舊的那張成為孤兒）。
   - S-3（別人已經換頁）→ 刪掉 C 的紀錄；紀錄裡那張頁成為孤兒（最多一張）。
   - 紀錄檔讀不出或寫不進 → 當作沒有紀錄，stderr 不另外警告，照常往下做（失去的只是上界，不影響正確性）。
-- 上界：同一個身分、同一個 `(C, P)`，孤兒頁最多 1 張；狀態目錄遺失（例如容器重建）時，每遺失一次最多再多 1 張。多個身分各自計。
+- 上界：同一個身分、同一個 `(C, P)`，孤兒頁最多 1 張，外加每一次「確定不能用」（S-6 回 `False`：頁被刪、或標題被改）各 1 張；暫時性錯誤不刪紀錄（S-6′），不增加孤兒頁；狀態目錄遺失（例如容器重建）時，每遺失一次最多再多 1 張。多個身分各自計。
 - 為什麼不在 backend 上找「標題＝C 而沒註冊的頁」來重用：要列出 repo 的 issue（數百張、多頁），每次 S-4 都要付；而且找到的頁可能是別的寫者正要註冊的，重用會造成兩個寫者註冊同一頁。本機紀錄只重用自己開的頁。
 - 為什麼放 `state.py`：狀態目錄的檔案、鎖與原子寫入都在那裡；`state` 只存取、不解讀（`rollover` 決定何時用它）。
 
@@ -232,70 +235,73 @@ A、B 是兩個 ≥PR-3 的寫者，P 在 2400 以上；「讀者」是 ≥PR-2 
 
 - `state.py` 的游標以「目標 key」為準：`channel:<C>`、`to:<我>:<C>`、`mention:<我>:<C>`。值是 `{position, at, seen}`，position＝comment id。
   - key 裡沒有 issue 編號，所以**換頁不必搬游標**。
-- **新增選填的 `pages`**：這個游標讀過、而且還在追蹤的頁（issue 編號的陣列，遞增排序）。
-  - `Cursor.pages: tuple[int, ...] | None`，`None`＝舊檔沒有這個鍵。
-  - 語意是「這一頁上 position 以前的訊息已經送過」，不是「上一輪讀成功的頁」（第 3 版改；第 2 版的寫法會讓暫時讀不到的頁在恢復後整頁重送，重審 H-1）。
-  - 舊版只讀 `position`／`at`／`seen`（`state.py` 的 `_load`），看到多出來的鍵會忽略。舊版的 `save_many` 會把檔案裡**每一個** key 重新序列化成三欄，所以舊版存任何一個 target，整個檔案所有 key 的 `pages` 都會丟掉，下一次新版讀到就當作 `None`（重審 L-1，範圍見 §6.2 的「同一身分不得有未升級的安裝」）。
+- **新增選填的 `pages`：每一頁自己的游標**（第 4 版改；裁定 A-10，§8.4）。
+  - `Cursor.pages: dict[int, Cursor] | None`，鍵是 issue 編號，值是那一頁的游標（`position`／`at`／`seen` 三欄，它自己的 `pages` 恆為 `None`）。`None`＝舊檔沒有這個鍵。
+  - 語意：鍵 p 在 `pages` 裡＝「p 上、`pages[p]` 以前的訊息已經送過」。鍵不在＝這個游標沒讀過 p。
+  - 頁的游標用的就是單頁的現行三個函式（`cursor_since`、`comment_is_new`、`advance_cursor`），不另立規則。`advance_cursor` 吃的 entries 是那一頁上**所有可解析的訊息**（不只符合 scope 的，`github.read` 現行就是這樣），所以每一頁的游標只靠它自己的訊息前進，不依賴別頁，也不依賴跨 issue 的 id 遞增（§10 第 4 項）。
+  - **主游標**（`position`／`at`／`seen`）照舊存在，＝`advance_cursor(上一個主游標, 各頁 entries 的聯集)`。用途只有三個：`pages_to_read` 的寬限判斷（`cursor.at`）、`pages` 是 `None` 時每一頁的起點、舊版讀檔（舊版只看這三欄）。
+  - 舊版只讀 `position`／`at`／`seen`（`state.py` 的 `_load`），看到多出來的鍵會忽略。舊版的 `save_many` 會把檔案裡**每一個** key 重新序列化成三欄，所以舊版存任何一個 target，整個檔案所有 key 的 `pages` 都會丟掉，下一次新版讀到就當作 `None`（範圍見 §6.2 的「同一身分不得有未升級的安裝」）。
 - 要讀哪幾頁：`backend.pages_to_read(entity, cursor) -> tuple[Entity, ...]`，純函式，回傳**單頁實體**（`page_entity`，`retired=()`）：
   - 現頁一定讀；
-  - 退役頁 r（含旁頁）在 `cursor.at is None` 或 `cursor.at < r.until + RETIRED_READ_GRACE` 時才讀；
+  - 退役頁 r（含旁頁）在 `cursor.at is None` 或 `cursor.at < r.until + RETIRED_READ_GRACE` 時才讀（`cursor` 是主游標）；
   - 順序：退役頁（舊的在前）再現頁。
   - `--since`（只有 `at` 的游標）用同一條規則，所以 `--since` 早於換頁時會讀到舊頁。
-- **怎麼讀每一頁**（`backend.read` 裡，C-23）：
-  - 游標有 position，而且 `pages` 不是 `None`、不含這一頁 → **從頭讀**：不帶 `since`、不比 position，這一頁上符合 scope 的訊息全部算新的。
-    - 理由：這個游標從沒讀過這一頁，上面的訊息不可能送過。
-    - 頁在寫入前一定已經註冊（§1.3），所以從頭讀就是從註冊後的第一則讀起。
-  - 這一頁在游標的 `held` 裡（下面）→ 用 `held` 裡那一頁自己的游標，照單頁規則讀。
-  - 其他情況（`pages` 含它、`pages` 是 `None`、新游標、`--since`）→ 照單頁的現行規則。
-  - 讀完：`advance_cursor(prev, 各頁 entries 的聯集)`（從頭讀與 `held` 的那幾頁的 entries 也要併進去），再把 `pages` 與 `held` 設成 `pages_after_read(...)` 的結果（下一點）。沒有新 entries 也要更新：`advance_cursor` 在 entries 空時回傳 `previous`，要另外產生帶新 `pages`／`held` 的 `Cursor`。
-- **`pages` 的更新規則**（重審 H-1、A-7）：`backend.pages_after_read(prev, to_read, read_ok, skipped) -> tuple[tuple[int, ...], tuple[HeldPage, ...]]`，純函式，與 `pages_to_read` 放在一起；`backend.read` 是唯一的呼叫者。`prev` 是上一個游標。
-  - `pages_new = ((prev.pages ∩ skipped) ∪ read_ok) ∩ to_read`，`prev.pages` 是 `None` 時當作空集合。
-  - 讀成功的頁 → 加入（或保留）。
-  - **讀過、本輪被略過**（C-22）→ 保留，而且**凍結這一頁自己的游標**（`held`，下一點）。恢復之後用凍結的游標照單頁規則接續，已送過的不再送，略過期間新到的照樣送。
-  - **從沒讀過、本輪被略過** → 不加入。恢復之後從頭讀。
-  - 不在 `to_read` 的頁（游標過了寬限期，或已不在設定檔）→ 移除（`held` 一起移除）。游標時間只會前進（`--since` 不存游標），所以移除的頁不會再回到 `to_read`。
-  - 一次 `read` 裡任何一頁往外丟錯（現頁的任何錯誤、退役頁的 rate limit／網路／5xx），整次 `read` 失敗、游標不存，`pages`／`held` 也不變（照現行「讀失敗不動游標」）。
-- **`held`：被略過的已讀頁凍結的游標**（第 3 版新增；只靠 `pages` 的保留還不夠）：
-  - 為什麼要：略過的那一輪，主游標照樣被其他頁推進（position 變大、`at` 變晚）。R 在略過期間新到的訊息，id 可能比新的 position 小、時間早於新的 `at-60s`；恢復後若用主游標比，`comment_is_new` 判成舊的、`cursor_since` 也不會把它列出來，就漏了。例：R 在 10:00 收到 r1；10:05 讀者讀（R 404，讀到 N 在 10:04 的 n1，主游標到 10:04）；10:10 R 恢復，用主游標讀 R 是 `since=10:03`，r1 不在列表裡。
-  - 形狀：`Cursor.held: tuple[HeldPage, ...]`，`HeldPage(issue, position, at, seen)`；檔案裡是選填的 `"held": [{"issue": 28, "position": "…", "at": "…", "seen": [...]}]`，沒有就是空的。
-  - 規則（同在 `pages_after_read`）：
-    - 讀過、本輪被略過的頁 p：`prev.held` 已有 p → 照舊（最早那次凍結才是 p 最後一次讀成功的位置）；沒有 → 凍結 `prev` 主游標的 `position`／`at`／`seen`。`prev.pages` 含 p 而 `prev.held` 沒有 p，表示產生 `prev` 的那一輪 p 讀成功，所以 `prev` 主游標對 p 是正確的下界。
-    - 本輪讀成功的頁 → 從 `held` 移除（回到主游標）。
-    - 不在 `pages_new` 的頁 → 從 `held` 移除。
-  - 讀 `held` 裡的頁：列表的 `since` 與 `comment_is_new` 都用凍結的游標；entries 照樣併進主游標的 `advance_cursor`（主游標取最大 id，不會倒退）。
-  - 凍結期間主游標過了 `until+48h`，那一頁就不再讀（與 §2.3 第 2 項「整個寬限期讀不到」同一個已知風險）。
-  - 舊版讀檔忽略 `held`，存檔時會丟掉（同 `pages`，§6.2 的「同一身分不得有未升級的安裝」）。
-- `pages` 是 `None` 的舊游標，只會出現在升級的那一刻，或同一身分被未升級的安裝存過游標（§6.2 禁止）。手動換頁與 PR-3 都要等所有席位升級（§6.2），所以升級時頻道只有一頁，`None` 等於「讀過現頁」，不會誤判。
-- 為什麼寬限期用游標而不用本機時鐘：D4 只讓後端時間決定新舊。讀者的游標時間過了 `until+48h`，就表示它已經讀到換頁兩天之後的訊息；而退役頁的寫入都在 `until+24h` 之前（§1.3 的 W-1），早已被讀過。
-- 沒有新訊息的冷頻道，游標停在換頁前，會一直多讀一頁。代價是每次讀多一個請求，直到下一則訊息出現；可以接受。
+- **每一頁的起點**：`backend.page_base(cursor, issue) -> Cursor`，純函式，讀與 `check` 都用它（C-10、C-11）：
+  - `cursor.pages` 不是 `None`、含這一頁 → `cursor.pages[issue]`；
+  - `cursor.pages` 不是 `None`、不含這一頁 → `Cursor()`（空游標）；
+  - `cursor.pages` 是 `None`（舊檔、新游標、`--since`）→ 主游標本身（去掉 `pages`）。
+  - 每一頁照**單頁的現行規則**用它的起點讀：`since=cursor_since(起點)`、新不新由 `comment_is_new(…, 起點)` 決定。
+- **從頭讀**：起點是空游標（`position` 與 `at` 都是 `None`）的頁。三種來源：沒讀過的頁（`pages` 不含它）、讀過但上面還沒有任何訊息的頁（新頁）、新游標（`pages` 是 `None` 而主游標是空的）。單頁現行規則對空游標本來就是「不帶 `since`、全部算新」，所以讀的時候不必另寫一條路徑；`check` 對這種頁另有掃描窗（§2.2）。
+  - 理由：這個游標從沒讀過這一頁，上面的訊息不可能送過。頁在寫入前一定已經註冊（§1.3），所以從頭讀就是從註冊後的第一則讀起。
+  - 新身分的廣播下限（#224）：同一次 `read` 的所有頁共用同一個 `floor`，取第一個列表回應的 `Date`（重審 L-3）；不是每頁各取一個。
+- **讀完的更新**（重審 H-1、M-1、A-7、A-10）：`backend.pages_after_read(prev, to_read, entries_by_page) -> dict[int, Cursor]`，純函式，與 `pages_to_read`、`page_base` 放在一起；`backend.read` 是唯一的呼叫者。
+  - `entries_by_page` 只含本輪**讀成功**的頁（值可以是空的 list）；被略過的頁不在裡面。
+  - 結果＝`{p: advance_cursor(page_base(prev, p), entries_by_page.get(p, [])) for p in to_read}`。這一行涵蓋全部情況：
+    - 讀成功 → 那一頁的游標照單頁規則前進（`advance_cursor` 在 entries 空時回傳原值）；
+    - **被略過** → 照舊，也就是自然凍結在最後一次讀成功的位置。恢復後從那裡接續：已送過的不再送，略過期間新到的照樣送；
+    - 被略過、而且從沒讀過 → 存成空游標，恢復後從頭讀（與不存等價）；
+    - **`prev.pages` 是 `None` 時被略過** → 存成 `prev` 的主游標（`page_base` 的第三種），與讀取時「每一頁都以主游標為起點」一致，恢復後不整頁重送（重審 M-1）；
+    - 不在 `to_read` 的頁（主游標過了寬限期，或已不在設定檔）→ 不在結果裡，等於移除。主游標時間只會前進（`--since` 不存游標），所以移除的頁不會再回到 `to_read`。
+  - 新游標＝`dataclasses.replace(advance_cursor(prev, 各頁 entries 的聯集), pages=pages_after_read(...))`。沒有新 entries 也要換上新的 `pages`（`advance_cursor` 在 entries 空時回傳 `previous`，帶的是舊的 `pages`）。
+  - 一次 `read` 裡任何一頁往外丟錯（現頁的任何錯誤、退役頁的 rate limit／網路／5xx），整次 `read` 失敗、游標不存，`pages` 也不變（照現行「讀失敗不動游標」）。
+  - 單頁頻道：`pages` 恆為 `{現頁: 與主游標相同的值}`，每一次讀的請求與回傳和 PR-2 之前相同（第一次讀時 `pages` 是 `None`，起點就是主游標；之後起點是 `pages[現頁]`，兩者一起前進、值相同）。
+- **序列化**（裁定 A-11，§8.4；重審 M-2、nit-3）：
+  - `pages` 是 `None` → 不寫 `pages` 鍵（`test_angareion_state.py` 那些只存 `Cursor()` 的測試照舊）；
+  - 否則寫 `"pages": {"<issue>": {"position": …, "at": …, "seen": [...]}}`：鍵是十進位字串、依數值遞增；值與主游標同一種三欄格式（`None` 照主游標現行寫成 `null`）。
+  - 讀檔的壞資料一律「當作沒有」：`pages` 不是物件 → `None`；某一筆的鍵不是正整數字串、或值不是物件 → 丟掉那一筆（那一頁從頭讀）；某一筆的 `seen` 照主游標現行的防禦（非字串項丟掉、不是 list 就空）。不報錯、不警告。
+- `pages` 是 `None` 的舊游標，只會出現在升級的那一刻，或同一身分被未升級的安裝存過游標（§6.2 禁止）。手動換頁與 PR-3 都要等所有席位升級（§6.2），所以升級時頻道只有一頁，`None` 等於「讀過現頁、讀到主游標」，不會誤判。
+- 為什麼寬限期用游標而不用本機時鐘：D4 只讓後端時間決定新舊。讀者的主游標時間過了 `until+48h`，就表示它已經讀到換頁兩天之後的訊息；而退役頁的寫入都在 `until+24h` 之前（§1.3 的 W-1），早已被讀過。
+- 沒有新訊息的冷頻道，主游標停在換頁前，會一直多讀一頁。代價是每次讀多一個請求，直到下一則訊息出現；可以接受。
+- 例（第 3 版 `held` 要解的情況，在這一版自然成立）：R 在 10:00 收到 r1；10:05 讀者讀（R 404，讀到 N 在 10:04 的 n1，主游標到 10:04）；10:10 R 恢復。R 的游標在 10:05 那一輪沒動，仍是 r1 之前的位置，所以用它讀 R 會拿到 r1；主游標的前進不影響 R。
 
 ### 2.2 各介面
 
 | 介面 | 跨頁行為 |
 |---|---|
-| `read`（`backend.read`） | 對 `pages_to_read` 的每一頁，照 §2.1 的規則列表，把 entries 與符合的訊息合併。訊息依 comment id 排序（同一頻道內＝到達順序）。`--since` 照舊不動游標。新身分的廣播下限取第一個回應的 `Date`（#224） |
-| 讀退役頁失敗 | 404、410、或不是 rate limit 的 403 → 略過這一頁，stderr 一行警告；`pages` 照 §2.1 的規則：讀過的頁保留並凍結自己的游標（`held`；恢復後從凍結處接續，不重送、不漏），沒讀過的頁不加入（恢復後從頭讀）。其他錯誤（rate limit、網路、5xx）照舊往外丟。現頁的任何錯誤照舊往外丟（C-22） |
-| `wait`／`check` | 任一頁有新訊息就是 True。沒讀過的頁上，有任何符合 scope 的留言就是 True。ETag 與 `scan_since` 的 key 改成每頁一份（`repo#issue\|scope`，就是現在的 `_etag_key` 套在頁上），單頁的條件請求規則不變。退役頁在 `since=at-60s` 下通常是空的、不滿一頁，所以 ETag 可以存，之後是 304。讀退役頁失敗時，照上一列略過，但不警告（`wait` 每 15 秒一次）。`wait` 輪詢中仍不 fetch（spec）。`held` 裡的頁用凍結的游標判斷。沒讀過的頁的掃描成本見下面 |
+| `read`（`backend.read`） | 對 `pages_to_read` 的每一頁，以 `page_base` 為起點照單頁規則列表，把符合的訊息合併，依 comment id 排序（同一頻道內＝到達順序）。各頁的 entries 分頁記下（`pages_after_read`），聯集推進主游標。`--since` 照舊不動游標。新身分的廣播下限：同一次 `read` 的所有頁共用一個，取第一個列表回應的 `Date`（#224、重審 L-3） |
+| 讀退役頁失敗 | 404、410、或不是 rate limit 的 403 → 略過這一頁，stderr 一行警告；那一頁的游標不動（§2.1 的 `pages_after_read`）：讀過的頁恢復後從原處接續（不重送、不漏），沒讀過的頁恢復後從頭讀。其他錯誤（rate limit、網路、5xx）照舊往外丟。現頁的任何錯誤照舊往外丟（C-22） |
+| `wait`／`check` | 每一頁以 `page_base` 為起點照單頁規則判斷，任一頁有新訊息就是 True（從頭讀的頁上，有任何符合 scope 的訊息就是 True）。ETag 與 `scan_since` 的 key 改成每頁一份（`repo#issue\|scope`，就是現在的 `_etag_key` 套在頁上），ETag 紀錄裡的 `cursor` 是那一頁的起點，單頁的條件請求規則不變。每一頁的起點只在那一頁有新訊息時才變，所以別頁前進不會讓這一頁的 ETag 紀錄失效。退役頁在 `since=at-60s` 下通常是空的、不滿一頁，所以 ETag 可以存，之後是 304。讀退役頁失敗時，照上一列略過，但不警告（`wait` 每 15 秒一次）。`wait` 輪詢中仍不 fetch（spec）。從頭讀的頁的掃描成本見下面 |
 | 「給我」／「@ 我」跨頻道合併 | `client.Angareion.read` 照舊依 `(messages.received_at_key(received_at), channel, id)` 排序（D-31）。同一頻道內跨頁依 comment id，兩者一致：同一頻道的時間與 id 同向，同秒內由 id 決勝，與單頁相同 |
 | `log` | `LogCache` v3：同一個頻道一個檔，`pages: {"<issue>": {last_created_at, etag}}`，**所有頁**（現頁＋全部退役頁，不看寬限期），訊息以 comment id 合併。v2 檔整份重建（照 #468 升版的先例）；`repo` 變了也重建；不在 entity 裡的頁，它的訊息丟掉。`enumerate_conditional` 的介面不變，由 `LogCache` 逐頁呼叫（每頁一個單頁實體）。退役頁讀失敗照 C-22 略過並警告 |
 | `decision list` | 經 `LogCache.sync`，自動看到全部的頁 |
 | `decision ask`／`update`／`submit`… | 寫入走 `PageWriter`（§1.3） |
 
-**`check` 對沒讀過的頁的請求數上界**（重審 M-1、A-9）：
+**`check` 對從頭讀的頁的請求數上界**（重審 M-1、A-9；第 4 版加上新游標，重審 M-3）：
 
-- 問題：`check` 不存游標，所以不更新 `pages`。沒讀過的頁每次都從頭掃；現行的 `_scan_since` 只在找到符合 scope 的留言時才設，頁上全是給別人的訊息時就一直沒有掃描窗。一張 2000 則的頁，每 15 秒 20 個請求，直到有人跑 `read`。
-- 規則：**只對「從頭讀」模式的頁**，第一次整頁掃描乾淨（沒有符合 scope 的新留言）之後，把這一頁**所有留言**（不論是否符合 scope）中最新的 `created_at` 減 60 秒記進 `_scan_since[該頁的 key]`。之後同一個行程的 `check` 對這一頁用 `since=scan_since`，回應通常只有幾則或是空的。
+- 問題：`check` 不存游標，所以不更新 `pages`。從頭讀的頁（§2.1：起點是空游標的頁，包括沒讀過的頁與**新游標**的每一頁）每次都從頭掃；現行的 `_scan_since` 只在找到符合 scope 的留言時才設，頁上全是給別人的訊息時就一直沒有掃描窗。一張 2000 則的頁，每 15 秒 20 個請求，直到有人跑 `read`。新游標（從沒 `read` 過的身分做 `wait`）會對每一張退役頁這樣掃（`cursor.at is None` 時全部退役頁都在 `to_read`），請求數乘上頁數。
+- 規則：**只對「從頭讀」模式的頁**（起點的 `position` 與 `at` 都是 `None`），第一次整頁掃描乾淨（沒有符合 scope 的新訊息）之後，把這一頁**所有可解析的訊息**（不論是否符合 scope；與 `read` 推進游標的 entries 同一個集合，非訊息的留言不算，重審 nit-2）中最新的 `created_at` 減 60 秒記進 `_scan_since[該頁的 key]`。之後同一個行程的 `check` 對這一頁用 `since=scan_since`，回應通常只有幾則或是空的。頁上一則訊息都沒有（新開的頁）時沒有窗，但整頁掃描就是一個空回應。
 - 上界：同一個行程裡，對一張沒讀過、n 則的頁連續 `check` k 次（中間沒有新留言），請求數 ≤ ⌈n/100⌉ ＋ (k−1)。行程重啟後 `_scan_since` 是空的（它本來就只在記憶體），再付一次整頁。
 - 為什麼不違反 D2 的掃描窗前提（A-9 的裁定）：
   - 單頁規則（讀過的頁）的 `_scan_since` 不改：仍只由符合 scope 的留言推動。
   - 從頭讀模式下，`scan_since` 的唯一作用是讓 `check` 少掃；它不進游標，`read` 也不看它（`read` 對沒讀過的頁一律從頭讀）。掃描窗若因複寫延遲超過 60 秒而漏看一則較早的留言，結果只是 `check` 晚一點回 True（下一則新留言、或下一次 `read` 就會讀到），不會丟訊息。
-  - 用「所有留言」而不是「符合 scope 的留言」推動窗：窗的作用是「這個時刻以前的都掃過了」，與 scope 無關；只用符合 scope 的留言推動，正是這個問題的起因。
-  - 這一頁一旦被 `read` 讀過（進了 `pages`），就回到單頁規則。兩種模式的 `_scan_since` 與 ETag 用不同的 key（從頭讀模式在頁的 key 後面加 `|unread`），所以從頭讀模式推動的窗不會被單頁規則拿去用。
+  - 用「所有可解析的訊息」而不是「符合 scope 的訊息」推動窗：窗的作用是「這個時刻以前的都掃過了」，與 scope 無關；只用符合 scope 的留言推動，正是這個問題的起因。
+  - 這一頁一旦被 `read` 讀到訊息（起點不再是空游標），就回到單頁規則。兩種模式的 `_scan_since` 與 ETag 用不同的 key（從頭讀模式在頁的 key 後面加 `|unread`），所以從頭讀模式推動的窗不會被單頁規則拿去用。
+  - 單頁頻道的新游標也走從頭讀模式：第一次 `check` 的請求與結果和現行相同；同一個行程的第二次起帶 `since=scan_since`（現行是每次整頁掃）。這是行為上唯一的單頁差異，只少請求、不改結果（C-11）。
 
 ### 2.3 去重與順序（為什麼不會重送、不會漏）
 
 - 同一則留言只在一頁上，comment id 全域唯一，所以合併後不會重複。
-- 跨頁的「晚到」（舊頁上 id 較小、較晚才看得到的留言），由 `at - 60s` 的視窗與 `seen` 接住，與單頁的複寫延遲同一套。前提是同一次讀取同時列了兩頁，所以 entries 是合併的。
+- 每一頁的「晚到」（那一頁上 id 較小、較晚才看得到的留言），由那一頁自己游標的 `at - 60s` 視窗與 `seen` 接住，與單頁的複寫延遲同一套；不依賴別頁，也不依賴跨 issue 的 id 遞增（第 4 版）。
 - 讀者看到的頁集合變大（設定檔晚到、旁頁晚一步進設定檔）：新加進來的頁從頭讀（§2.1），所以上面 id 比游標小的訊息不會被跳過（§1.4 的 I-2、I-9）。
 - **會漏的情況**（已知風險，都列在 §11）：
   1. **設定檔過期的舊版寫者**（<PR-3，`config_pull_interval=0`，或 git fetch 一直失敗）在退役頁的 `until+24h` 之後還寫舊頁。
@@ -304,7 +310,7 @@ A、B 是兩個 ≥PR-3 的寫者，P 在 2400 以上；「讀者」是 ≥PR-2 
      - 手動或強制換頁（`channel rollover`）可以在更低的則數發生，那時沒有上限。
      - 緩解：部署前提（§6.2：每個席位的 `config_pull_interval` 不是 0，而且 ≤6 小時）；偵測：`channel status` 的 `late` 旗標（C-26）。
      - ≥PR-3 的寫者不會這樣漏：W-8／W-9 會拿到重算實體（I-8）。例外是手動換頁時 P 還不到 2400，這時它們也只靠部署前提。
-  2. **退役頁讀不到**（404／410／非 rate-limit 403）整個寬限期：那一頁略過，上面的未讀訊息讀不到。頁恢復之後，只要游標還在寬限期內就會補回：讀過的頁照單頁規則接續（只補略過期間新到的），沒讀過的頁從頭讀（§2.1 的 `pages_after_read`）。兩種都不重送。
+  2. **退役頁讀不到**（404／410／非 rate-limit 403）整個寬限期：那一頁略過，上面的未讀訊息讀不到。頁恢復之後，只要主游標還在寬限期內就會補回：讀過的頁從它自己沒動過的游標接續（只補略過期間新到的），沒讀過的頁從頭讀（§2.1 的 `pages_after_read`）。兩種都不重送。
   3. **舊版讀者**（<PR-2）：只讀現頁。由部署前提擋住（§6.2）。
   - `log --channel C` 讀所有頁、不看游標，所以 1、2 的訊息照樣查得到。
 
@@ -398,7 +404,7 @@ PR-1 的範圍與契約到此已定，不依賴 PR-2／PR-3 的任何細節：
 
 - **能力標記**：PR-2 起新增旗標 `angareion --capabilities`：stdout 恰好一行，是空白分隔的能力字樣（PR-2：`paged-read`；PR-3：`paged-read paged-write`），exit 0。
   - 能力字樣只增不改。常數放 `cli.py`（`CAPABILITIES`），測試鎖住這一行的格式。
-  - `--version` 不變（仍是一行）。第 2 版把能力放在 `--version` 的第二行，會讓既有的 `test_angareion_version.py`（`out.count("\n") == 1`、整段只有一行的 regex）轉紅，與 C-15 的「既有測試不弱化」矛盾（重審 M-3）。改成獨立旗標，既有測試與 spec 的 `--version` 都不動；舊版跑 `--capabilities` 是 argparse 的用法錯誤（exit 2），盤點時直接判成「沒升級」，不會誤判。
+  - `--version` 不變（仍是一行）。第 2 版把能力放在 `--version` 的第二行，會讓既有的 `test_angareion_version.py`（`out.count("\n") == 1`、整段只有一行的 regex）轉紅，與 C-15 的「既有測試不弱化」矛盾（重審 M-3）。改成獨立旗標，既有測試與 spec 的 `--version` 都不動；舊版跑 `--capabilities` 是用法錯誤，exit 非 0（現行是 1：`cli._Parser.error` 改丟 `UsageError`，`main` 轉成 `EXIT_USAGE`；重審 L-1），盤點只認「exit 0 而且輸出含 `paged-read`」，不看結束碼的值，不會誤判。
   - 理由：套件版本固定是 `0.1.0`，非 editable 安裝時 sha 是 `unknown`；遠端席位也沒有 repo 可以做 `merge-base`。所以「≥PR-2 的 commit」在機制上判斷不了，要一個明確的標記。
 - **盤點規則**：以「安裝」為單位（不是以身分）：每台機器、每個 worker 映像，各有一份 angareion。
   - 名單：Mac（PMO 與 Mac 上的 PM）、每一台 worker（PM 與隊員共用映像裡的 angareion）、其他會呼叫 angareion 的程式（aicomm、pmo）所在的機器。
@@ -406,7 +412,7 @@ PR-1 的範圍與契約到此已定，不依賴 PR-2／PR-3 的任何細節：
     - 跑 `angareion --capabilities`，exit 0 而且輸出含 `paged-read`；
     - angareion 設定檔的 `config_pull_interval` 不是 0，而且 ≤21600（6 小時，遠小於 `PAGE_FILL_WINDOW`）。
   - 盤點不到的一份，當作沒升級。
-  - **同一個身分不得有未升級的安裝**（重審 L-1）：舊版存游標時會洗掉整個游標檔所有 key 的 `pages` 與 `held`（§2.1），已換頁頻道的游標就會回到 `None`、照單頁規則讀，I-2／I-9 的保護失效（只會漏，不會重送）。所以盤點除了每一份安裝，還要確認每個身分（`ANGAREION_IDENTITY`）用到的狀態目錄只被已升級的安裝寫入；同一個狀態目錄被兩份安裝共用時，兩份都要升級。
+  - **同一個身分不得有未升級的安裝**（重審 L-1）：舊版存游標時會洗掉整個游標檔所有 key 的 `pages`（§2.1），已換頁頻道的游標就會回到 `None`、每一頁都以主游標為起點讀，I-2／I-9 的保護失效（只會漏，不會重送）。所以盤點除了每一份安裝，還要確認每個身分（`ANGAREION_IDENTITY`）用到的狀態目錄只被已升級的安裝寫入；同一個狀態目錄被兩份安裝共用時，兩份都要升級。
   - worker 映像裡的 angareion 怎麼安裝、跟 main 的哪一版，我沒查；由 PMO 經映像的工單確認。
 - **誰盤點**：PMO。
   - 各 worker 由該機的 PM 跑指令回報，結果貼在換頁的工單（手動換頁）或 PR-3 的 PR（merge 前）。
@@ -477,17 +483,22 @@ PR-1 的範圍與契約到此已定，不依賴 PR-2／PR-3 的任何細節：
   - 每個元素是 `retired=()` 的單頁實體。
   - 純函式，不碰網路。
 - **C-10** `read`（GitHub、Fake）：
-  - 回傳的訊息是 `pages_to_read` 各頁中符合 scope 的新訊息的聯集，依 comment id 遞增。
-  - 游標＝`advance_cursor(prev, 各頁 entries 的聯集)`，`pages`／`held`＝`pages_after_read(prev, to_read, read_ok, skipped)`（§2.1）；`--since` 不動游標；新身分廣播的下限取第一個列表回應的 `Date`。
-  - `pages_after_read` 是純函式，單元測試逐條：讀成功加入（並移出 `held`）、讀過被略過保留並凍結 `prev` 的主游標、已凍結的再被略過保留**最早**的凍結、沒讀過被略過不加入、不在 `to_read` 移除（`held` 一起）、`prev.pages=None` 當空集合。
-  - 只有一頁、游標 `pages` 是 `None` 或只含現頁時，請求與回傳的訊息和 PR-2 之前相同（既有測試不改預期）。
+  - 回傳的訊息是 `pages_to_read` 各頁中符合 scope 的新訊息的聯集，依 comment id 遞增；每一頁的「新」以 `page_base(prev, 該頁)` 為起點照單頁規則判斷。
+  - 游標＝`advance_cursor(prev, 各頁 entries 的聯集)` 換上 `pages=pages_after_read(prev, to_read, entries_by_page)`（§2.1）；`--since` 不動游標；新身分廣播的下限：同一次 `read` 的所有頁共用第一個列表回應的 `Date`（L-3；測試：兩頁、兩個回應的 `Date` 不同，兩頁上同時刻的廣播判定相同）。
+  - `page_base` 與 `pages_after_read` 是純函式，單元測試逐條：
+    - `page_base`：`pages` 含該頁 → 那一頁的游標；`pages` 不含 → `Cursor()`；`pages` 是 `None` → 主游標（不帶 `pages`）。
+    - `pages_after_read`：讀成功 → `advance_cursor(起點, 該頁 entries)`（entries 空時＝起點）；讀過的頁被略過 → 原值不變；沒讀過的頁被略過 → `Cursor()`；**`prev.pages=None` 時被略過 → `prev` 的主游標**（M-1）；不在 `to_read` → 不在結果裡；結果的鍵恰好是 `to_read` 的頁。
+  - 只有一頁時，游標 `pages` 是 `None` 或 `{現頁: …}`，請求與回傳的訊息都和 PR-2 之前相同；存下的游標多一個 `pages` 鍵，值與主游標相同（既有測試只有 C-15 列出的斷言要改）。
 - **C-11** `check`：
   - 任一頁有新訊息 → True；
   - 游標沒讀過的頁上有符合 scope 的留言 → True；
   - ETag 紀錄與 `scan_since` 以頁為 key（`repo#issue|scope`；從頭讀模式另加 `|unread`），某頁的 304 不替另一頁回答；
-  - **請求數上界**（§2.2）：同一個 `GitHubIssuesBackend` 物件，對一張沒讀過、n＝250 則（3 個列表分頁）而且全都不符合 scope 的頁連續 `check` 5 次 → 都是 False，GitHub 假 transport 記到的請求數 ≤ 3＋4；第 2 次起的 URL 帶 `since`。改壞驗證：拿掉「從頭讀模式以所有留言推動 `_scan_since`」→ 請求數變成 15，測試失敗。
-  - 讀過的頁的 `_scan_since` 仍只由符合 scope 的留言推動（現行測試不改預期）；
-  - 單頁時與現行相同。
+  - **請求數上界**（§2.2）：同一個 `GitHubIssuesBackend` 物件，對一張沒讀過、n＝250 則（3 個列表分頁）而且全都不符合 scope 的頁連續 `check` 5 次 → 都是 False，GitHub 假 transport 記到的那一頁的請求數 ≤ 3＋4；第 2 次起的 URL 帶 `since`。改壞驗證：拿掉「從頭讀模式以所有可解析的訊息推動 `_scan_since`」→ 請求數變成 15，測試失敗。
+  - **新游標**（M-3）：游標是 `Cursor()`，實體有一張同樣 250 則、全不符合 scope 的退役頁 R 與一個空的現頁，連續 `check` 5 次 → 都是 False，R 的請求數 ≤ 3＋4。改壞驗證：從頭讀模式只認「`pages` 不含這一頁」、不認新游標 → R 的請求數變成 15。
+  - 頁上只有非訊息的留言（`parse_message` 失敗）時不推動窗（nit-2）。
+  - 起點不是空游標的頁，`_scan_since` 仍只由符合 scope 的留言推動（現行測試不改預期）；
+  - **別頁前進不讓 ETag 失效**：游標 `pages={R: cR, N: cN}`，第一次 `check` 存下 R 的 ETag；N 上有新訊息、`read` 之後（`cN` 前進、`cR` 不變）再 `check` → R 的請求帶 `If-None-Match`。
+  - 單頁時與現行相同，唯一的差別是新游標（`Cursor()`）走從頭讀模式：同一個行程第二次起的 `check` 帶 `since`，ETag 與 `scan_since` 的 key 多 `|unread`。讀碼沒找到鎖住這兩者的既有測試；實作時若有，只能改 key 字串或第二次起的 URL，照 C-15 逐一列出。
 - **C-12** 接續（情境測試，Fake 與 GitHub 假 transport 各一）：
   - 讀者讀到舊頁第 k 則 → 換頁 → 舊頁再寫 2 則、新頁寫 3 則 → 下一次 `read` 恰好得到這 5 則，依到達順序；再讀一次得到 0 則。
   - 換頁前已讀過的不再出現。
@@ -500,27 +511,36 @@ PR-1 的範圍與契約到此已定，不依賴 PR-2／PR-3 的任何細節：
 - **C-15** Fake 依 `(repo, issue)` 存留言：
   - `deliver(entity, …)` 存在 `entity.issue`（可用 `page=` 指定別頁）；
   - `read`／`check`／`enumerate_conditional`／`page_size` 只看所指的頁。
-  - 既有測試**不弱化**：斷言不放寬、不刪；只有 `LogCache` 版本號這類隨升版必改的常數可以改，要在實作報告逐一列出。`test_angareion_version.py` 不在可改之列（能力標記另立旗標，C-24）。
+  - 既有測試**不弱化**：斷言不放寬、不刪；只有下面兩類可以改，要在實作報告逐一列出（檔名、行號、改前改後）：
+    - `LogCache` 版本號這類隨升版必改的常數；
+    - **游標多了 `pages`**（重審 M-2）。讀碼找到三處：`tests/unit/test_angareion_cli.py:401`（`stored == {"channel:general": {...}}`）、`tests/unit/test_angareion_library.py:239`（`set(entry) == {"position", "at", "seen"}`）、`tests/unit/test_angareion_backend.py:237`（Fake 讀空頻道後 `res.cursor == Cursor()`）。只能**加上** `pages` 鍵或欄位（值照 §2.1 的序列化，單頁時是 `{"<現頁>": 與主游標相同的三欄}`／`Cursor(pages={現頁: Cursor()})`）；`position`／`at`／`seen` 的斷言一字不改、不放寬。實作時 grep 到其他同類斷言，照同一規則處理並列出。
+    - `test_angareion_state.py` 只存讀不帶 `pages` 的 `Cursor`，照 §2.1 的序列化（`pages` 是 `None` 不寫鍵）不受影響，不在可改之列。
+  - `test_angareion_version.py` 不在可改之列（能力標記另立旗標，C-24）。
 - **C-22** 讀退役頁失敗（`read`、`check`、`LogCache`）：
   - 404、410、不是 rate limit 的 403 → 略過那一頁，其他頁照讀；
   - `read` 與 `log` 在 stderr 印一行 `Warning: an older page of channel '<C>' could not be read (HTTP <碼>); skipped`（不含編號），`check` 不印；
-  - 游標的 `pages`／`held` 照 `pages_after_read`：讀過的頁保留並凍結游標，沒讀過的頁不加入。情境測試（Fake 與 GitHub 假 transport 各一）：
-    - **讀過的頁**：游標 `pages={R,N}`，R 上的訊息都已送達 → R 上新到 2 則（r1、r2）→ 2 分鐘後 N 上新到 1 則（n1）→ 讀（R 回 404）：得到 n1，主游標越過 r1、r2 的 id 與時間 → R 恢復 → 下一次 `read` 恰好得到 r1、r2，R 上原本已送達的 0 則重送；再讀一次 0 則。GitHub 假 transport 記到的 R 的請求帶 `since`（凍結游標的 `at-60s`，不是從頭）。
-    - **沒讀過的頁**：游標 `pages={P}`，設定檔加上 S（S 上有 3 則）→ S 回 404 一輪 → S 恢復 → 下一次 `read` 從頭讀 S，恰好得到那 3 則；再讀一次 0 則。
+  - 游標的 `pages` 照 `pages_after_read`：被略過的頁游標不動。情境測試（Fake 與 GitHub 假 transport 各一）：
+    - **讀過的頁**：游標 `pages={R: cR, N: cN}`，R 上的訊息都已送達 → R 上新到 2 則（r1、r2）→ 2 分鐘後 N 上新到 1 則（n1）→ 讀（R 回 404）：得到 n1，主游標越過 r1、r2 的 id 與時間，`pages[R]` 仍是 cR → R 恢復 → 下一次 `read` 恰好得到 r1、r2，R 上原本已送達的 0 則重送；再讀一次 0 則。GitHub 假 transport 記到的 R 的請求帶 `since`（cR 的 `at-60s`，不是從頭）。
+    - **沒讀過的頁**：游標 `pages={P: cP}`，設定檔加上 S（S 上有 3 則，id 都比主游標小、時間都早於主游標的 `at-60s`）→ S 回 404 一輪 → S 恢復 → 下一次 `read` 從頭讀 S，恰好得到那 3 則；再讀一次 0 則。
+    - **舊游標（`pages=None`）＋退役頁 404**（M-1）：游標檔只有三欄（主游標讀到 R 的最後一則），設定檔是現頁 N＋退役頁 R → R 上新到 r1、N 上新到 n1 → 讀（R 回 404）：得到 n1，存下的 `pages[R]` 等於讀之前的主游標 → R 恢復 → 下一次 `read` 恰好得到 r1，R 上原本的訊息 0 則重送。
   - 「給我」跨頻道讀時，一張退役頁 404 不讓其他頻道失敗（exit 0）。
   - 現頁的同樣錯誤照舊 exit 2；rate limit、網路錯誤照舊往外丟。
 - **C-23** 游標 `pages`（情境測試，Fake 與 GitHub 假 transport 各一）：
   - 讀者的游標已越過新頁上某些留言的 id（設定檔晚到：先只讀 P 並前進，之後設定檔才加上 S；S 上有 id 比游標小、時間早於 `at-60s` 的訊息）→ 下一次 `read` 得到 S 上的全部訊息，再讀一次 0 則。
   - 旁頁晚一步進設定檔（I-2）同樣送達。
-  - **反向**：已讀過的頁不被從頭讀。游標 `pages={P,S}`、S 上的訊息都已送達 → 再 `read` 兩次都是 0 則；GitHub 假 transport 記到的 S 的請求帶 `since`。
-  - `state.py` 存讀 `pages`；舊檔沒有 `pages` → `None`；`None` 時照單頁規則。
-  - 改壞驗證：讀新頁時改回比 position → 測試要失敗；`pages_after_read` 改成「只留讀成功的頁」（第 2 版的規則）→ C-22 的「讀過的頁」情境要失敗（重送）；拿掉 `held`（恢復後用主游標讀）→ 同一情境要失敗（漏 r1、r2）；改成「略過的一律保留」→ 「沒讀過的頁」情境要失敗。
-  - `state.py` 存讀 `held`；舊檔沒有 `held` → 空。
+  - **反向**：已讀過的頁不被從頭讀。游標 `pages={P: cP, S: cS}`、S 上的訊息都已送達 → 再 `read` 兩次都是 0 則；GitHub 假 transport 記到的 S 的請求帶 `since`。
+  - `state.py` 存讀 `pages`（§2.1 的序列化）：`pages` 是 `None` → 檔案沒有 `pages` 鍵；有值 → 讀回相等（`Cursor` 的 `==` 含 `pages`）；舊檔沒有 `pages` → `None`；壞資料（`pages` 不是物件、鍵不是正整數字串、值不是物件、`seen` 型別不對）各一個案例，結果照 §2.1「當作沒有」，不丟例外（nit-3）。
+  - 改壞驗證：
+    - `page_base` 對不在 `pages` 的頁回主游標（改回比 position）→ 第一個情境失敗（漏）；
+    - `page_base` 對在 `pages` 的頁也回主游標（等於第 3 版拿掉 `held`）→ C-22「讀過的頁」失敗（漏 r1、r2）；
+    - `pages_after_read` 對被略過的頁不寫入結果（等於第 2 版「只留讀成功的頁」）→ C-22「讀過的頁」失敗（重送）；
+    - `pages_after_read` 對被略過、沒讀過的頁存主游標 → C-22「沒讀過的頁」失敗（漏）；
+    - `prev.pages=None` 時被略過存 `Cursor()` → C-22「舊游標」失敗（重送）。
 - **C-24** `angareion --capabilities`：stdout 恰好一行 `paged-read`（PR-3 起是 `paged-read paged-write`），exit 0。`angareion --version` 的輸出與 PR-2 之前相同，`test_angareion_version.py` 不改。
 - **C-25** `Rebuilder.run`：
   - 引用某一則留言的回報（`report_text` 的本文不是空的），若在留言串裡已有一模一樣的本文 → 不貼。同一個註冊簿連跑兩次，第二次這類回報貼 0 則；不同的回報各貼一次。
   - 固定文字的回報（本文是空的，例如寫檔衝突）每次發生都貼：讓兩次 run 都發生寫檔衝突 → 貼 2 則。
-  - `rebuild_channels` 回傳的 reports 不變（純函式不看已貼的）。
+  - `rebuild_channels` 回傳的 reports 不變（純函式不看已貼的）；`summary.reports` 是全部、`summary.posted` 是實際貼出的，第二次 run 的 `summary.reports` 與第一次相同、`summary.posted` 不含去重掉的。
 - **C-26** `channel status` 的頁資訊：
   - 頁數＝1＋`retired` 的筆數；
   - 旗標：
@@ -540,11 +560,11 @@ PR-1 的範圍與契約到此已定，不依賴 PR-2／PR-3 的任何細節：
   - 24h 用 `page_size_at` 的 `Date`（Fake 用注入的時鐘）；
   - W-8 成功、P 在窗內且 <2490 → 寫 P；
   - I-8（本機設定檔過期，P 早已換頁）→ 寫新頁，`open_page` 0 次。
-- **C-17** `ensure_successor(C, P, E_local)`：§1.3 的 S-1～S-9 每一列至少一個測試，另外：
+- **C-17** `ensure_successor(C, P, E_local)`：§1.3 的 S-1～S-9（含 S-6′）每一列至少一個測試，另外：
   - S-2 的四種不相容各一個，都是 `open_page` 0 次；
   - S-7 之後新頁上 0 則訊息；
   - **孤兒頁上界**（M-2）：S-7 失敗（註冊簿寫不進）之後，同一個身分再 `send` 3 次（P 在 2400～2499，都走 W-8；註冊簿仍寫不進）→ `open_page` 總共 1 次，`post_comment` 每次都對同一頁重試；註冊簿恢復後的下一次 → `open_page` 仍是 1 次，貼出的 `rollover` 的 `issue` 是那一頁，待註冊紀錄被刪掉。
-  - 待註冊紀錄的其他列：S-6 對紀錄裡的頁失敗 → 紀錄刪掉，下一次 `open_page` 1 次；S-3 → 紀錄刪掉；紀錄的 `from` 與 P 不同 → 當作沒有，`open_page` 1 次並覆寫；紀錄檔壞掉 → 當作沒有，不報錯。
+  - 待註冊紀錄的其他列：S-6 對紀錄裡的頁回 `False` → 紀錄刪掉，下一次 `open_page` 1 次；S-6′（`verify_channel` 丟 `BackendError`）→ 紀錄保留，下一次 `open_page` 0 次、`verify_channel` 再驗同一頁；S-3 → 紀錄刪掉；紀錄的 `from` 與 P 不同 → 當作沒有，`open_page` 1 次並覆寫；紀錄檔壞掉 → 當作沒有，不報錯。
   - `post_with_retries` 回傳最後一次成功的留言物件；S-8 用它的 `id`／`created_at`（L-3）；
   - S-8 的「N 是旁頁」→ 回傳贏家實體，N 上 0 則；
   - S-8 的列表裡沒有自己那則 → 結果與有時相同；
@@ -569,9 +589,9 @@ PR-1 的範圍與契約到此已定，不依賴 PR-2／PR-3 的任何細節：
 
 | 模組 | 新增或改動 | 不做什麼 |
 |---|---|---|
-| `backend.py` | `RetiredPage(issue, until, side)`、`Entity.retired`（預設 `()`，frozen 不變）、`Cursor.pages`、`Cursor.held`（`HeldPage`）、頁的常數、`pages_to_read`、`pages_after_read`、`page_entity`、例外 `ChannelFullError`／`RateLimitError`、協定 `PageBackend`（`page_size`、`page_size_at`，`runtime_checkable`）與 `PageOpener`（`open_page`）、Fake 的頁大小覆寫表（PR-1）與依頁存留言（PR-2） | 不知道註冊簿 |
+| `backend.py` | `RetiredPage(issue, until, side)`、`Entity.retired`（預設 `()`，frozen 不變）、`Cursor.pages`（頁號→那一頁的 `Cursor`）、頁的常數、`pages_to_read`、`page_base`、`pages_after_read`、`page_entity`、例外 `ChannelFullError`／`RateLimitError`、協定 `PageBackend`（`page_size`、`page_size_at`，`runtime_checkable`）與 `PageOpener`（`open_page`）、Fake 的頁大小覆寫表（PR-1）與依頁存留言（PR-2） | 不知道註冊簿 |
 | `github.py` | §4 的分辨；`page_size`；`open_page`；`read`／`check` 逐頁合併、沒讀過的頁從頭讀、退役頁失敗略過 | 不選寫哪一頁 |
-| `state.py` | 存讀 `Cursor.pages`／`held`；`PendingPageStore`（待註冊紀錄，PR-3） | 不解讀 `pages`；不決定何時用待註冊紀錄 |
+| `state.py` | 存讀 `Cursor.pages`（§2.1 的序列化與壞資料處理）；`PendingPageStore`（待註冊紀錄，PR-3） | 不解讀 `pages`；不決定何時用待註冊紀錄 |
 | `channel_config.py` | 解析 `retired` | 不決定讀哪幾頁 |
 | `registry.py` | `rollover` 的動作與 `from`、`rollover_comment`、協定 `RegistryCounter` 與 `comment_count`（GET issue；Fake 也有）、`post_comment` 與 `post_with_retries` 回傳留言 | 仍只用標準庫 |
 | `registry_rules.py`（新） | `rebuild_channels`、`render_channels`（從 `registry_rebuild` 搬來，加上 `rollover`） | 純函式，不做 I/O；只用標準庫與 `registry` |
@@ -625,9 +645,11 @@ PR-1 的範圍與契約到此已定，不依賴 PR-2／PR-3 的任何細節：
 | A-4 | 「頁」的概念往下漏，要不要另立 `Page` 型別 | **部分採納**：`pages_to_read` 改成回傳單頁實體，不回傳 issue 編號；不另立 `Page` | 一頁就是一個 `retired=()` 的 `Entity`：`ChannelBackend` 的每個方法本來就是對一個 repo＋issue 做事。另立 `Page` 要把所有方法的簽名改一遍，或兩套並存。改成回傳單頁實體，下游就不必碰編號 |
 | A-5 | `PageBackend` 讀寫混在一起 | **採納**：`PageBackend`（`page_size`、`page_size_at`）與 `PageOpener`（`open_page`）分開 | `channel status` 與 PR-1 只需要讀；開頁只有 `PageWriter` 用，而且到 PR-3 才有 |
 | A-6 | 依賴邊表漏邊 | **採納**，§8.2 已補 | — |
-| A-7（重審） | `pages` 的保留規則放哪 | 純函式 `backend.pages_after_read`（連同 `held`），與 `pages_to_read` 同處；`backend.read` 是唯一呼叫者 | 讀哪幾頁、讀完記哪幾頁是同一個概念的兩半，放一起才不會各改各的；純函式可以逐條單元測試（C-10）。`state` 照舊只存取 |
+| A-7（重審） | `pages` 的保留規則放哪 | 純函式 `backend.pages_after_read`（第 4 版連同 `page_base`），與 `pages_to_read` 同處；`backend.read` 是唯一呼叫者 | 讀哪幾頁、讀完記哪幾頁是同一個概念的兩半，放一起才不會各改各的；純函式可以逐條單元測試（C-10）。`state` 照舊只存取 |
 | A-8（重審） | 孤兒頁：重用 backend 上的頁，還是記在狀態目錄 | 狀態目錄：`state.PendingPageStore`，經 `rollover.PendingPages` 協定注入（§1.3） | 在 backend 上找要列 repo 的所有 issue，每次 S-4 都付，而且可能撿到別的寫者正要註冊的頁；本機紀錄只重用自己開的頁，成本一個小檔 |
-| A-9（重審） | `check` 以所有留言推動 `_scan_since` 是否違反 D2 的掃描窗前提 | 不違反，但只限從頭讀模式，key 另加 `\|unread` | 從頭讀模式的窗不進游標、`read` 不用它，漏看只會延遲 `check`，不會丟訊息；讀過的頁照舊只由符合 scope 的留言推動（§2.2） |
+| A-9（重審） | `check` 以所有可解析的訊息（第 3 版寫「所有留言」，第 4 版改，nit-2）推動 `_scan_since` 是否違反 D2 的掃描窗前提 | 不違反，但只限從頭讀模式，key 另加 `\|unread` | 從頭讀模式的窗不進游標、`read` 不用它，漏看只會延遲 `check`，不會丟訊息；起點不是空游標的頁照舊只由符合 scope 的留言推動（§2.2） |
+| A-10（第 2 次重審） | `pages`＋`held` 要不要合成「頁號→該頁游標」的單一結構 | **採納**：`Cursor.pages: dict[int, Cursor] \| None`，每一頁用自己的游標照單頁規則讀；`held`／`HeldPage` 刪除；主游標保留（寬限判斷、`None` 的起點、舊版相容）。§2.1、§2.2、C-10、C-11、C-22、C-23 已同步 | 第 3 版要兩個結構（頁集合、凍結的游標）、三條讀取路徑（從頭讀、`held`、主游標）、三條更新規則（集合公式、凍結取最早、讀成功移出）；新版是一個結構、一條讀取規則（`page_base` 決定起點，其餘是單頁現行規則）、一行更新式。關鍵事實是 `advance_cursor` 吃的 entries 本來就是頁上**所有**可解析的訊息，所以每一頁的游標靠自己就會前進，不需要借主游標。附帶的好處：M-1（`None` 時被略過）與 M-3（新游標）都落在同一個定義裡；讀取不再依賴跨 issue 的 id 遞增（§10 第 4 項縮小）；別頁前進不再讓這一頁的 ETag 紀錄失效。代價：檔案裡每一頁多存一份三欄（`seen` 只含 60 秒窗內的 id，量小）；單頁頻道主游標與 `pages[現頁]` 重複一份 |
+| A-11（第 2 次重審） | 游標的序列化與 `Cursor` 的相等 | `pages` 是 `None` 不寫鍵；有值時每頁照主游標同一種三欄格式。`Cursor` 照舊是普通 dataclass，`==` 含 `pages`（不設 `compare=False`）。ETag 紀錄的游標是那一頁的起點（`pages` 恆為 `None`），`_same_cursor` 不變 | 不寫 `None` 讓只存 `Cursor()` 的既有測試與舊檔不變；`==` 若不比 `pages`，`pages_after_read` 與 `state` 的測試會在 `pages` 錯時照樣通過，比讓三個既有斷言加上 `pages` 更糟。會轉紅的既有斷言列在 C-15，只能加 `pages`，不放寬三欄 |
 
 ### 8.5 被捨棄的方案
 
@@ -666,13 +688,13 @@ PR-1 的範圍與契約到此已定，不依賴 PR-2／PR-3 的任何細節：
 - **golden**：用一份與現行 channels.json 同形狀的合成註冊簿夾具，比對 PR-2 前後的重建輸出，要求逐位元組相同（C-8）。
 - **改壞驗證**（每個 PR 至少下列幾種，要能讓對應測試失敗）：
   - PR-1：C-1 拿掉 `retry-after` 判斷；C-1 訊息拿掉 `not retrying`；C-2 不做 GET 探測；C-2 把 2400 門檻拿掉；
-  - PR-2：C-9 寬限比較改成 `<=`，或拿掉 `cursor.at is None`；C-10 只對現頁 `advance_cursor`；C-11 ETag key 不含頁；C-14 不讀退役頁；C-22 `pages_after_read` 改成「只留讀成功的頁」或「略過的一律保留」；C-11 拿掉從頭讀模式的 `_scan_since`；C-23 新頁改回比 position；C-25 拿掉去重；C-8 旁頁改成取代現頁；
-  - PR-3：C-16 拿掉「先寫舊頁」；C-16 拿掉 W-9 的 `refresh`；C-17 先寫新頁再貼註冊；C-17 拿掉 S-8；C-17 拿掉 S-2 的相容檢查；C-17 拿掉待註冊紀錄（`open_page` 次數要變多）。
+  - PR-2：C-9 寬限比較改成 `<=`，或拿掉 `cursor.at is None`；C-10 只對現頁 `advance_cursor`；C-11 ETag key 不含頁；C-14 不讀退役頁；C-22／C-23 的五種 `page_base`／`pages_after_read` 改壞（列在 C-23）；C-11 拿掉從頭讀模式的 `_scan_since`、從頭讀模式不認新游標；C-10 每頁各取一個 `floor`；C-25 拿掉去重；C-8 旁頁改成取代現頁；
+  - PR-3：C-16 拿掉「先寫舊頁」；C-16 拿掉 W-9 的 `refresh`；C-17 先寫新頁再貼註冊；C-17 拿掉 S-8；C-17 拿掉 S-2 的相容檢查；C-17 拿掉待註冊紀錄（`open_page` 次數要變多）；C-17 S-6′ 也刪紀錄（`open_page` 次數要變多）。
 - **沒驗到、也不在測試裡驗的**（真 GitHub）：
   1. 達上限時的實際狀態碼與 body（issue 本文只記錄到 403 和我們自己的訊息）；
   2. 上限是否恰好是 `comments ≥ 2500`，有沒有把時間軸事件算進去；
   3. GET issue 的 `comments` 會不會延遲；
-  4. comment id **跨 issue** 是否全站遞增。這是這份設計新增的依賴；D4 只依賴同一實體內遞增。審查者對 MyAiStorage 的 71 則留言抽樣，結果單調，但那不是 AiCompany-channel，也不是證明。若不成立，§2.3 第 2 點（同一次讀取跨頁的晚到）會失準；§2.1 的「沒讀過的頁從頭讀」不依賴它；
+  4. comment id **跨 issue** 是否全站遞增。這是這份設計新增的依賴；D4 只依賴同一實體內遞增。審查者對 MyAiStorage 的 71 則留言抽樣，結果單調，但那不是 AiCompany-channel，也不是證明。第 4 版起每一頁用自己的游標讀，送達（不漏、不重送）不依賴它；若不成立，只有同一次讀取回傳的訊息跨頁的相對順序可能與到達順序不同，主游標的 `position`（跨頁最大 id）只用在 `pages` 是 `None` 的起點；
   5. 交互參照會不會吃留言額度；
   6. 鎖住的 issue 是否擋得住擁有者留言（文件說擋不住）；
   7. 註冊簿列表的複寫延遲；
@@ -726,7 +748,7 @@ PR-1 的範圍與契約到此已定，不依賴 PR-2／PR-3 的任何細節：
 ## 13. 第 3 版的改動（對照重審）
 
 - **H-1**：`pages` 的語意改成「讀過、而且還在追蹤的頁」；更新規則 `pages_new = ((prev ∩ skipped) ∪ read_ok) ∩ to_read`，純函式 `backend.pages_after_read`（§2.1、§2.2 的「讀退役頁失敗」列、§2.3 第 2 項）。
-  - **另加 `held`（派工沒寫、我加的）**：只保留 `pages` 時，略過那一輪主游標被別頁推進，恢復後用主游標讀 R 會漏掉略過期間 R 上新到、而時間早於新 `at-60s` 的訊息（§2.1 的例子）。所以讀過而被略過的頁凍結自己的游標，恢復後用它接續。`pages` 的公式照派工不變。C-10 加單元測試；C-22 補「讀過的頁 404→恢復：已送達 0 則重送、略過期間新到的有送」與「沒讀過的頁 404→恢復後從頭讀」；C-23 補反向測試（已讀過的頁不被從頭讀）與兩種改壞；D-34 對應句改寫。
+  - **另加 `held`（派工沒寫、我加的；第 4 版以每頁游標取代，見 §14 的 A-10）**：只保留 `pages` 時，略過那一輪主游標被別頁推進，恢復後用主游標讀 R 會漏掉略過期間 R 上新到、而時間早於新 `at-60s` 的訊息（§2.1 的例子）。所以讀過而被略過的頁凍結自己的游標，恢復後用它接續。`pages` 的公式照派工不變。C-10 加單元測試；C-22 補「讀過的頁 404→恢復：已送達 0 則重送、略過期間新到的有送」與「沒讀過的頁 404→恢復後從頭讀」；C-23 補反向測試（已讀過的頁不被從頭讀）與兩種改壞；D-34 對應句改寫。
 - **M-1**：從頭讀模式的頁，第一次整頁掃描乾淨後以所有留言的最新時間推動 `_scan_since`（key 加 `|unread`）；上界 ⌈n/100⌉＋(k−1)（§2.2）；C-11 補請求數斷言與改壞。A-9 的裁定在 §8.4。
 - **M-2**：待註冊紀錄（`state.PendingPageStore`、`rollover.PendingPages`），S-4 先重試註冊同一頁；S-6／S-7／S-8／S-9／S-3 對紀錄的處置寫進 S 表（§1.3）；C-17 驗 `open_page` 次數。A-8 的裁定在 §8.4。
 - **M-3**：能力標記改成獨立旗標 `angareion --capabilities`，`--version` 與 `test_angareion_version.py` 都不動（§6.2、C-24、C-15、§9、Q-1、Q-6）。
@@ -746,3 +768,26 @@ PR-1 的範圍與契約到此已定，不依賴 PR-2／PR-3 的任何細節：
   - §8.3 的 D 補 `PendingPages` 與 `refresh`；
   - §10 的改壞驗證補 C-11、C-16 的 `refresh`、C-17 的待註冊紀錄，C-22 改成本版規則；
   - §2.1 的 `None` 游標補「同一身分被未升級的安裝存過」這一種來源。
+
+## 14. 第 4 版的改動（對照第 2 次重審）
+
+PR-1（§6.1、C-1～C-5）一字未動；以下都是 PR-2／PR-3。
+
+- **A-10（採納）**：`pages` 改成「頁號→那一頁的游標」，刪掉 `held`／`HeldPage` 與第 3 版的集合公式；新增純函式 `backend.page_base`，`pages_after_read` 剩一行（§2.1）。§0 第 3 點、§2.2 的 `read`／「讀退役頁失敗」／`wait`、§2.3、§6.2、§8.1、§10、C-10、C-11、C-22、C-23、D-34 同步。理由見 §8.4 的 A-10 列。
+- **A-11**：序列化（`None` 不寫鍵、每頁三欄）與 `Cursor` 的 `==` 含 `pages`（§2.1、§8.4）。
+- **M-1**：`prev.pages is None` 時，每一頁的起點是主游標；被略過的頁存成主游標（`page_base` 的第三種，§2.1），恢復後不整頁重送。C-10 的單元測試改成這條；C-22 加「舊游標＋退役頁 404」情境。
+- **M-2**：C-15 列出允許改的三個既有斷言（`test_angareion_cli.py:401`、`test_angareion_library.py:239`、`test_angareion_backend.py:237`；後者是我重讀時找到的，審查列了前兩個），只能加 `pages`、不放寬三欄；序列化規則寫在 §2.1。
+- **M-3**：從頭讀＝起點是空游標，新游標（`pages` 是 `None`、主游標空）也算；`check` 的掃描窗涵蓋它（§2.2）。C-11 加新游標的請求數案例與改壞，並寫明單頁新游標的唯一行為差（只少請求）。
+- **L-1**：舊版 `--capabilities` 是 exit 1（非 0），盤點只認「exit 0 且含 `paged-read`」（§6.2）。
+- **L-2**：S-6 拆成 S-6（`verify_channel` 回 `False` → 刪紀錄）與 S-6′（丟 `BackendError` → 保留紀錄）；孤兒頁上界的敘述改寫（§1.3）；C-17 補 S-6′ 與改壞。
+- **L-3**：同一次 `read` 的所有頁共用同一個 `floor`（§2.1、§2.2、C-10）。
+- **nit-1**：`summary.reports` 是全部，新增 `summary.posted` 是實際貼出的（§1.2、C-25）。
+- **nit-2**：掃描窗以「所有可解析的訊息」推動，與 `read` 的 entries 同一個集合（§2.2、§8.4 的 A-9 列、C-11）。
+- **nit-3**：`pages` 壞資料一律當作沒有（§2.1、C-23）。
+- 自己重讀找到的同類不一致：
+  - C-11 的「單頁時與現行相同」在 M-3 之後不再完全成立（新游標第二次起帶 `since`），已寫明差異與既有測試的處理；
+  - C-11 加「別頁前進不讓 ETag 失效」（A-10 宣稱的好處要有測試鎖住）；
+  - C-22「沒讀過的頁」情境原本沒寫 S 上訊息比游標舊，改壞（對沒讀過的頁存主游標）會測不出來，已補條件；
+  - §10 第 4 項（跨 issue id 遞增）的影響縮小到回傳順序；§2.3 的「晚到」改成每頁各自的窗；
+  - §6.2 的「舊版洗掉 `pages` 與 `held`」、§8.1 的 `backend`／`state` 列、§8.4 的 A-7 列、A-9 列的「所有留言」改成本版用語；
+  - §10 的改壞清單把 S-6′ 放在 PR-3、加上 `floor` 與新游標兩種。
