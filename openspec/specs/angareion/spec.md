@@ -184,7 +184,7 @@ token 檔的位置 MUST 能由 `ANGAREION_TOKEN_FILE` 指定（優先於其他�
 - **THEN** 正常讀取
 
 ### Requirement: 輸出與結束碼
-stdout MUST 只放結果（`channel create`／`channel delete` 印 channel 名，`send` 印訊息 id，`read` 印訊息或 `--json`，`log` 印訊息或 `--json`（空結果也是成功）），說明與錯誤放 stderr。結束碼：0 成功；1 用法或輸入錯誤；2 後端、網路或設定錯誤；3 `wait` 逾時沒有新訊息。
+stdout MUST 只放結果（`channel create`／`channel delete` 印 channel 名，`channel status` 印每個頻道一列（名稱、現頁則數、上限、等級 `ok`／`warn`／`rollover`／`full`／`unknown`、頁數、旗標）與最後一列 `registry`，`--json` 是物件的陣列（鍵 `name`、`count`、`limit`、`level`、`pages`、`flags`），不含 issue 編號，`send` 印訊息 id，`read` 印訊息或 `--json`，`log` 印訊息或 `--json`（空結果也是成功）），說明與錯誤放 stderr。結束碼：0 成功；1 用法或輸入錯誤；2 後端、網路或設定錯誤；3 `wait` 逾時沒有新訊息。
 
 #### Scenario: 設定缺少
 - **WHEN** 沒有設定檔（或缺 channel／backend 設定檔）就執行 `angareion send`
@@ -193,6 +193,19 @@ stdout MUST 只放結果（`channel create`／`channel delete` 印 channel 名�
 #### Scenario: 後端錯誤
 - **WHEN** 後端回 HTTP 錯誤（例如 403 次級限制或網路中斷）
 - **THEN** exit 2，stderr 說明狀態碼，不自動重試；輸出裡沒有 token
+
+#### Scenario: 後端回 rate limit 與「這一頁滿了」（#542）
+- **WHEN** `send` 的寫入被後端以 403／429 拒絕，而回應表示是 rate limit（primary 或 secondary）
+- **THEN** exit 2，stderr 說明是 rate limit（含狀態碼與 `not retrying`；有重試時間就帶上），不自動重試
+- **WHEN** `send` 的寫入被拒、不是 rate limit，而且該頁的留言數已達上限（2500）
+- **THEN** exit 2，stderr 說這個 channel 已滿
+- **WHEN** 寫入被拒、不是 rate limit，而該頁留言數在 2400～2499
+- **THEN** exit 2，stderr 說「看起來滿了（或 token 被拒）」
+- **THEN** 這三種訊息都不含 issue 編號、repo 名或 token
+
+#### Scenario: send 前的頁數警告（#542）
+- **WHEN** `send` 之前查到現頁留言數已達 2000
+- **THEN** stderr 印一行警告，`send` 照常進行；查不到頁數（或後端不提供）時不警告也不擋
 
 #### Scenario: HTTP 逾時
 - **WHEN** 後端請求超過逾時（固定 30 秒；`wait` 另受剩餘時間限制）沒有回應
@@ -237,7 +250,7 @@ repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：六
 - **THEN** 同一批留言的到達位置與後端時刻一致；非 angareion 訊息的留言在「列舉」看得到（標示為非訊息），在「讀」（`read` 的輸出）則不會出現
 
 ### Requirement: 六個介面
-Angareion 對外 MUST 只有七個介面家族：建 channel、刪 channel、送訊息、確認有沒有新訊息、讀訊息、查詢訊息（唯讀）、待決（`decision`）；指令分別是 `angareion channel create`、`angareion channel delete`、`angareion send`、`angareion wait`、`angareion read`、`angareion log`、`angareion decision`。`decision` 的六個動作（`ask`、`update`、`withdraw`、`submit`、`list`、`snapshot`）的語意見 `angareion-pending-decision`；它的寫入也只是 append 一則訊息，MUST NOT 編輯或刪除任何訊息。MUST NOT 有 ack、已讀回條或限流。channel 名 MUST 是英文名（非空的 ASCII 字母、數字、`-`、`_`）；介面（參數、stdout、stderr、錯誤訊息）MUST NOT 出現 GitHub repo／issue 的概念。第一期 channel 對所有隊員公開，沒有成員設定：`channel create` MUST NOT 收 `--member`。`send` 的 `--channel` 必填、`--to` 選填（不給＝發到整個 channel）。`channel create` 與 `channel delete` 的 stdout MUST 只印 channel 名。`channel create` MUST 在送出註冊留言前先確認後端實體（存在而且標題等於 channel 名；不符 MUST exit 2、什麼都沒註冊——複審 H2），留言後 MUST 輪詢 fetch 到對應出現為止（上限 2 分鐘；逾時 MUST 在 stderr 印提示、仍 exit 0）；`channel delete` MUST NOT 等落地（送出註銷留言成功即 exit 0）。（註冊簿與重建見 `angareion/channel-config` 與 design §9／§10。）
+Angareion 對外 MUST 只有七個介面家族：建 channel、刪 channel、送訊息、確認有沒有新訊息、讀訊息、查詢訊息（唯讀）、待決（`decision`）；指令分別是 `angareion channel create`、`angareion channel delete`（另有唯讀的 `angareion channel status`，歸在「查詢」一類，見下面的情境）、`angareion send`、`angareion wait`、`angareion read`、`angareion log`、`angareion decision`。`decision` 的六個動作（`ask`、`update`、`withdraw`、`submit`、`list`、`snapshot`）的語意見 `angareion-pending-decision`；它的寫入也只是 append 一則訊息，MUST NOT 編輯或刪除任何訊息。MUST NOT 有 ack、已讀回條或限流。channel 名 MUST 是英文名（非空的 ASCII 字母、數字、`-`、`_`）；介面（參數、stdout、stderr、錯誤訊息）MUST NOT 出現 GitHub repo／issue 的概念。第一期 channel 對所有隊員公開，沒有成員設定：`channel create` MUST NOT 收 `--member`。`send` 的 `--channel` 必填、`--to` 選填（不給＝發到整個 channel）。`channel create` 與 `channel delete` 的 stdout MUST 只印 channel 名。`channel create` MUST 在送出註冊留言前先確認後端實體（存在而且標題等於 channel 名；不符 MUST exit 2、什麼都沒註冊——複審 H2），留言後 MUST 輪詢 fetch 到對應出現為止（上限 2 分鐘；逾時 MUST 在 stderr 印提示、仍 exit 0）；`channel delete` MUST NOT 等落地（送出註銷留言成功即 exit 0）。（註冊簿與重建見 `angareion/channel-config` 與 design §9／§10。）
 
 `log` 是唯讀的查詢介面（語意見「唯讀查詢 log」）：它 MUST NOT 讀取、改動或推進游標，MUST NOT 參與「同一個身分只留一個讀者」規則；它的旗標與錯誤訊息同樣 MUST NOT 出現 GitHub repo／issue 的概念（只用 channel 名、AI 名、訊息 id（ULID）、RFC 3339 時刻與字面字串表達）。
 
@@ -312,6 +325,14 @@ Angareion 對外 MUST 只有七個介面家族：建 channel、刪 channel、送
 #### Scenario: log 的介面不出現後端概念
 - **WHEN** 檢查 `angareion log` 的參數清單、stdout、stderr 與說明（`--help`）
 - **THEN** 沒有 repo、issue、comment 等後端概念的字樣；只有 channel 名、AI 名、訊息 id、時刻與字面字串
+
+#### Scenario: channel status（#542）
+- **WHEN** `angareion channel status`
+- **THEN** 每個頻道一列，最後是 `registry`，exit 0；唯讀，不動游標，也不寫任何檔（fetch 設定檔除外）
+- **WHEN** 某一列查不到（後端或註冊簿讀取失敗，或接縫沒有提供頁數）
+- **THEN** 那一列等級 `unknown`，stderr 說明，其他列照印，exit 2
+- **WHEN** 給了沒註冊的頻道名
+- **THEN** exit 1
 
 ### Requirement: 唯讀查詢 log
 `angareion log` MUST 是一次查到全部相關信件的唯讀查詢，MUST NOT 讀取、改動或推進游標（任何情況、任何旗標組合），MUST NOT 有「印完再 commit」的步驟。

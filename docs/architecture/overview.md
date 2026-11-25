@@ -2,7 +2,7 @@
 
 維護者：專案架構師。每一次改到模組切割、依賴方向或公開介面，都和引起它的設計文件放在同一個 PR 更新（AGENTS.md「專案架構師可以 commit 的路徑」）。
 
-- **範圍**：目前收錄 `src/agora` 與 `src/pmo`（PMO skill 見下面「PMO skill」一節）。同一個 repo 裡的 `aicomm`、`ainame`、`atelier`（`pyproject.toml` 的 `[project.scripts]`）還沒收錄，之後再補；`angareion` 只收錄待決（#468）那一節，見下面「angareion」。
+- **範圍**：目前收錄 `src/agora` 與 `src/pmo`（PMO skill 見下面「PMO skill」一節）。同一個 repo 裡的 `aicomm`、`ainame`、`atelier`（`pyproject.toml` 的 `[project.scripts]`）還沒收錄，之後再補；`angareion` 只收錄待決（#468）與頻道換頁（#542）兩節，見下面「angareion」。
 - **基準**：#342 的 branch fe89ab6（#342 實作，加上 main f194fd7，含 #340、#341、#343）。行數都是實數。`src/pmo` 的基準是 main 495cec0（見該節）。
 
 ## 模組地圖
@@ -168,3 +168,14 @@ schema／I/O：_io → errors；_jsonutil → errors；_lock → errors；paths 
 - **`log_query.py`**（`angareion log` 的篩選）：`select(messages_by_channel, selected_channels, *, me, …)` 跨頻道（選了不只一個頻道）時依 `(messages.received_at_key(received_at), channel, id)` 排序；只選一個頻道時仍依 `comment_id`（#510 PR-4，#519）。
 - **`client.py`**：`Angareion.read(target, since=None) -> ReadBatch` 把各頻道讀到的訊息合併後依 `(messages.received_at_key(received_at), channel, id)` 排序（#510 PR-4，#519；以前依時刻字串）。
 - **依賴方向**：`messages` 只依賴 `ainame`、標準庫和 `yaml`，不 import angareion 的其他模組；`backend → messages`；`log_cache → {backend, messages}`；`decision → messages`；`log_query → {backend, messages}`；`client → {backend, messages, state}`；`decision_cli → {decision, log_cache, backend, messages}`；`cli → decision_cli`。沒有環（設計 §13.2）。
+
+### angareion 頻道換頁（#542；PR-1 已 merge，PR-2／PR-3 待實作）
+
+設計全文在 `docs/design-notes/542-channel-rollover.md`（§6.3 是 PR-2 的 2a／2b／2c 切法與介面簽名）；決定見 decisions D-34。本節寫 PR-1（#544，main `e324857`）已經在 `src/angareion` 的部分；PR-2／PR-3 合上時再補。行數是 main `e324857` 的 `wc -l`。
+
+- **`backend.py`**（718 行）：頁的門檻常數 `PAGE_WARN_AT`（2000）、`PAGE_ROLLOVER_AT`（2400）、`PAGE_COMMENT_LIMIT`（2500）與 `page_level(count) -> str`（`ok`／`warn`／`rollover`／`full`，`None` 是 `unknown`）。例外 `RateLimitError`（`kind` 是 `primary`／`secondary`，帶 `reset_at` 或 `retry_after`）與 `ChannelFullError`（`channel`、`count`、`presumed`；`presumed=True` 是 2400～2499 被拒，訊息是 `looks full (or the token was refused)`），兩者都是 `BackendError` 的子類，CLI 照舊 exit 2。`http_cause(status, detail) -> str` 組訊息尾。新協定 `PageBackend`（`@runtime_checkable`：`page_size(entity) -> int`、`page_size_at(entity) -> tuple[int, str | None]`，後者帶回應的 `Date`）；`ChannelBackend` 不加方法。`FakeBackend` 多 `page_size`／`page_size_at`／`set_page_size` 與 `comment_limit`（`send` 到上限丟 `ChannelFullError`）；留言仍存在單一 list（依頁存放是 PR-2 的 2a）。
+- **`github.py`**：`_request` 對 403／429 先判 rate limit（`x-ratelimit-remaining: 0` → primary；有 `retry-after` 或訊息含 `secondary rate limit` → secondary），其他 403 是 `BackendError`；POST 留言被拒（403／422）時 GET 一次 issue 的 `comments` 決定是不是 `ChannelFullError`。GitHub 的 `message` 單行、≤200 字、遮蔽 token、repo 名與 `#<數字>` 去識別。`page_size`／`page_size_at` 是 GET issue 的 `comments`。
+- **`registry.py`**：新協定 `RegistryCounter`（`comment_count() -> int`，GET 註冊簿 issue）；`RegistryClient` 與 `FakeRegistryClient` 都實作。
+- **`channel_cli.py`**（新，245 行）：`channel create`／`delete`（從 `cli.py` 原樣搬來）與新的 `channel status [NAME…] [--json]`（唯讀：每個頻道的現頁則數、上限、等級、頁數、旗標，最後一列是註冊簿；查不到的列等級 `unknown` 並 exit 2；未註冊的名字 exit 1）。PR-1 的頁數恆為 1、旗標恆為空（2c 補）。離開碼常數與 `mask_token` 的用法照 `decision_cli.py` 的先例，不 import `cli`。
+- **`cli.py`**（837 行；A-3 搬出 `channel` 家族之前是 919 行）：`channel` 的三個 action 只轉交 `channel_cli`；`cmd_send` 在 `app.send` 之前讀一次現頁則數，≥2000 在 stderr 印一行警告（讀不到或後端不是 `PageBackend` 就略過）。`decision` 的寫入在 PR-1 沒有這個警告（PR-3 的 C-20 統一）。
+- **依賴方向**（PR-1 後；逐檔 grep）：`channel_cli → {backend, channel_config, client, config, messages, registry}`；`cli → channel_cli`；`channel_cli` 不 import `cli`。其餘邊不變，沒有環。PR-2／PR-3 要加的邊（`registry_rules → registry`、`registry_rebuild → registry_rules`、`channel_cli → registry_rules`、`rollover → {backend, registry, registry_rules}`、`client → rollover`、`channel_cli → rollover`）見設計 §8.2，合上時再搬進本節。
