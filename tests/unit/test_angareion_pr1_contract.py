@@ -26,7 +26,7 @@ from angareion.cli import main
 from angareion.config import Config, save_config
 from angareion.github import GitHubIssuesBackend, HttpResponse
 from angareion.messages import Message
-from angareion.registry import RegistryError
+from angareion.registry import RegistryClient, RegistryError
 
 OWNER_REPO = "owner/repo"
 ISSUE = 10
@@ -220,6 +220,28 @@ def test_c2_the_three_messages_carry_no_issue_number_and_no_repo_name(message, c
     assert "<backend>" in text  # the GitHub message is kept, with the repo name replaced
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "OWNER/REPO is archived",
+        "see https://github.com/owner/repo/issues/42 for details",
+        "repo owner%2Frepo is locked",
+        "Issue 42 is locked",
+        "GH-42 is locked",
+        "# 42 is locked",
+    ],
+)
+def test_c2_the_message_hides_the_repo_in_any_case_and_any_issue_reference(message):
+    transport = Transport()
+    _refused_post(transport, message=message, comments=2500)
+    with pytest.raises(BackendError) as excinfo:
+        _github(transport).send(GENERAL, _msg())
+    text = str(excinfo.value)
+    assert "owner/repo" not in text.lower() and "owner%2frepo" not in text.lower()
+    assert "42" not in text
+    assert "<backend>" in text or "<issue>" in text or "#…" in text
+
+
 def test_c2_the_github_message_is_one_line_short_and_token_free():
     transport = Transport()
     noisy = "line one\nline two " + TOKEN + " " + ("x" * 500)
@@ -251,7 +273,7 @@ def test_c3_github_page_size_reads_the_comment_count_and_the_backend_date():
 
 @pytest.mark.parametrize(
     "payload",
-    [{"number": ISSUE}, {"comments": "12"}, {"comments": True}, {"comments": None}, ["not", "an", "object"]],
+    [{"number": ISSUE}, {"comments": "12"}, {"comments": True}, {"comments": None}, {"comments": -1}, ["not", "an", "object"]],
 )
 def test_c3_a_page_size_that_is_missing_or_not_an_integer_is_a_backend_error(payload):
     transport = Transport()
@@ -410,6 +432,27 @@ def test_c4_a_refused_write_at_the_limit_exits_2_with_the_full_message(env, caps
     assert TOKEN not in captured.err
 
 
+def test_c4_the_warning_is_written_before_the_refusal_it_comes_with(env, capsys):
+    transport = Transport()
+    _refused_post(transport, comments=2500)
+    backend = _github(transport)
+    ret = main(["send", "--channel", "general", "--body", "hi"], backend=backend, store=env.store, registry=env.registry)
+    captured = capsys.readouterr()
+    assert ret == 2
+    assert "Warning: channel 'general' has 2500 of 2500" in captured.err
+    assert captured.err.index("Warning:") < captured.err.index("is full")
+
+
+def test_c4_a_429_on_a_comment_is_a_plain_rate_limit_error_with_no_count_request(env, capsys):
+    transport = Transport()
+    transport.set_route("POST", COMMENTS_URL, HttpResponse(429, {}, _json({"message": "Too Many Requests"})))
+    with pytest.raises(BackendError) as excinfo:
+        _github(transport).send(GENERAL, _msg())
+    assert not isinstance(excinfo.value, ChannelFullError)
+    assert "GitHub API refused the request (HTTP 429)" in str(excinfo.value)
+    assert transport.count("GET", ISSUE_URL) == 0
+
+
 # ---------------------------------------------------------------- C-5
 
 
@@ -483,17 +526,34 @@ def test_c5_a_failed_channel_read_leaves_its_row_unknown_and_the_others_print_th
     assert rows["registry"]["count"] == 1
 
 
-def test_c5_a_registry_seam_without_a_comment_count_is_unknown_and_not_a_failure(env, capsys):
+def test_c5_a_registry_seam_without_a_comment_count_is_unknown_with_a_stderr_line_and_exit_2(env, capsys):
     class PosterOnly:
         def post_comment(self, body):
             pass
 
     ret = main(["channel", "status", "--json"], backend=env.backend, store=env.store, registry=PosterOnly())
     captured = capsys.readouterr()
-    assert ret == 0
+    assert ret == 2
+    assert captured.err.splitlines() == ["Warning: registry: the comment count is not available from this registry client"]
     rows = {row["name"]: row for row in json.loads(captured.out)}
     assert rows["registry"]["count"] is None and rows["registry"]["level"] == "unknown"
     assert rows["general"]["count"] == 0
+    assert rows["other"]["count"] == 0
+
+
+def test_c5_a_backend_without_page_sizes_is_unknown_per_row_with_a_stderr_line_and_exit_2(env, capsys):
+    class SendOnly:
+        def send(self, entity, message):
+            return message.id
+
+    ret = main(["channel", "status", "--json"], backend=SendOnly(), store=env.store, registry=env.registry)
+    captured = capsys.readouterr()
+    assert ret == 2
+    assert "Warning: channel 'general': the page size is not available from this backend" in captured.err
+    rows = {row["name"]: row for row in json.loads(captured.out)}
+    assert rows["general"]["count"] is None and rows["general"]["level"] == "unknown"
+    assert rows["other"]["level"] == "unknown"
+    assert rows["registry"]["count"] == 1
 
 
 def test_c5_a_failed_registry_count_is_unknown_and_exit_2(env, capsys):
@@ -525,3 +585,38 @@ def test_c5_no_action_message_names_status(capsys):
     ret = main(["channel"])
     assert ret == 1
     assert "status" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- C-5 (the real registry client)
+
+REGISTRY_ISSUE_URL = "https://api.github.com/repos/owner/MyAiStorage/issues/77"
+
+
+def _registry_client(transport):
+    return RegistryClient("owner/MyAiStorage", 77, token=TOKEN, transport=transport)
+
+
+def test_c5_registry_comment_count_reads_the_issue_comments_field():
+    transport = Transport()
+    transport.set_route("GET", REGISTRY_ISSUE_URL, HttpResponse(200, {}, _json({"number": 77, "comments": 52})))
+    assert _registry_client(transport).comment_count() == 52
+    assert transport.count("GET", REGISTRY_ISSUE_URL) == 1
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        HttpResponse(200, {}, _json({"number": 77})),
+        HttpResponse(200, {}, _json({"number": 77, "comments": "52"})),
+        HttpResponse(200, {}, _json({"number": 77, "comments": True})),
+        HttpResponse(200, {}, _json({"number": 77, "comments": -1})),
+        HttpResponse(200, {}, _json(["not", "an", "issue"])),
+        HttpResponse(200, {}, b"<html>login</html>"),
+        HttpResponse(500, {}, _json({"message": "boom"})),
+    ],
+)
+def test_c5_a_registry_count_that_is_not_a_usable_number_is_a_registry_error(response):
+    transport = Transport()
+    transport.set_route("GET", REGISTRY_ISSUE_URL, response)
+    with pytest.raises(RegistryError):
+        _registry_client(transport).comment_count()

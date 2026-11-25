@@ -61,7 +61,8 @@ __all__ = [
 
 
 _REPO_IN_URL = re.compile(r"repos/([^/?]+/[^/?]+)/")
-_HASH_NUMBER = re.compile(r"#\d+")
+_HASH_NUMBER = re.compile(r"#\s?\d+")
+_ISSUE_WORD = re.compile(r"\b(?:issues?[ /]|GH-)\d+", re.IGNORECASE)
 
 
 def _repo_of(url: str) -> str | None:
@@ -159,8 +160,11 @@ class GitHubIssuesBackend:
         text = self._mask(" ".join(text.split()))
         repo = _repo_of(url)
         if repo:
-            text = text.replace(repo, "<backend>")
+            # GitHub may spell the repo in another case, or URL-encode the slash.
+            spellings = sorted({repo, repo.replace("/", "%2F")}, key=len, reverse=True)
+            text = re.sub("|".join(re.escape(s) for s in spellings), "<backend>", text, flags=re.IGNORECASE)
         text = _HASH_NUMBER.sub("#…", text)
+        text = _ISSUE_WORD.sub("<issue>", text)
         if len(text) > ERROR_MESSAGE_MAX_CHARS:
             text = text[: ERROR_MESSAGE_MAX_CHARS - 1] + "…"
         return text

@@ -150,11 +150,11 @@ def cmd_channel_delete(
     return EXIT_OK
 
 
-
 def _page_count(backend: Any, entity: Any, token: str) -> tuple[int | None, bool]:
-    """(messages on the current page or None, ok). A backend without page sizes gives (None, True)."""
+    """(messages on the current page or None, ok). A backend without page sizes is a failed read (C-5)."""
     if not isinstance(backend, PageBackend):
-        return None, True
+        sys.stderr.write(f"Warning: channel '{entity.channel}': the page size is not available from this backend\n")
+        return None, False
     try:
         return backend.page_size(entity), True
     except BackendError as e:
@@ -165,9 +165,10 @@ def _page_count(backend: Any, entity: Any, token: str) -> tuple[int | None, bool
 
 
 def _registry_count(registry: Any, token: str) -> tuple[int | None, bool]:
-    """(comments on the registry issue or None, ok); a seam without comment_count gives (None, True)."""
+    """(comments on the registry issue or None, ok). A seam without comment_count is a failed read (C-5)."""
     if not isinstance(registry, RegistryCounter):
-        return None, True
+        sys.stderr.write("Warning: registry: the comment count is not available from this registry client\n")
+        return None, False
     try:
         return registry.comment_count(), True
     except RegistryError as e:
@@ -242,5 +243,3 @@ def cmd_channel_status(
     else:
         sys.stdout.write(_status_table(rows))
     return EXIT_BACKEND if failed else EXIT_OK
-
-
