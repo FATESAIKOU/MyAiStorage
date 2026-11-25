@@ -508,10 +508,11 @@ def test_c5_named_channels_are_shown_and_an_unregistered_name_is_exit_1(env, cap
 
 def test_c5_a_failed_channel_read_leaves_its_row_unknown_and_the_others_print_then_exit_2(env, capsys):
     class OneBroken(FakeBackend):
-        def page_size(self, entity):
+        # `status` reads the count and the backend's time in one call (page_size_at, C-26)
+        def page_size_at(self, entity):
             if entity.channel == "other":
                 raise BackendError("HTTP 500 for other")
-            return super().page_size(entity)
+            return super().page_size_at(entity)
 
     backend = OneBroken(env.store, clock=lambda: BACKEND_NOW)
     backend.add_entity("general", number=ISSUE)

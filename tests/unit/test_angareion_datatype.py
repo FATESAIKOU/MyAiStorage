@@ -268,5 +268,5 @@ def test_serialize_refuses_a_decision_that_reads_back_as_message(monkeypatch):
         serialize_message(msg)
 
 
-def test_log_cache_version_is_2():
-    assert LOG_CACHE_VERSION == 2
+def test_log_cache_version_is_3():
+    assert LOG_CACHE_VERSION == 3

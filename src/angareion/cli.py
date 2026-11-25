@@ -89,6 +89,11 @@ def _warn(message: str) -> None:
     sys.stderr.write(f"Warning: {message}\n")
 
 
+# Capability words of this build (design 542 §6.2, C-24): a deployment check runs
+# `angareion --capabilities` and looks for `paged-read`. Only add words, never change one.
+CAPABILITIES = ("paged-read",)
+
+
 class UsageError(Exception):
     """A usage error, so bad arguments exit 1 like the rest of the input errors."""
 
@@ -329,6 +334,8 @@ def cmd_read(args: argparse.Namespace, config: Config, app: Angareion, token: st
     target = _target_from_args(args, config)
     app.store.ensure_fresh()
     batch = app.read(target, since=args.since)
+    for text in batch.warnings:
+        _warn(text)
 
     if args.json:
         sys.stdout.write(json.dumps([_message_for_output(m) for m in batch.messages], indent=2, ensure_ascii=False) + "\n")
@@ -396,6 +403,18 @@ def _commit_sha() -> str:
         return "unknown"
     sha = result.stdout.strip()
     return sha if sha else "unknown"
+
+
+class _CapabilitiesAction(argparse.Action):
+    """Print the capability words on one line, then exit 0 (C-24); `--version` is unchanged."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS,
+                 help="show the capabilities of this version and exit"):
+        super().__init__(option_strings, dest, nargs=0, default=default, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        sys.stdout.write(" ".join(CAPABILITIES) + "\n")
+        parser.exit()
 
 
 class _VersionAction(argparse.Action):
@@ -547,6 +566,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action=_VersionAction, help="show program's version number and exit")
+    parser.add_argument("--capabilities", action=_CapabilitiesAction)
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     p_channel = subparsers.add_parser("channel", help="Channel operations.")

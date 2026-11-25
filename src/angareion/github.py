@@ -29,16 +29,20 @@ from angareion.backend import (
     Entity,
     EntityResolver,
     MemoryETagCache,
+    PageUnavailableError,
     RateLimitError,
     ReadResult,
-    advance_cursor,
     comment_is_new,
+    cursor_after_read,
     cursor_since,
     format_backend_time,
     http_cause,
     new_reader_counts,
+    page_base,
+    pages_to_read,
     parse_backend_time,
     scope_matches,
+    skipped_page_warning,
 )
 from angareion.config import Config, load_token, mask_token
 from angareion.messages import Message, parse_message, serialize_message
@@ -200,6 +204,24 @@ class GitHubIssuesBackend:
             return RateLimitError(_compose(head, detail), kind="secondary", retry_after=retry_after)
         return None
 
+    def _refusal_message(self, resp: HttpResponse, url: str) -> str:
+        """The message for a 403 that is not a rate limit (shared by `_request` and the listings)."""
+        head = f"GitHub API refused the request (HTTP {resp.status})"
+        return _compose(head, self._scrub(self._raw_message(resp), url))
+
+    def _listing_failure(self, resp: HttpResponse, url: str, text: str) -> BackendError:
+        """The error for a listing answer >= 400 (design 542 §6.3, 2c).
+
+        404, 410 and a refused 403 are PageUnavailableError (an older page may be
+        skipped); the others are plain BackendErrors. The texts are the ones these
+        listings always had.
+        """
+        if resp.status == 403:
+            return PageUnavailableError(self._refusal_message(resp, url), status=403)
+        if resp.status in (404, 410):
+            return PageUnavailableError(f"{text}: HTTP {resp.status}", status=resp.status)
+        return BackendError(f"{text}: HTTP {resp.status}")
+
     def _request(
         self,
         method: str,
@@ -233,8 +255,7 @@ class GitHubIssuesBackend:
             if limited is not None:
                 raise limited
             if not (resp.status == 403 and allow_refusal):
-                head = f"GitHub API refused the request (HTTP {resp.status})"
-                raise BackendError(_compose(head, self._scrub(self._raw_message(resp), url)))
+                raise BackendError(self._refusal_message(resp, url))
         if resp.status in (301, 302, 303, 307, 308):
             raise BackendError(
                 f"GitHub API redirected the request (HTTP {resp.status}); not following"
@@ -457,23 +478,47 @@ class GitHubIssuesBackend:
         mentioned: str | None = None,
         timeout: float | None = None,
     ) -> bool:
-        """Whether there is anything new, without trusting a multi-page ETag (D2/M1/#96).
+        """Whether there is anything new on any page, without trusting a multi-page ETag (D2/M1/#96, C-11).
 
-        A conditional request is sent when a record for the same cursor and
-        recipient mode exists, even if the in-process scan window moved: a 304
-        answers for the representation that was fully scanned and found clean,
-        and a different representation is a 200 and a full query. While a
-        cursor-window record exists its URL is preferred over `scan_since`, so
-        a narrowed scan window is never the cross-restart query. The ETag is
-        stored only for a single, not-full page with nothing new; a found
-        message, a next page, a full first page, or any unusable state means a
-        full query.
+        Each page is checked from its own start (`page_base`). An older page that
+        cannot be listed is skipped (C-22); the current page's errors propagate.
         """
-        key = self._etag_key(entity, recipient, mentioned)
-        cursor_since_value = cursor_since(cursor)
-        cursor_url = self._full_url(self._listing_url(entity, since=cursor_since_value))
+        for page in pages_to_read(entity, cursor):
+            base = page_base(cursor, page.issue)
+            unread = base.position is None and base.at is None
+            try:
+                if self._check_page(page, base, recipient=recipient, mentioned=mentioned, timeout=timeout, unread=unread):
+                    return True
+            except PageUnavailableError:
+                if page.issue == entity.issue:
+                    raise
+        return False
+
+    def _check_page(
+        self,
+        page: Entity,
+        base: Cursor,
+        *,
+        recipient: str | None,
+        mentioned: str | None,
+        timeout: float | None,
+        unread: bool,
+    ) -> bool:
+        """One page of `check`: a conditional request while the page's ETag record matches its start.
+
+        A page read from the start (`unread`: its start is empty) keeps its ETag and
+        scan window under their own key (`|unread`): its window moves on every
+        comment of the page, not only the ones in scope (C-11, design 542 §2.2).
+        An ETag is stored only for a single, not-full page with nothing new; a found
+        message, a next page, a full first page, or any unusable state means a full query.
+        """
+        key = self._etag_key(page, recipient, mentioned)
+        if unread:
+            key += "|unread"
+        cursor_since_value = cursor_since(base)
+        cursor_url = self._full_url(self._listing_url(page, since=cursor_since_value))
         record = self._etags.get(key)
-        same_cursor = record is not None and self._same_cursor(record.cursor, cursor)
+        same_cursor = record is not None and self._same_cursor(record.cursor, base)
 
         if same_cursor and record is not None and record.url == cursor_url:
             # #96 M1: prefer the cursor's own window over a scan window that
@@ -487,7 +532,7 @@ class GitHubIssuesBackend:
             scan_since = self._scan_since.get(key)
             if scan_since is not None and (since is None or scan_since > since):
                 since = scan_since
-            url = self._full_url(self._listing_url(entity, since=since))
+            url = self._full_url(self._listing_url(page, since=since))
 
         # A record is reusable for the same cursor and recipient mode even when
         # the query window moved: a 304 means the current representation is the
@@ -495,11 +540,11 @@ class GitHubIssuesBackend:
         # and a full query, so the wider cursor window still covers everything.
         etag = record.etag if same_cursor else None
 
-        resp = self._request("GET", url, headers=self._headers(etag=etag), timeout=timeout)
+        resp = self._request("GET", url, headers=self._headers(etag=etag), timeout=timeout, allow_refusal=True)
         if resp.status == 304:
             return False
         if resp.status >= 400:
-            raise BackendError(f"Failed to check for new messages: HTTP {resp.status}")
+            raise self._listing_failure(resp, url, "Failed to check for new messages")
 
         next_url = self._next_page_url(resp)
         items = self._json(resp, "checking for new messages")
@@ -512,22 +557,27 @@ class GitHubIssuesBackend:
         storable = next_url is None and not page_full and first_etag is not None
 
         found = False
+        newest_any: str | None = None
         while True:
             page_newest: str | None = None
             for comment in items:
                 parsed = parse_message(comment.get("body", ""))
-                if parsed is None or not scope_matches(parsed, recipient, mentioned):
+                if parsed is None:
                     continue
                 meta = self._comment_meta(comment)
                 if meta is None:
                     continue
                 comment_id, created_at = meta
+                if newest_any is None or parse_backend_time(created_at) > parse_backend_time(newest_any):
+                    newest_any = created_at
+                if not scope_matches(parsed, recipient, mentioned):
+                    continue
                 if page_newest is None or parse_backend_time(created_at) > parse_backend_time(page_newest):
                     page_newest = created_at
-                if comment_is_new(comment_id, created_at, cursor):
+                if comment_is_new(comment_id, created_at, base):
                     found = True
 
-            if page_newest is not None:
+            if not unread and page_newest is not None:
                 self._scan_since[key] = format_backend_time(
                     parse_backend_time(page_newest) - timedelta(seconds=CURSOR_SEEN_MARGIN_SECONDS)
                 )
@@ -538,17 +588,39 @@ class GitHubIssuesBackend:
                 return True
             if next_url is None:
                 break
-            resp = self._request("GET", next_url, headers=self._headers(), timeout=timeout)
+            resp = self._request("GET", next_url, headers=self._headers(), timeout=timeout, allow_refusal=True)
             if resp.status >= 400:
-                raise BackendError(f"Failed to check for new messages (page fetch failed): HTTP {resp.status}")
+                raise self._listing_failure(resp, next_url, "Failed to check for new messages (page fetch failed)")
             next_url = self._next_page_url(resp)
             items = self._json(resp, "checking for new messages")
 
+        if unread and newest_any is not None:
+            self._scan_since[key] = format_backend_time(
+                parse_backend_time(newest_any) - timedelta(seconds=CURSOR_SEEN_MARGIN_SECONDS)
+            )
         if storable:
-            self._etags.put(key, ETagRecord(url=url, cursor=cursor, etag=first_etag))
+            self._etags.put(key, ETagRecord(url=url, cursor=base, etag=first_etag))
         else:
             self._etags.drop(key)
         return False
+
+    def _listing(self, page: Entity, since: str | None) -> tuple[list[dict[str, Any]], str | None]:
+        """Every comment of one page since `since` (all its listing pages), and the first response's time (#224)."""
+        url = self._listing_url(page, since=since)
+        resp = self._request("GET", url, headers=self._headers(), allow_refusal=True)
+        if resp.status >= 400:
+            raise self._listing_failure(resp, self._full_url(url), "Failed to read messages")
+        first_date = self._backend_now(resp)
+        comments: list[dict[str, Any]] = []
+        while True:
+            comments.extend(self._json(resp, "reading messages"))
+            next_url = self._next_page_url(resp)
+            if not next_url:
+                break
+            resp = self._request("GET", next_url, headers=self._headers(), allow_refusal=True)
+            if resp.status >= 400:
+                raise self._listing_failure(resp, next_url, "Failed to read messages (page fetch failed)")
+        return comments, first_date
 
     def read(
         self,
@@ -559,34 +631,38 @@ class GitHubIssuesBackend:
         mentioned: str | None = None,
         new_recipient: bool = False,
     ) -> ReadResult:
-        """Read the messages after the cursor, oldest first, pages included.
+        """Read the messages after the cursor, oldest first, across every page of the channel.
 
-        "New" is decided by the backend's arrival position and time (D4); a
-        `--since` cursor (time only) returns the comments at or after that time
-        and moves nothing. `new_recipient` is the reader's first "to me" read
-        for this entity (#224): messages addressed to it read from the start, a
-        plain broadcast only from the backend's current time (the listing
-        response's `Date` header), never from the local clock.
+        Each page is read from its own start (`page_base`, design 542 §2.1). The
+        messages of all pages come back in comment-id order. `new_recipient` is
+        the reader's first "to me" read for this entity (#224): messages addressed
+        to it read from the start, a plain broadcast only from the backend's
+        current time (the first listing response's `Date`, never the local clock).
+        An older page that cannot be listed is skipped with a warning (C-22).
         """
-        since = cursor_since(cursor)
-        url: str | None = self._listing_url(entity, since=since)
-        resp = self._request("GET", url, headers=self._headers())
-        if resp.status >= 400:
-            raise BackendError(f"Failed to read messages: HTTP {resp.status}")
-        floor = (
-            self._backend_now(resp)
-            if new_recipient and recipient is not None and mentioned is None
-            else None
-        )
-
-        entries: list[tuple[int, str]] = []
+        pages = pages_to_read(entity, cursor)
+        wants_floor = new_recipient and recipient is not None and mentioned is None
+        floor: str | None = None
+        floor_taken = False
+        warnings: list[str] = []
+        entries_by_page: dict[int, list[tuple[int, str]]] = {}
         matched: list[tuple[int, Message]] = []
 
-        while url:
-            if resp.status >= 400:
-                raise BackendError(f"Failed to read messages (page fetch failed): HTTP {resp.status}")
+        for page in pages:
+            base = page_base(cursor, page.issue)
+            try:
+                comments, first_date = self._listing(page, cursor_since(base))
+            except PageUnavailableError as error:
+                if page.issue == entity.issue:
+                    raise
+                warnings.append(skipped_page_warning(entity.channel, error.status))
+                continue
+            if not floor_taken:
+                floor = first_date if wants_floor else None
+                floor_taken = True
 
-            for comment in self._json(resp, "reading messages"):
+            entries: list[tuple[int, str]] = []
+            for comment in comments:
                 parsed = parse_message(comment.get("body", ""))
                 if parsed is None:
                     continue
@@ -594,14 +670,14 @@ class GitHubIssuesBackend:
                 if meta is None:
                     continue
                 comment_id, created_at = meta
-                # The cursor tracks every message on the entity (the backend's
+                # The cursor tracks every message on the page (the backend's
                 # arrival positions); `recipient`/`mentioned` only decide what is returned.
                 entries.append((comment_id, created_at))
                 if not scope_matches(parsed, recipient, mentioned):
                     continue
                 if not new_reader_counts(parsed, created_at, floor, recipient):
                     continue
-                if not comment_is_new(comment_id, created_at, cursor):
+                if not comment_is_new(comment_id, created_at, base):
                     continue
 
                 setattr(parsed, "received_at", created_at)
@@ -610,17 +686,15 @@ class GitHubIssuesBackend:
                     setattr(parsed, "comment_url", comment_url)
 
                 matched.append((comment_id, parsed))
-
-            url = self._next_page_url(resp)
-            if url:
-                resp = self._request("GET", url, headers=self._headers())
+            entries_by_page[page.issue] = entries
 
         matched.sort(key=lambda pair: pair[0])
         messages = [message for _, message in matched]  # oldest arrival first
 
         if cursor.position is None and cursor.at is not None:
-            return ReadResult(messages, cursor)  # `--since`: the local cursor must not move
-        return ReadResult(messages, advance_cursor(cursor, entries))
+            return ReadResult(messages, cursor, tuple(warnings))  # `--since`: the local cursor must not move
+        new_cursor = cursor_after_read(cursor, [page.issue for page in pages], entries_by_page)
+        return ReadResult(messages, new_cursor, tuple(warnings))
 
     # -- enumeration (read-only listing for `log`) -----------------------
     def enumerate_conditional(self, entity, *, since=None, etag=None):
@@ -632,11 +706,11 @@ class GitHubIssuesBackend:
             if etag.get("url") == full_url:
                 etag_str = etag.get("etag")
         headers = self._headers(etag=etag_str)
-        resp = self._request("GET", url, headers=headers)
+        resp = self._request("GET", url, headers=headers, allow_refusal=True)
         if resp.status == 304:
             return [], etag, True
         if resp.status >= 400:
-            raise BackendError(f"Failed to enumerate messages: HTTP {resp.status}")
+            raise self._listing_failure(resp, full_url, "Failed to enumerate messages")
         result = []
         first_etag = resp.headers.get("etag") or None
         first_page_items = None
@@ -660,9 +734,9 @@ class GitHubIssuesBackend:
             next_url = self._next_page_url(page_resp)
             if not next_url:
                 break
-            page_resp = self._request("GET", next_url, headers=self._headers())
+            page_resp = self._request("GET", next_url, headers=self._headers(), allow_refusal=True)
             if page_resp.status >= 400:
-                raise BackendError(f"Failed to enumerate messages: HTTP {page_resp.status}")
+                raise self._listing_failure(page_resp, next_url, "Failed to enumerate messages")
         result.sort(key=lambda x: x[0])
         # storable etag: single page, not full, has etag
         page_full = isinstance(first_page_items, list) and len(first_page_items) >= LISTING_PAGE_SIZE

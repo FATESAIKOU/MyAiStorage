@@ -398,7 +398,15 @@ def test_read_prints_messages_and_advances_the_cursor(cli_env, capsys):
 
     cursor_file = cli_env["state_dir"] / "cursor-mylinuxpool-impl-w1-1.json"
     stored = json.loads(cursor_file.read_text(encoding="utf-8"))
-    assert stored == {"channel:general": {"position": "1", "at": "2026-10-10T12:00:05Z", "seen": ["1"]}}
+    # C-15: the per-page cursor is added; a single-page channel's page equals the main cursor (C-10)
+    assert stored == {
+        "channel:general": {
+            "position": "1",
+            "at": "2026-10-10T12:00:05Z",
+            "seen": ["1"],
+            "pages": {"10": {"position": "1", "at": "2026-10-10T12:00:05Z", "seen": ["1"]}},
+        }
+    }
 
     assert run(cli_env, ["read", "--channel", "general"]) == 0
     assert capsys.readouterr().out == ""
@@ -1688,7 +1696,7 @@ def test_c21_version_1_log_cache_is_rebuilt_and_every_message_carries_datatype(c
     assert run(cli_env, ["log", "--json"]) == 0
     capsys.readouterr()
     path = log_cache_path(cli_env["state_dir"], IDENTITY, "general")
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 2
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 3
 
     # Turn the file into a version 1 cache with a ghost entry (comment 999999, which the backend
     # never returns) and no datatype key. A sync that merely overlays would keep the ghost;
@@ -1708,7 +1716,7 @@ def test_c21_version_1_log_cache_is_rebuilt_and_every_message_carries_datatype(c
     listed = json.loads(capsys.readouterr().out)
     assert [m["content"] for m in listed] == ["fresh"]
     assert [m["datatype"] for m in listed] == ["decision"]
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 2
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 3
 
 
 def test_read_json_carries_datatype_message_for_a_plain_message(cli_env, capsys):

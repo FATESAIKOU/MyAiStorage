@@ -56,6 +56,18 @@ class RateLimitError(BackendError):
         self.reset_at = reset_at
 
 
+class PageUnavailableError(BackendError):
+    """One page's listing answered 404, 410, or a 403 that is not a rate limit (design 542 §6.3, 2c).
+
+    Only an older (retired) page is skipped on this; the current page raises it
+    like any other BackendError, with the same message as before.
+    """
+
+    def __init__(self, message: str, *, status: int):
+        super().__init__(message)
+        self.status = status
+
+
 # Page limits (design 542 §1, §4). A page is one backend entity (one GitHub issue).
 PAGE_WARN_AT = 2000
 PAGE_ROLLOVER_AT = 2400
@@ -378,11 +390,20 @@ def cursor_after_read(
     )
 
 
+def skipped_page_warning(channel: str, status: int) -> str:
+    """The line for an older page that `read`/`log` skipped (design 542 C-22).
+
+    No `Warning: ` prefix: the side that prints it adds one, so the text is the same everywhere.
+    """
+    return f"an older page of channel '{channel}' could not be read (HTTP {status}); skipped"
+
+
 class ReadResult(NamedTuple):
-    """What `read` returns: the new messages (oldest first) and the new cursor."""
+    """What `read` returns: the new messages (oldest first), the new cursor, and warnings (skipped older pages)."""
 
     messages: list[Message]
     cursor: Cursor
+    warnings: tuple[str, ...] = ()
 
 
 class ETagRecord(NamedTuple):
@@ -636,6 +657,8 @@ class FakeBackend:
         self._clock = clock or _utc_now
         # A page's size as a test set it (`set_page_size`); absent, the actual count is used.
         self._page_sizes: dict[tuple[str, int], int] = {}
+        # Reads of a page raise this error as set by `set_page_error` (design 542 C-22).
+        self._page_errors: dict[tuple[str, int], BackendError] = {}
         self.comment_limit = comment_limit
 
     @staticmethod
@@ -673,6 +696,19 @@ class FakeBackend:
     def set_page_size(self, number: int, n: int, *, repo: str = "owner/repo") -> None:
         """Pin the page size an entity reports (instead of its real comment count)."""
         self._page_sizes[self._key(repo, number)] = n
+
+    def set_page_error(self, number: int, error: BackendError | None, *, repo: str = "owner/repo") -> None:
+        """Make reads, checks and listings of one page raise `error`; None clears it (design 542 C-22)."""
+        key = self._key(repo, number)
+        if error is None:
+            self._page_errors.pop(key, None)
+        else:
+            self._page_errors[key] = error
+
+    def _check_page_error(self, entity: Entity) -> None:
+        error = self._page_errors.get(self._key(entity.repo, entity.issue))
+        if error is not None:
+            raise error
 
     def deliver(
         self,
@@ -770,6 +806,11 @@ class FakeBackend:
             and scope_matches(comment.message, recipient, mentioned)
         ]
 
+    def _page_comments(self, page: Entity) -> list[FakeComment]:
+        """Every comment on one page of a channel, after the page's injected error (if any)."""
+        self._check_page_error(page)
+        return self._comments_for(page, None)
+
     def check(
         self,
         entity: Entity,
@@ -780,10 +821,18 @@ class FakeBackend:
         timeout: float | None = None,
     ) -> bool:
         self._check_injected_error()
-        return any(
-            comment_is_new(c.id, c.created_at, cursor)
-            for c in self._comments_for(entity, recipient, mentioned)
-        )
+        for page in pages_to_read(entity, cursor):
+            try:
+                self._check_page_error(page)
+            except PageUnavailableError:
+                if page.issue == entity.issue:
+                    raise
+                continue  # an older page that cannot be listed is skipped (C-22)
+            comments = self._comments_for(page, recipient, mentioned)
+            base = page_base(cursor, page.issue)
+            if any(comment_is_new(c.id, c.created_at, base) for c in comments):
+                return True
+        return False
 
     def read(
         self,
@@ -795,20 +844,33 @@ class FakeBackend:
         new_recipient: bool = False,
     ) -> ReadResult:
         self._check_injected_error()
-        # The cursor tracks every comment on the entity (the backend's arrival
-        # positions); `recipient`/`mentioned` only decide which messages are returned.
-        all_comments = self._comments_for(entity, None)
         # #224: the backend's own "now" is the floor for a new identity's
         # broadcasts; the fake answers with its injected clock, like the real
         # backend answers with the response's Date header.
         floor = self._clock() if new_recipient and recipient is not None and mentioned is None else None
-        in_scope = [
-            c
-            for c in all_comments
-            if scope_matches(c.message, recipient, mentioned)
-            and new_reader_counts(c.message, c.created_at, floor, recipient)
-        ]
-        matched = [c for c in in_scope if comment_is_new(c.id, c.created_at, cursor)]
+        pages = pages_to_read(entity, cursor)
+        warnings: list[str] = []
+        entries_by_page: dict[int, list[tuple[int, str]]] = {}
+        matched: list[FakeComment] = []
+        for page in pages:
+            try:
+                # The cursor tracks every comment on the page (the backend's arrival
+                # positions); `recipient`/`mentioned` only decide which are returned.
+                all_comments = self._page_comments(page)
+            except PageUnavailableError as error:
+                if page.issue == entity.issue:
+                    raise
+                warnings.append(skipped_page_warning(entity.channel, error.status))
+                continue
+            entries_by_page[page.issue] = [(c.id, c.created_at) for c in all_comments]
+            base = page_base(cursor, page.issue)
+            matched.extend(
+                c
+                for c in all_comments
+                if scope_matches(c.message, recipient, mentioned)
+                and new_reader_counts(c.message, c.created_at, floor, recipient)
+                and comment_is_new(c.id, c.created_at, base)
+            )
         matched.sort(key=lambda c: c.id)
 
         messages: list[Message] = []
@@ -817,15 +879,16 @@ class FakeBackend:
             messages.append(comment.message)
 
         if cursor.position is None and cursor.at is not None:
-            return ReadResult(messages, cursor)  # a `--since` read moves nothing
-        return ReadResult(messages, advance_cursor(cursor, [(c.id, c.created_at) for c in all_comments]))
-
+            return ReadResult(messages, cursor, tuple(warnings))  # a `--since` read moves nothing
+        new_cursor = cursor_after_read(cursor, [page.issue for page in pages], entries_by_page)
+        return ReadResult(messages, new_cursor, tuple(warnings))
 
     # -- enumeration (read-only listing for `log`) -----------------------
     def enumerate(self, entity, since=None, etag=None):
         return self.enumerate_conditional(entity, since=since, etag=etag)[0]
 
     def enumerate_conditional(self, entity, *, since=None, etag=None):
+        self._check_page_error(entity)
         items = []
         for comment in self._comments:
             msg = comment.message

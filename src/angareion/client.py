@@ -41,6 +41,8 @@ class ReadBatch(NamedTuple):
 
     messages: list[Message]
     commit: Callable[[], None]
+    # Skipped older pages (design 542 C-22), by channel name; the caller prints them.
+    warnings: tuple[str, ...] = ()
 
 
 class Angareion:
@@ -158,7 +160,7 @@ class Angareion:
                 if use_local_cursor:
                     self.cursors.save(key, result.cursor)
 
-            return ReadBatch(result.messages, commit_channel)
+            return ReadBatch(result.messages, commit_channel, result.warnings)
 
         messages: list[Message] = []
         updates: dict[str, Cursor] = {}
@@ -166,6 +168,7 @@ class Angareion:
             use_local_cursor and target.recipient is not None and not self.cursors.has_to_me_cursor()
         )
         jobs: list[tuple[str, Entity, Cursor, dict[str, Any]]] = []
+        warned: list[tuple[str, tuple[str, ...]]] = []
         for entity in self.store.entities():
             key, scope = self._scope(target, entity)
             cursor = self.cursors.cursor(key) if use_local_cursor else Cursor(at=since)
@@ -177,9 +180,9 @@ class Angareion:
         # concurrently (#417). Results are consumed in submission order, which
         # keeps the error picked out the same as a sequential read and the
         # final sort below independent of completion order.
-        def read_job(job: tuple[str, Entity, Cursor, dict[str, Any]]) -> tuple[str, Any]:
+        def read_job(job: tuple[str, Entity, Cursor, dict[str, Any]]) -> tuple[str, Entity, Any]:
             key, entity, cursor, scope = job
-            return key, self.backend.read(entity, cursor, **scope)
+            return key, entity, self.backend.read(entity, cursor, **scope)
 
         if len(jobs) <= 1:
             results = [read_job(job) for job in jobs]
@@ -190,10 +193,12 @@ class Angareion:
             ) as pool:
                 results = list(pool.map(read_job, jobs))
 
-        for key, result in results:
+        for key, entity, result in results:
             messages.extend(result.messages)
             if use_local_cursor:
                 updates[key] = result.cursor
+            if result.warnings:
+                warned.append((entity.channel, result.warnings))
 
         # Oldest first across channels: by the backend time (as an instant, #510), then channel/name.
         messages.sort(key=lambda m: (received_at_key(getattr(m, "received_at", None)), m.channel, m.id))
@@ -202,4 +207,5 @@ class Angareion:
             if updates:
                 self.cursors.save_many(updates)
 
-        return ReadBatch(messages, commit_recipient)
+        warnings = tuple(text for _, texts in sorted(warned, key=lambda item: item[0]) for text in texts)
+        return ReadBatch(messages, commit_recipient, warnings)

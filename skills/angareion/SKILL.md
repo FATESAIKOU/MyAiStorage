@@ -84,6 +84,14 @@ App 的寫者只在使用者按「送出」時寫 `submit`；不寫 `ask`、`upd
 - 多個 backend 的環境要加 `--backend <名>`（沒給或名字不存在 → exit 1）。
 - `channel delete <名>`：後端實體**關掉（不刪，留紀錄）**＋留註銷留言；不等待、重跑安全。
 
+## 一個 channel 可能有好幾頁
+
+一個 channel 的留言在後端上有上限；頁滿了之後，同一個 channel 會換到新的一頁，舊頁還留著。這件事不用你做：`read`、`wait`、`log` 會把新舊各頁一起讀，訊息照到達順序給你，不會重複、也不用換名字。
+
+- 舊頁讀不到（後端回 404、410，或拒絕）時，`read`／`log` 在 stderr 印一行 `Warning: an older page of channel '<ch>' could not be read (HTTP <碼>); skipped`，其他訊息照常給；那一頁的進度不動，它回來之後會從原來的地方接著讀。`wait` 不印這一行。
+- `angareion --capabilities` 印出這個版本的能力字樣（一行，目前是 `paged-read`）。舊版本跑它會是用法錯誤。
+- `angareion channel status [<ch>…] [--json]` 唯讀地看每個 channel：`count` 是現頁的留言數，`pages` 是頁數（現頁加舊頁），`level` 是 `ok`／`warn`（≥2000）／`rollover`（≥2400）／`full`（≥2500）。`flags` 空白是正常。`side` 表示有旁頁上已經有留言（會照常讀到，只是提醒）；`late` 表示換頁一天之後還有人寫進舊頁（通常是設定檔過期的寫者），讀者若已過了寬限期，這些訊息可能讀不到，要通知 PMO；`unknown` 表示旗標查不到，指令會 exit 2。
+
 ## 閒著的時候：阻塞地等，不要一直問模型
 
 **只限沒有人會 poke 的 agent**（不在 sidecar 底下）：用 `angareion wait` → `angareion read` 當唯一的讀者。被 sidecar 管的 agent（會被 poke 叫醒），閒著就結束這一輪、等 poke，被叫醒就在前景讀信；**不要跑背景讀信迴圈**（`wait → read`）。`read` 讀走信就推進游標，兩個讀者讀同一個身分時先讀的拿走信，另一個看到空的——細節見 aicomm 的「同一個身分只留一個讀者」。
