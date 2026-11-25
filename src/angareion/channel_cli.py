@@ -25,6 +25,7 @@ from angareion.config import Config, mask_token
 from angareion.messages import MessageValidationError, validate_channel_name
 from angareion.registry import (
     CommentPoster,
+    RegistryComments,
     RegistryCounter,
     RegistryError,
     post_with_retries,
@@ -113,14 +114,6 @@ def cmd_channel_create(
     return EXIT_OK
 
 
-def _configured_backends(store: ChannelStore) -> set[str]:
-    """The backend names in the local copy; unreadable means none (then no page can look stale)."""
-    try:
-        return set(store.backends())
-    except ChannelConfigError:
-        return set()
-
-
 def _current_page_moved(registry: Any, backend_names: set[str], name: str, local_issue: int) -> bool:
     """True only when the registry says the local current page of `name` has been retired (C-8).
 
@@ -128,11 +121,10 @@ def _current_page_moved(registry: Any, backend_names: set[str], name: str, local
     establish (no registry read, a seam without `all_comments`, the name missing
     from the recomputed mapping, the same current page) is no evidence: False.
     """
-    all_comments = getattr(registry, "all_comments", None)
-    if all_comments is None:
+    if not isinstance(registry, RegistryComments):
         return False
     try:
-        comments = all_comments()
+        comments = registry.all_comments()
     except RegistryError:
         return False
     channels, _ = rebuild_channels(comments, backend_names)
@@ -162,7 +154,7 @@ def cmd_channel_delete(
     store.fetch()  # the staleness check below needs the newest registry view, not the periodic one
     entity = store.entity_for(args.name)  # a missing channel raises ChannelNotFoundError
 
-    if _current_page_moved(registry, _configured_backends(store), args.name, entity.issue):
+    if _current_page_moved(registry, set(store.backends()), args.name, entity.issue):
         sys.stderr.write(
             f"Error: channel '{args.name}' was not deleted: its current page changed and the local "
             "configuration has not caught up yet; try again later\n"

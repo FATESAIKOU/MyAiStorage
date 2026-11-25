@@ -161,17 +161,33 @@ def test_c8_rollover_from_a_retired_page_becomes_a_side_page():
 
 
 def test_c8_two_rollovers_from_the_same_page_race_to_one_current_and_one_side():
-    """Both rollovers were written before either was seen; the (created_at, id) order decides."""
+    """Both rollovers were written before either was seen; the (created_at, id) order decides.
+
+    The smaller id is the later comment here, so a sort by id alone would pick the other winner.
+    """
     comments = [
         _c(register_comment("general", BACKEND, 28), id_=1),
-        _c(rollover_comment("general", BACKEND, 42, 28), id_=3, created="2026-11-25T10:02:00Z"),
-        _c(rollover_comment("general", BACKEND, 41, 28), id_=2, created="2026-11-25T10:01:00Z"),
+        _c(rollover_comment("general", BACKEND, 41, 28), id_=2, created="2026-11-25T10:02:00Z"),
+        _c(rollover_comment("general", BACKEND, 42, 28), id_=3, created="2026-11-25T10:01:00Z"),
     ]
     channels, _ = _rebuild(comments)
-    # id 2 (created earlier) is applied first: 41 becomes the current page.
-    assert channels["general"]["issue"] == 41
-    assert [page["issue"] for page in channels["general"]["retired"]] == [28, 42]
+    # created_at decides: 42 (10:01) is applied first and becomes the current page.
+    assert channels["general"]["issue"] == 42
+    assert [page["issue"] for page in channels["general"]["retired"]] == [28, 41]
     assert channels["general"]["retired"][1]["side"] is True
+
+
+def test_c8_rollover_without_a_usable_created_at_is_reported_and_skipped():
+    """`until` comes from created_at; a comment without a string time must not write `until: ""`."""
+    register = _c(register_comment("general", BACKEND, 28), id_=1)
+    body = rollover_comment("general", BACKEND, 41, 28)
+    for created in (None, 12345):
+        missing = {"id": 2, "body": body, "author_association": "OWNER"}
+        if created is not None:
+            missing["created_at"] = created
+        channels, reports = _rebuild([register, missing])
+        assert channels == {"general": {"backend": BACKEND, "issue": 28}}, created
+        assert len(reports) == 1 and "has no created_at time" in reports[0], created
 
 
 def test_c8_rollover_from_an_unknown_page_is_reported_and_skipped():
@@ -262,7 +278,9 @@ GOLDEN_COMMENTS = [
     _c("{bad json", id_=9, created="2026-10-10T12:00:09Z", assoc="MEMBER"),
     _c(register_comment("team-d", BACKEND, 14), id_=10, created="2026-10-10T12:00:10Z", assoc="NONE"),
     _c(register_comment("team-e", BACKEND, 15), id_=11, created="2026-10-10T12:00:11Z"),
-    _c(register_comment("team-f", BACKEND, 16), id_=12, created="2026-10-10T12:00:12Z"),
+    # Registered first in time, so the mapping's insertion order is not alphabetical:
+    # only `sort_keys` in render_channels puts team-f last.
+    _c(register_comment("team-f", BACKEND, 16), id_=12, created="2026-10-10T12:00:00Z"),
 ]
 
 GOLDEN_CHANNELS_TEXT = (
@@ -371,3 +389,25 @@ def test_c25_a_fixed_text_report_is_posted_every_time_it_happens():
     assert api.posted.count(fixed) == 2
     assert second.posted == [fixed]
     assert second.reports == [fixed]
+
+
+def test_c25_a_report_matches_the_thread_when_github_returns_it_normalized():
+    """GitHub may return a body without its trailing newline, or with CRLF line endings (M-3)."""
+    first = Rebuilder(_fake_registry([_c("{bad json", id_=1)]), sleeper=lambda _seconds: None).run()
+    report = first.posted[0]
+    for echoed in (report.rstrip("\n"), report.replace("\n", "\r\n"), report.replace("\n", "\r\n").rstrip()):
+        api = _fake_registry([_c("{bad json", id_=1), _c(echoed, id_=2, assoc="NONE")])
+        second = Rebuilder(api, sleeper=lambda _seconds: None).run()
+        assert second.reports == [report], repr(echoed)
+        assert second.posted == [], repr(echoed)
+        assert api.posted == [], repr(echoed)
+
+
+def test_c25_the_same_report_twice_in_one_run_is_posted_once():
+    """A report posted earlier in the run is in the thread for the rest of it (L-1)."""
+    api = _fake_registry([_c("{bad json", id_=1), _c("{bad json", id_=2)])
+    summary = Rebuilder(api, sleeper=lambda _seconds: None).run()
+
+    assert len(summary.reports) == 2
+    assert len(summary.posted) == 1
+    assert api.posted == summary.posted

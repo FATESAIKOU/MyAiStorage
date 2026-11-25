@@ -35,10 +35,8 @@ from angareion.registry import (
     RegistryError,
     RegistryWriteConflict,
 )
-from angareion.registry_rules import (  # noqa: F401  (re-exported: existing imports keep working)
+from angareion.registry_rules import (
     CONFIG_VERSION,
-    _comment_order,
-    _quote,
     rebuild_channels,
     render_channels,
     report_text,
@@ -80,6 +78,12 @@ class RebuildSummary:
     changed: bool = False
     committed: bool = False
     comments_seen: int = 0
+
+
+def _same_text(body: Any) -> str:
+    """A comment body as compared for the C-25 dedupe: LF endings, no surrounding whitespace."""
+    text = "" if body is None else str(body)
+    return text.replace("\r\n", "\n").strip()
 
 
 def load_backend_names(text: str) -> set[str]:
@@ -155,13 +159,16 @@ class Rebuilder:
 
         # A report that quotes a comment describes that comment, which does not change,
         # so the same text is posted once (C-25). A fixed-text report describes this run,
-        # so it is posted every time it happens.
-        thread_bodies = {comment.get("body") for comment in comments}
+        # so it is posted every time it happens. Bodies are compared after normalizing
+        # line endings and surrounding whitespace, since GitHub may return them that way.
+        thread_bodies = {_same_text(comment.get("body")) for comment in comments}
         posted: list[str] = []
         for report in reports:
-            if report in thread_bodies:
+            key = _same_text(report)
+            if key in thread_bodies:
                 continue
             self.api.post_comment(report)
+            thread_bodies.add(key)
             posted.append(report)
         for report in fixed:
             self.api.post_comment(report)

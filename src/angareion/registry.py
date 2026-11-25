@@ -173,6 +173,14 @@ class RegistryCounter(Protocol):
         ...
 
 
+@runtime_checkable
+class RegistryComments(Protocol):
+    """What `channel delete` needs from a registry client: the whole comment thread (C-8)."""
+
+    def all_comments(self) -> list[dict[str, Any]]:
+        ...
+
+
 def post_with_retries(
     poster: CommentPoster,
     body: str,

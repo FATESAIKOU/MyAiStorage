@@ -116,6 +116,13 @@ def rebuild_channels(
                     )
                 )
         else:  # rollover
+            # The page's end time comes from the comment; without it the rollover cannot be dated.
+            until = comment.get("created_at")
+            if not isinstance(until, str) or not until:
+                reports.append(
+                    report_text("the comment has no created_at time, so the rollover cannot be dated", body)
+                )
+                continue
             if current is None:
                 reports.append(report_text(f"channel {parsed.channel!r} is not registered", body))
                 continue
@@ -131,7 +138,6 @@ def rebuild_channels(
             retired_issues = {page["issue"] for page in retired}
             if parsed.issue == current["issue"] or parsed.issue in retired_issues:
                 continue  # already the page, or already retired: no-op
-            until = str(comment.get("created_at", ""))
             if parsed.from_issue == current["issue"]:
                 retired.append({"issue": parsed.from_issue, "until": until})
                 current["issue"] = parsed.issue

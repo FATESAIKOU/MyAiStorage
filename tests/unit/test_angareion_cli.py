@@ -1751,6 +1751,7 @@ def _register_and_roll_over(registry, *, from_issue: int, to_issue: int) -> None
 
 def test_c8_delete_refuses_when_the_registry_retired_the_local_page(cli_env, capsys):
     _register_and_roll_over(cli_env["registry"], from_issue=10, to_issue=20)
+    fetches_before = cli_env["git"].fetch_calls
 
     ret = run(cli_env, ["channel", "delete", "general"])
 
@@ -1759,6 +1760,7 @@ def test_c8_delete_refuses_when_the_registry_retired_the_local_page(cli_env, cap
     assert captured.out == ""
     assert "was not deleted" in captured.err
     assert "try again later" in captured.err
+    assert cli_env["git"].fetch_calls == fetches_before + 1  # the forced fetch before the staleness check (M-4)
     assert cli_env["backend"].entity_state(10) == "open"  # close_channel was not called
     assert cli_env["registry"].posted == []  # no new unregister
 
