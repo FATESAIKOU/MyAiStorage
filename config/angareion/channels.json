@@ -92,6 +92,10 @@
       "backend": "aicompany-channel",
       "issue": 22
     },
+    "team-mypmo-m1-b": {
+      "backend": "aicompany-channel",
+      "issue": 39
+    },
     "test-decision-1116": {
       "backend": "aicompany-channel",
       "issue": 33
