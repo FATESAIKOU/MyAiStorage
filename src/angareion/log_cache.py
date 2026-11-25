@@ -62,6 +62,17 @@ def _etag_to_dict(record):
     return {"url": url, "etag": etag}
 
 
+def _page_state_ok(state):
+    """Whether one entry of `pages` has the shape `sync` writes (a dict; a str-or-None time; an etag in `_etag_to_dict`'s shape or None)."""
+    if not isinstance(state, dict):
+        return False
+    last_created = state.get("last_created_at")
+    if last_created is not None and not isinstance(last_created, str):
+        return False
+    etag = state.get("etag")
+    return etag is None or _etag_to_dict(etag) == etag
+
+
 class LogCache:
     def __init__(self, state_dir=None, identity=None, path=None, warn=None, state=None):
         if state_dir is None and state is not None:
@@ -112,6 +123,8 @@ class LogCache:
         if not isinstance(data.get("messages"), list):
             return None
         if not isinstance(data.get("pages"), dict):
+            return None
+        if not all(_page_state_ok(state) for state in data["pages"].values()):
             return None
         for _m in data.get("messages"):
             if not isinstance(_m, dict):

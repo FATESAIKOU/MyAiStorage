@@ -148,6 +148,13 @@ class Pages:
             body = {403: b'{"message": "Resource not accessible by integration"}', 404: b'{"message": "Not Found"}'}.get(status, b'{"message": "Gone"}')
             self.listing.refusals[issue] = HttpResponse(status, {}, body)
 
+    def server_error(self, issue: int, status: int) -> None:
+        """Make one page's listing answer a 5xx: an error that is not a refusal, so it is never skipped."""
+        if self.kind == "fake":
+            self.backend.set_page_error(issue, BackendError(f"Failed to read messages: HTTP {status}"))
+        else:
+            self.listing.refusals[issue] = HttpResponse(status, {}, b'{"message": "Server Error"}')
+
     def rate_limit(self, issue: int) -> None:
         if self.kind == "fake":
             self.backend.set_page_error(issue, RateLimitError("GitHub API rate limit reached", kind="primary"))
@@ -246,6 +253,19 @@ def test_c11_check_finds_a_new_message_on_any_page(pages):
     assert pages.check(ent, cursor) is True
 
 
+def test_c11_check_finds_a_new_message_only_on_the_current_page(pages):
+    """PR-2c review 中-2: both pages are read and the retired one is clean, so only the current page can answer."""
+    pages.post(10, 1, at(0), "r1")
+    pages.post(20, 2, at(1), "n1")
+    ent = chan(20, old(10, at(0)))
+    cursor = pages.read(ent, Cursor()).cursor
+    assert pages.check(ent, cursor) is False
+
+    pages.post(20, 3, at(2), "n2")
+
+    assert pages.check(ent, cursor) is True
+
+
 def test_c11_a_never_read_page_with_a_message_for_me_is_new(pages):
     pages.post(10, 1, at(0), "for-me")  # on a page the reader has never read
     pages.post(20, 2, at(1), "n1", to=OTHER)
@@ -290,6 +310,23 @@ def test_c11_the_etag_of_one_page_survives_a_read_of_another_github(github_pages
     assert github_pages.check(ent, cursor) is False  # n1 was just read; the old page still answers 304
 
     assert "If-None-Match" in github_pages.listing.requests_to(10)[-1]["headers"]
+
+
+def test_c11_a_read_from_the_start_does_not_narrow_a_cursor_read_window_github(github_pages):
+    """PR-2c review 低-3: a page read from the start keeps its scan window under `|unread`.
+
+    The unread check sees only an out-of-scope comment (to OTHER) and moves the
+    window to it. A cursor check of the same page must still see the in-scope
+    comment that arrived behind that window, so the two modes cannot share a key.
+    """
+    github_pages.post(20, 2, at(5), "for-other", to=OTHER)
+    ent = chan(20)
+    assert github_pages.check(ent, Cursor(), recipient=ME) is False
+
+    github_pages.post(20, 3, at(3), "for-me")
+    behind = Cursor(position="1", at=at(2), seen=[])
+
+    assert github_pages.check(ent, behind, recipient=ME) is True
 
 
 def test_c12_read_after_rollover_gives_each_new_message_once(pages):
@@ -434,6 +471,25 @@ def test_c22_a_network_failure_on_an_older_page_is_not_skipped(pages):
         pages.read(chan(20, old(10, at(0))), Cursor())
 
     assert not isinstance(caught.value, PageUnavailableError)
+
+
+@pytest.mark.parametrize("status", [500, 502, 503])
+def test_c22_a_server_error_on_an_older_page_is_not_skipped(pages, tmp_path, status):
+    """PR-2c review 低-1: only 404, 410 and a refused 403 are skipped; a 5xx is raised by read, check and the log mirror."""
+    pages.post(10, 1, at(0), "r1")
+    pages.post(20, 2, at(1), "n1")
+    pages.server_error(10, status)
+    ent = chan(20, old(10, at(0)))
+
+    with pytest.raises(BackendError) as read_error:
+        pages.read(ent, Cursor())
+    with pytest.raises(BackendError) as check_error:
+        pages.check(ent, Cursor())
+    with pytest.raises(BackendError) as sync_error:
+        LogCache(tmp_path, ME).sync(pages.backend, ent)
+
+    for caught in (read_error, check_error, sync_error):
+        assert not isinstance(caught.value, PageUnavailableError)
 
 
 # -- C-23: the cursor of every page ---------------------------------------------
@@ -582,6 +638,26 @@ def test_c22_a_skipped_page_does_not_fail_other_channels(cli, capsys):
     assert len(_skip_lines(captured.err)) == 1
 
 
+def test_c22_every_channel_with_a_skipped_page_warns_in_name_order(cli, capsys):
+    """PR-2c review 低-3: each channel's skipped page is warned about once, sorted by channel name."""
+    cli.set_channels({"zeta": (20, [old(10, at(0))]), "alpha": (30, [old(40, at(0))])})
+    cli.pages.post(10, 1, at(0), "z-r1", channel="zeta")
+    cli.pages.post(20, 2, at(1), "z-n1", channel="zeta")
+    cli.pages.post(40, 3, at(0), "a-r1", channel="alpha")
+    cli.pages.post(30, 4, at(1), "a-n1", channel="alpha")
+    cli.pages.refuse(10, 404)
+    cli.pages.refuse(40, 404)
+
+    assert cli.run(["read", "--json"]) == 0
+
+    captured = capsys.readouterr()
+    assert sorted(m["content"] for m in json.loads(captured.out)) == ["a-n1", "z-n1"]
+    assert _skip_lines(captured.err) == [
+        f"Warning: {skipped_page_warning('alpha', 404)}",
+        f"Warning: {skipped_page_warning('zeta', 404)}",
+    ]
+
+
 def test_c22_a_current_page_that_cannot_be_listed_is_exit_2(cli, capsys):
     cli.pages.post(20, 2, at(1), "n1")
     cli.pages.refuse(20, 404)
@@ -629,6 +705,45 @@ def test_c14_messages_of_a_page_the_channel_no_longer_has_are_dropped(tmp_path):
 
     assert _texts(before) == ["r1", "n1"]
     assert _texts(after) == ["n1"]
+
+
+def test_c14_the_mirror_is_rebuilt_when_the_channel_moves_to_another_repo(tmp_path):
+    """PR-2c review 低-2: a cached file for another repo is not trusted; the mirror is rebuilt from the backend."""
+    first = Pages("fake")
+    first.post(10, 1, at(0), "r1")
+    first.post(20, 2, at(1), "n1")
+    cache = LogCache(tmp_path, ME)
+    assert _texts(cache.sync(first.backend, chan(20, old(10, at(0))))) == ["r1", "n1"]
+
+    elsewhere = Pages("fake")
+    moved = dataclasses.replace(chan(20, old(10, at(0))), repo="owner/other")
+    elsewhere.backend.deliver(
+        dataclasses.replace(moved, issue=20, retired=()),
+        Message(from_=PM, to=ME, channel="general", content="n9", id="01MSG" + "0" * 21, at=at(5)),
+        comment_id=3,
+        created_at=at(5),
+    )
+
+    assert _texts(cache.sync(elsewhere.backend, moved)) == ["n9"]
+
+
+def test_c14_a_skipped_page_keeps_its_place_in_the_mirror(cli, capsys):
+    """PR-2c review 低-2: a page that cannot be listed keeps its `pages` entry in the file."""
+    cli.pages.post(10, 1, at(0), "r1")
+    cli.pages.post(20, 2, at(1), "n1")
+    assert cli.run(["log", "--channel", "general", "--json"]) == 0
+    capsys.readouterr()
+    path = log_cache_path(cli.state_dir, ME, "general")
+    before = json.loads(path.read_text(encoding="utf-8"))["pages"]["10"]
+
+    cli.pages.refuse(10, 404)
+    cli.pages.post(20, 3, at(2), "n2")
+    assert cli.run(["log", "--channel", "general", "--json"]) == 0
+    capsys.readouterr()
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert set(data["pages"]) == {"10", "20"}
+    assert data["pages"]["10"] == before
 
 
 # -- C-24 and C-26 ------------------------------------------------------------
@@ -679,6 +794,18 @@ def test_c26_late_flag_when_the_last_retired_page_gets_messages_after_the_fill_w
 
     assert rc == 0
     assert rows["general"]["flags"] == ["late"]
+
+
+def test_c26_no_late_flag_for_a_message_inside_the_fill_window(fake_cli, capsys):
+    """PR-2c review 低-3: a message on the last retired page within PAGE_FILL_WINDOW is not `late`."""
+    fake_cli.set_channels({"general": (30, [old(10, at(0))])})
+    fake_cli.pages.post(10, 1, at(0), "early")
+    fake_cli.pages.post(10, 2, at(60), "inside-the-window")
+
+    rc, rows, _, _ = _status_rows(fake_cli, capsys)
+
+    assert rc == 0
+    assert rows["general"]["flags"] == []
 
 
 def test_c26_retired_pages_older_than_seven_days_get_no_flags(fake_cli, capsys):
