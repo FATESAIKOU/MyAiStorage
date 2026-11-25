@@ -7,6 +7,7 @@
   - 第 3 版（2026-11-25），依重審（Sonnet，H-1、M-1～M-5、L-1～L-6、A-7～A-9）修正，並同步 PR-1 實作已定的 7 點（不改 PR-1 契約的意義）。改動對照在 §13。
   - 第 4 版（2026-11-25），依第 2 次重審（Sonnet，M-1～M-3、L-1～L-3、nit-1～3、A-10、A-11）修正；游標改成每頁一份（A-10）。PR-1 的範圍與 C-1～C-5 不動。改動對照在 §14。
   - 第 5 版（2026-11-25），第 3 次重審「可以」（Sonnet，head 5b72d07）之後，收低項與 nit（L-1、L-2、nit-1～3），並把 PR-2 切成 2a／2b／2c（§6.3）。PR-1 已由 #544 實作並 merge，範圍與 C-1～C-5 不動。改動對照在 §15。
+  - 第 6 版（2026-11-25），依 #545 的審查（Sonnet，head b954a5e：W-1、nit-1～5）修 §6.3、C-22、§9、§10。改動對照在 §16。
 - 範圍：只設計。動到的模組：`backend`、`github`、`state`、`channel_config`、`registry`、`registry_rebuild`、`client`、`log_cache`、`decision_cli`、`cli`；新增 `channel_cli`、`registry_rules`、`rollover`。主 spec（`openspec/specs/angareion/spec.md`、`angareion/channel-config/spec.md`）要補的地方列在 §9，由 PM 決定與撰寫。
 - 實測：只讀。`gh api` 讀得到註冊簿 MyAiStorage#47（2026-11-25 有 52 則留言）。AiCompany-channel 是私有 repo，這台 worker 的 `gh` 讀不到（404），所以各頁的留言數照 issue 本文引用，沒有自己量。沒有對真 GitHub 寫入。
 - 名詞：
@@ -459,6 +460,7 @@ PR-1 已 merge（#544，main `e324857`）。PR-2 切成三個 PR，每一個都�
 
   ```python
   RETIRED_READ_GRACE = timedelta(hours=48)
+  PAGE_FILL_WINDOW = timedelta(hours=24)   # §1.3 的表；2a 只定義，2c（C-26 的 late）與 PR-3 才用
 
   @dataclass(frozen=True)
   class RetiredPage:
@@ -541,9 +543,10 @@ PR-1 已 merge（#544，main `e324857`）。PR-2 切成三個 PR，每一個都�
   ```
 
   - 一併搬來的私有輔助：`_quote`、`_comment_order`。`registry_rebuild` 從 `registry_rules` import 這三個公開名字，`from angareion.registry_rebuild import rebuild_channels, render_channels, report_text` 照樣可用（既有測試不改）。
+  - **`CONFIG_VERSION = 1` 也搬到 `registry_rules`**（`render_channels` 要用，而 `registry_rules` 不得 import `registry_rebuild`）；`registry_rebuild` 以 `from angareion.registry_rules import CONFIG_VERSION, …` 拿回來給 `load_backend_names` 用，`tests/unit/test_angareion_rebuild.py:21` 的 `from angareion.registry_rebuild import CONFIG_VERSION` 照樣可用。`channel_config.CONFIG_VERSION`（`channel_config.py:34`）是讀者側的同值常數，不動、不合併（`registry_rules` 不得 import `channel_config`；兩者一致由 C-8 的 golden 與既有的 `channel_config` 測試鎖住）。
   - `until` 取那則 `rollover` 留言的 `created_at` 原字串。
 - **介面**（`registry_rebuild.py`）：`RebuildSummary` 加 `posted: list[str] = field(default_factory=list)`；`Rebuilder.run` 的去重照 C-25。`load_backend_names`、`Rebuilder`、`main`、環境變數處理留在這裡。
-- **介面**（`channel_cli.py`）：私有 `_current_page_moved(registry: Any, backend_names: set[str], name: str, local_issue: int) -> bool`：只在「讀得到註冊簿（`all_comments`）、重算裡有 `name`、而且 `local_issue` 在它的 `retired`」時回 `True`；其餘（讀不到、接縫沒有 `all_comments`、重算沒有 `name`、現頁相同）回 `False`。`cmd_channel_delete` 在 `ensure_fresh` 之後強制 `store.fetch()`，再以 `store.entity_for(name).issue` 呼叫它，`True` 就照 §1.2 的訊息 exit 2。新邊 `channel_cli → registry_rules`（§8.2 已列）。
+- **介面**（`channel_cli.py`）：私有 `_current_page_moved(registry: Any, backend_names: set[str], name: str, local_issue: int) -> bool`：只在「讀得到註冊簿（`all_comments`）、重算裡有 `name`、而且 `local_issue` 在它的 `retired`」時回 `True`；其餘（讀不到、接縫沒有 `all_comments`、重算沒有 `name`、現頁相同）回 `False`。`cmd_channel_delete` 在 `ensure_fresh` 之後強制 `store.fetch()`，再以 `store.entity_for(name).issue` 呼叫它，`True` 就照 §1.2 的訊息 exit 2（stderr 照 `channel_cli` 現行寫法是 `Error: ` 加上 §1.2 那句，§1.2 的句子本身不帶前綴）。新邊 `channel_cli → registry_rules`（§8.2 已列）。
 - **合上後 main**：現有註冊簿重建結果逐位元組相同（C-8 的 golden）；`rollover` 留言只會由人手動貼，被 §6.2 的盤點擋到 2c 之後；回報去重只讓註冊簿少貼；`delete` 只在有證據時拒絕。讀側沒有任何改變。
 
 #### 2c：讀側跨頁接上、能力標記、`channel status` 的頁資訊、手動換頁的操作說明
@@ -563,25 +566,26 @@ PR-1 已 merge（#544，main `e324857`）。PR-2 切成三個 PR，每一個都�
       warnings: tuple[str, ...] = ()
 
   def skipped_page_warning(channel: str, status: int) -> str
-      # "Warning: an older page of channel '<C>' could not be read (HTTP <碼>); skipped"（C-22，不含編號）
+      # "an older page of channel '<C>' could not be read (HTTP <碼>); skipped"（C-22，不含編號）
+      # 不帶 "Warning: " 前綴：與 PR-1 的 C-4 一致，前綴由印的那一方加（cli._warn、LogCache 的 warn 回呼）
 
   CAPABILITIES 不放這裡（放 cli.py）
   ```
 
   - `FakeBackend.set_page_error(issue: int, error: BackendError | None, *, repo: str = "owner/repo") -> None`：之後對那一頁的 `read`／`check`／`enumerate_conditional` 丟 `error`（`None` 解除）。
   - Fake 的 `read`／`check` 照 §2.1、§2.2 跨頁，與 GitHub 共用 `pages_to_read`、`page_base`、`cursor_after_read`、`skipped_page_warning`；逐頁迴圈各自寫（各約 20 行），由同一組參數化測試鎖住一致（§8.3 的 L）。
-- **GitHub 的錯誤分類**：列表的三個入口（`check`、`read`、`enumerate_conditional`，含後續分頁）改用 `_request(..., allow_refusal=True)`，自己判斷：404、410、403 → `PageUnavailableError(<與現行相同的訊息>, status=…)`。因為是 `BackendError` 的子類，訊息字樣不變，現頁的錯誤對外完全不變（exit 2、stderr 同一句）；跨頁迴圈只在**退役頁**接住它並略過，現頁照舊往外丟。rate limit 仍由 `_request` 先判（`RateLimitError` 不被略過）。
+- **GitHub 的錯誤分類**：列表的三個入口（`check`、`read`、`enumerate_conditional`，含後續分頁）改用 `_request(..., allow_refusal=True)`，自己判斷：404、410、403 → `PageUnavailableError(<與現行相同的訊息>, status=…)`。404／410 的訊息照各入口現行的寫法（例如 `github.py` 的 `Failed to check for new messages: HTTP {status}`）。403 的訊息現在是 `_request` 內部組的（`github.py:236-237`），所以**先把那兩行抽成私有方法 `_refusal_message(self, resp: HttpResponse, url: str) -> str`**（回傳 `_compose(f"GitHub API refused the request (HTTP {resp.status})", self._scrub(self._raw_message(resp), url))`），`_request` 自己與三個入口都呼叫它，不各複製一份；`_request` 的 403 訊息因此逐字不變。因為是 `BackendError` 的子類，訊息字樣不變，現頁的錯誤對外完全不變（exit 2、stderr 同一句）；跨頁迴圈只在**退役頁**接住它並略過，現頁照舊往外丟。rate limit 仍由 `_request` 先判（`RateLimitError` 不被略過）。
 - **介面**（`client.py`）：`ReadBatch` 加最後一個欄位 `warnings: tuple[str, ...] = ()`，收集各頻道 `ReadResult.warnings`（依頻道名排序後串起來）；不寫 stderr。
-- **介面**（`cli.py`）：`CAPABILITIES = ("paged-read",)`；`--capabilities` 照 `_VersionAction` 的做法另立一個 action，印 `" ".join(CAPABILITIES)` 一行後 exit 0。`read` 在印訊息之前把 `ReadBatch.warnings` 逐行寫到 stderr。`--version` 不動。
-- **介面**（`log_cache.py`）：`LOG_CACHE_VERSION = 3`；`LogCache.sync(backend: EnumerableBackend, entity: Entity)` 簽名不變，內部對 `(*退役頁, 現頁)` 逐頁呼叫 `enumerate_conditional(page_entity(entity, p), …)`；檔案格式照 §2.2 的 `log` 列；退役頁的 `PageUnavailableError` 經既有的 `warn` 回呼印 `skipped_page_warning`。`log_cache` 已經 import `backend`，沒有新的邊。
-- **介面**（`channel_cli.py`）：`PAGES_UNTIL_ROLLOVER` 刪掉，頁數＝`1 + len(entity.retired)`；私有 `_page_flags(backend: Any, entity: Entity, now: str | None, token: str) -> tuple[list[str], bool]` 照 C-26（`now` 取現頁 `page_size_at` 的 `Date`；`now` 是 `None` 時不檢查旗標、也不算失敗）。
+- **介面**（`cli.py`）：`CAPABILITIES = ("paged-read",)`；`--capabilities` 照 `_VersionAction` 的做法另立一個 action，印 `" ".join(CAPABILITIES)` 一行後 exit 0。`read` 在印訊息之前把 `ReadBatch.warnings` 逐則經既有的 `_warn`（`cli.py:88`，加 `Warning: ` 前綴）寫到 stderr。`--version` 不動。
+- **介面**（`log_cache.py`）：`LOG_CACHE_VERSION = 3`；`LogCache.sync(backend: EnumerableBackend, entity: Entity)` 簽名不變，內部對 `(*退役頁, 現頁)` 逐頁呼叫 `enumerate_conditional(page_entity(entity, p), …)`；檔案格式照 §2.2 的 `log` 列；退役頁的 `PageUnavailableError` 把 `skipped_page_warning(...)` 交給既有的 `warn` 回呼（預設 `_warn_to_stderr` 加 `Warning: ` 前綴，`log_cache.py:29-30`）；字串本身不帶前綴，所以 `log`、`decision list` 與 `read` 印出來是同一行。`log_cache` 已經 import `backend`，沒有新的邊。
+- **介面**（`channel_cli.py`）：`PAGES_UNTIL_ROLLOVER` 刪掉（現在用在 `channel_cli.py:236` 與 `:239` 兩處），頻道列的頁數＝`1 + len(entity.retired)`，**註冊簿那一列的頁數恆為 1**（註冊簿不換頁，直接寫常值 `1`）；`_page_flags` 查詢失敗的 stderr 照 `_page_count` 現行的 `Warning: channel '<C>': …` 寫法（不含編號）；私有 `_page_flags(backend: Any, entity: Entity, now: str | None, token: str) -> tuple[list[str], bool]` 照 C-26（`now` 取現頁 `page_size_at` 的 `Date`；`now` 是 `None` 時不檢查旗標、也不算失敗）。
 - **既有測試**：只有 C-15 列出的三處與 `LOG_CACHE_VERSION` 相關的常數可以改，報告逐一列出（檔名、行號、改前改後）。
 - **合上後 main**：channels.json 沒有 `retired` 時，讀取的請求與回傳的訊息和 2c 之前相同；差別只有三個：存下的游標多 `pages` 鍵、`LogCache` 升版整份重建一次、單頁新游標的 `check` 第二次起帶 `since`（只少請求，C-11）。`--capabilities` 印 `paged-read` 之後，§6.2 的盤點才可能通過。
 
 #### 給實作者的共通事項
 
 - 模組與依賴方向照 §8.1、§8.2；`registry_rules` 不得 import `backend`、`channel_config`、`registry_rebuild`。
-- 改壞驗證照 §10 的 PR-2 清單，各子 PR 做自己契約的那幾項。
+- 改壞驗證照 §10 的 PR-2 清單，各子 PR 做自己契約的那幾項；**哪一項在哪個子 PR、靠哪個測試轉紅，照 §10 的 PR-2 分表**。要注意：C-23 列的五種 `page_base`／`pages_after_read` 改壞，在 2a 是靠 C-10 的純函式單元測試轉紅；C-22／C-23 的情境測試屬 2c，2c 再驗一次。
 - 不連真 GitHub；隔離照 AGENTS.md。
 
 ## 7. 契約（每條都有測試對應；實作報告逐條對到測試名稱）
@@ -673,7 +677,8 @@ PR-1 已 merge（#544，main `e324857`）。PR-2 切成三個 PR，每一個都�
   - `test_angareion_version.py` 不在可改之列（能力標記另立旗標，C-24）。
 - **C-22** 讀退役頁失敗（`read`、`check`、`LogCache`）：
   - 404、410、不是 rate limit 的 403 → 略過那一頁，其他頁照讀；
-  - `read` 與 `log` 在 stderr 印一行 `Warning: an older page of channel '<C>' could not be read (HTTP <碼>); skipped`（不含編號），`check` 不印；
+  - `read` 與 `log` 在 stderr 印恰好一行 `Warning: an older page of channel '<C>' could not be read (HTTP <碼>); skipped`（不含編號），`check` 不印；
+  - **前綴只有一個**（第 6 版，W-1）：`read` 與 `log` 各一個測試，stderr 不含 `Warning: Warning:`；`skipped_page_warning` 的回傳值不以 `Warning` 開頭（單元測試）。
   - 游標的 `pages` 照 `pages_after_read`：被略過的頁游標不動。情境測試（Fake 與 GitHub 假 transport 各一）：
     - **讀過的頁**：游標 `pages={R: cR, N: cN}`，R 上的訊息都已送達 → R 上新到 2 則（r1、r2）→ 2 分鐘後 N 上新到 1 則（n1）→ 讀（R 回 404）：得到 n1，主游標越過 r1、r2 的 id 與時間，`pages[R]` 仍是 cR → R 恢復 → 下一次 `read` 恰好得到 r1、r2，R 上原本已送達的 0 則重送；再讀一次 0 則。GitHub 假 transport 記到的 R 的請求帶 `since`（cR 的 `at-60s`，不是從頭）。
     - **沒讀過的頁**：游標 `pages={P: cP}`，設定檔加上 S（S 上有 3 則，id 都比主游標小、時間都早於主游標的 `at-60s`）→ S 回 404 一輪 → S 恢復 → 下一次 `read` 從頭讀 S，恰好得到那 3 則；再讀一次 0 則。
@@ -841,11 +846,11 @@ PR-1 已 merge（#544，main `e324857`）。PR-2 切成三個 PR，每一個都�
 - 「目標與游標」：游標以頻道為單位、跨頁接續；游標記得讀過哪幾頁，沒讀過的頁從頭讀（§2）。
 - 「目標與游標」的新身分情境（spec「開之前寄給自己的那一則讀得到」）：換過頁的頻道，範圍是現頁與最近一次換頁 48 小時內退役的頁（Q-9 選 A 時；§2.1）。
 - **各條屬於哪個 PR**（第 5 版）：
-  - PR-1（已 merge，spec 還沒補）：`channel status` 進「七個介面家族」的指令清單與「輸出與結束碼」的 stdout 清單（stdout 是表格或 `--json`，不含編號；有一列查不到 exit 2、未註冊的名字 exit 1）；「後端錯誤」情境分成 rate limit 與「這一頁滿了（或看起來滿了）」，exit 照舊是 2。
+  - PR-1（已 merge）：`channel status` 已由 PM 補進 spec（`b954a5e`）。**只剩兩件，PM 於 #545 補**：「後端錯誤」情境分成 rate limit 與「這一頁滿了（或看起來滿了）」，exit 照舊是 2；`send` 在現頁 ≥2000 時 stderr 一行警告（C-4，stdout 與 exit 不變）。
   - 2b：`channel-config` 的 `retired` 與 `rollover` 動作、回報去重；`channel delete` 的過期拒絕。
   - 2c：`--capabilities`、退役頁讀不到時略過並警告、「目標與游標」兩條。
   - PR-3：`channel rollover`。
-  - 主 spec 不在架構師可以 commit 的路徑（AGENTS.md），由 PM 撰寫；PR-1 那一條的草稿在架構師的報告裡。
+  - 主 spec 不在架構師可以 commit 的路徑（AGENTS.md），由 PM 撰寫。
 
 ## 10. 測試策略
 
@@ -860,7 +865,10 @@ PR-1 已 merge（#544，main `e324857`）。PR-2 切成三個 PR，每一個都�
 - **golden**：用一份與現行 channels.json 同形狀的合成註冊簿夾具，比對 PR-2 前後的重建輸出，要求逐位元組相同（C-8）。
 - **改壞驗證**（每個 PR 至少下列幾種，要能讓對應測試失敗）：
   - PR-1：C-1 拿掉 `retry-after` 判斷；C-1 訊息拿掉 `not retrying`；C-2 不做 GET 探測；C-2 把 2400 門檻拿掉；
-  - PR-2：C-9 寬限比較改成 `<=`，或拿掉新游標的上限（第 5 版，A-12），或上限的比較改成 `>=`；C-23 的 L-1 與 A-13 兩種（列在 C-23）；C-10 只對現頁 `advance_cursor`；C-11 ETag key 不含頁；C-14 不讀退役頁；C-22／C-23 的五種 `page_base`／`pages_after_read` 改壞（列在 C-23）；C-11 拿掉從頭讀模式的 `_scan_since`、從頭讀模式不認新游標；C-10 每頁各取一個 `floor`；C-25 拿掉去重；C-8 旁頁改成取代現頁；
+  - PR-2（第 6 版依子 PR 分；每一項寫「改壞 → 轉紅的測試」）：
+    - **2a**：C-9 寬限比較改成 `<=`，或拿掉新游標的上限（A-12），或上限的比較改成 `>=` → C-9 的單元測試；C-23 的 L-1 與 A-13 兩種 → C-23 的 `state` 案例；`cursor_after_read` 只對現頁 `advance_cursor` → C-10 的純函式單元測試；**C-23 列的五種 `page_base`／`pages_after_read` 改壞 → C-10 的純函式單元測試**（`page_base` 的三種情況、`pages_after_read` 的六種情況逐一對應；「被略過」在單元測試裡就是 `to_read` 有、`entries_by_page` 沒有的頁，所以「不寫入結果」的改壞由「結果的鍵恰好是 `to_read`」那一條轉紅）。2a 沒有情境測試可轉紅，這五種以單元測試為準。
+    - **2b**：C-25 拿掉去重 → C-25；C-8 旁頁改成取代現頁 → C-8 的競態列；`channel delete` 拿掉過期檢查 → C-8 的 CLI 測試。
+    - **2c**：C-10 讀取只對現頁 `advance_cursor`、每頁各取一個 `floor` → C-10 的情境；C-11 ETag key 不含頁、拿掉從頭讀模式的 `_scan_since`、從頭讀模式不認新游標 → C-11；C-14 不讀退役頁 → C-14；C-22／C-23 的五種改壞再以情境測試各驗一次（列在 C-23）；`skipped_page_warning` 帶回 `Warning: ` 前綴 → C-22 的 `log` 測試（W-1）。
   - PR-3：C-16 拿掉「先寫舊頁」；C-16 拿掉 W-9 的 `refresh`；C-17 先寫新頁再貼註冊；C-17 拿掉 S-8；C-17 拿掉 S-2 的相容檢查；C-17 拿掉待註冊紀錄（`open_page` 次數要變多）；C-17 S-6′ 也刪紀錄（`open_page` 次數要變多）。
 - **沒驗到、也不在測試裡驗的**（真 GitHub）：
   1. 達上限時的實際狀態碼與 body（issue 本文只記錄到 403 和我們自己的訊息）；
@@ -978,3 +986,15 @@ PR-1（§6.1、C-1～C-5）的契約一字未動；§6.1 只補「已 merge」�
 - **nit-2**：單筆壞 `pages[p]` 退回主游標（鍵壞才丟）；§2.1、C-23、改壞；裁定在 §8.4 的 A-13。
 - **nit-3**：PR 表的 PR-2 列補 `page_base`。
 - **PR-2 的切分**：新增 §6.3（2a／2b／2c 的範圍、契約、順序、安全性、介面簽名與檔案）；§0 第 9 點、§6 的 PR 表、§8.1 同步；裁定在 §8.4 的 A-14。新增的名字：`cursor_after_read`、`PageUnavailableError`、`skipped_page_warning`、`ReadResult.warnings`、`ReadBatch.warnings`、`FakeBackend.set_page_error`、`FakeBackend.deliver(page=)`、`RebuildSummary.posted`（第 4 版已有）。依賴邊沒有新增（§8.2 不變）。
+
+## 16. 第 6 版的改動（對照 #545 的審查，Sonnet，head b954a5e）
+
+PR-1 的契約與 2a／2b／2c 的範圍、契約歸屬、順序都不動；只補實作者要自己猜的地方。
+
+- **W-1**：`skipped_page_warning` 的回傳值不帶 `Warning: `，前綴由 `cli._warn` 與 `LogCache` 的 `warn` 回呼加（與 PR-1 的 C-4 一致）；§6.3 的 `cli.py`／`log_cache.py` 兩處寫明走哪一個；C-22 改成「恰好一行」並加「前綴只有一個」的測試；§10 的 2c 加對應改壞。
+- **nit-1**：`PAGE_FILL_WINDOW = timedelta(hours=24)` 放進 2a 的 `backend.py` 介面區塊。
+- **nit-2**：`CONFIG_VERSION` 搬到 `registry_rules`，`registry_rebuild` 再 import 回來；`channel_config.CONFIG_VERSION` 不動。
+- **nit-3**：`channel status` 註冊簿那一列的頁數恆為 1。
+- **nit-4**：403 訊息抽成 `GitHubIssuesBackend._refusal_message`，`_request` 與三個列表入口共用。
+- **nit-5**：§9 的 PR-1 那一條改成「只剩兩件，PM 於 #545 補」；§10 的 PR-2 改壞清單依 2a／2b／2c 分，五種 `page_base`／`pages_after_read` 改壞在 2a 由 C-10 的純函式單元測試轉紅；§6.3 的共通事項指過去。防呆與手動換頁步驟的歸屬仍是 PM 的事（§6.3 2c 的檔案段），不在這一版。
+- **重讀 §6.3 找到的同類**（前綴與訊息由誰組）：2b 的 `channel delete` 過期拒絕寫明 stderr＝`Error: `＋§1.2 的句子；2c 的 `_page_flags` 查詢失敗照 `_page_count` 現行的 `Warning: channel '<C>': …` 寫法。沒有其他自帶前綴的字串。
