@@ -10,15 +10,20 @@ files are naturally abandoned — a new identity starts from the beginning.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 from typing import Any, Callable
 
 from angareion.backend import Cursor, ETagRecord
 from angareion.config import identity_slug
+
+# A `pages` key in the cursor file: a decimal issue number, no leading zero (design 542 §2.1).
+_PAGE_KEY = re.compile(r"[1-9][0-9]*")
 
 
 def cursor_file_path(state_dir: Path | str, identity: str) -> Path:
@@ -198,6 +203,52 @@ def mention_cursor_key(identity: str, channel: str) -> str:
     return f"mention:{identity_slug(identity)}:{channel}"
 
 
+def _cursor_from_json(value: dict[str, Any]) -> Cursor:
+    """The three columns of one cursor entry; a bad `seen` is read as none (never an error)."""
+    seen = value.get("seen")
+    return Cursor(
+        position=value.get("position"),
+        at=value.get("at"),
+        seen=[str(item) for item in seen if isinstance(item, str)] if isinstance(seen, list) else [],
+    )
+
+
+def _cursor_to_json(cursor: Cursor) -> dict[str, Any]:
+    return {"position": cursor.position, "at": cursor.at, "seen": list(cursor.seen)}
+
+
+def _pages_from_json(raw: Any, main: Cursor) -> dict[int, Cursor] | None:
+    """The per-page cursors of one entry, or None when it has none (design 542 §2.1).
+
+    A key that is not a page number is dropped. A page whose value is not an
+    object takes the main cursor's three columns, so it is not read from the start.
+    """
+    if not isinstance(raw, dict):
+        return None
+    pages: dict[int, Cursor] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not _PAGE_KEY.fullmatch(key):
+            continue
+        if isinstance(value, dict):
+            pages[int(key)] = _cursor_from_json(value)
+        else:
+            pages[int(key)] = Cursor(position=main.position, at=main.at, seen=list(main.seen))
+    return pages
+
+
+def _pages_to_json(pages: dict[int, Cursor]) -> dict[str, dict]:
+    """The `pages` object: decimal page keys in numeric order, each with the three columns."""
+    return {str(page): _cursor_to_json(pages[page]) for page in sorted(pages)}
+
+
+def _entry_to_json(cursor: Cursor) -> dict[str, Any]:
+    """One cursor entry as written; `pages` is written only when the cursor has it."""
+    entry = _cursor_to_json(cursor)
+    if cursor.pages is not None:
+        entry["pages"] = _pages_to_json(cursor.pages)
+    return entry
+
+
 class CursorStore:
     """Reads and writes `cursor-<identity>.json` for one identity."""
 
@@ -235,12 +286,8 @@ class CursorStore:
                 # start and say so once.
                 self.dropped_old_format.add(key)
                 continue
-            seen = value.get("seen")
-            cursors[key] = Cursor(
-                position=value.get("position"),
-                at=value.get("at"),
-                seen=[str(item) for item in seen if isinstance(item, str)] if isinstance(seen, list) else [],
-            )
+            main = _cursor_from_json(value)
+            cursors[key] = replace(main, pages=_pages_from_json(value.get("pages"), main))
         return cursors
 
     def cursor(self, key: str) -> Cursor:
@@ -266,10 +313,7 @@ class CursorStore:
         """Store several cursors at once (a "to me" read spans channels)."""
         current = self._load()
         current.update(cursors)
-        payload: dict[str, Any] = {
-            key: {"position": c.position, "at": c.at, "seen": list(c.seen)}
-            for key, c in current.items()
-        }
+        payload: dict[str, Any] = {key: _entry_to_json(c) for key, c in current.items()}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # L6: a unique temp file in the same directory, so two processes
         # reading at the same time cannot overwrite each other's in-flight file.
