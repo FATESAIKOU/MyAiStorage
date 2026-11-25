@@ -33,6 +33,87 @@ class AuthenticationError(BackendError):
     """Raised when the token is invalid (HTTP 401)."""
 
 
+class RateLimitError(BackendError):
+    """The backend refused the request because of a rate limit (HTTP 403/429); not retried.
+
+    `kind` is "primary" (the hourly quota is used up; `reset_at` is the UTC
+    time it resets) or "secondary" (abuse protection; `retry_after` is the
+    number of seconds to wait, when the backend said so).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str,
+        retry_after: int | None = None,
+        reset_at: str | None = None,
+    ):
+        super().__init__(message)
+        self.kind = kind
+        self.retry_after = retry_after
+        self.reset_at = reset_at
+
+
+# Page limits (design 542 §1, §4). A page is one backend entity (one GitHub issue).
+PAGE_WARN_AT = 2000
+PAGE_ROLLOVER_AT = 2400
+PAGE_COMMENT_LIMIT = 2500
+
+
+def page_level(count: int | None) -> str:
+    """The level of a page's message count: ok, warn, rollover, full (or unknown)."""
+    if count is None:
+        return "unknown"
+    if count >= PAGE_COMMENT_LIMIT:
+        return "full"
+    if count >= PAGE_ROLLOVER_AT:
+        return "rollover"
+    if count >= PAGE_WARN_AT:
+        return "warn"
+    return "ok"
+
+
+class ChannelFullError(BackendError):
+    """The current page of a channel is full, or the backend refused the write and it looks full.
+
+    `presumed` is False when the page count itself is at the limit (is full) and
+    True when the count is in the rollover band (looks full: the refusal may
+    also be a token problem). The message carries the HTTP status and the
+    backend's own message, already cleaned by the backend.
+    """
+
+    def __init__(
+        self,
+        channel: str,
+        count: int,
+        *,
+        presumed: bool,
+        status: int | None = None,
+        detail: str = "",
+    ):
+        self.channel = channel
+        self.count = count
+        self.presumed = presumed
+        where = f"its current page has {count} of {PAGE_COMMENT_LIMIT} messages"
+        if presumed:
+            head = f"channel '{channel}' looks full (or the token was refused)"
+        else:
+            head = f"channel '{channel}' is full"
+        cause = http_cause(status, detail)
+        super().__init__(f"{head}: {where} and the backend refused the write{cause}")
+
+
+def http_cause(status: int | None, detail: str) -> str:
+    """` (HTTP <code>: <message>)`, dropping whichever part is missing."""
+    parts = []
+    if status is not None:
+        parts.append(f"HTTP {status}")
+    if detail:
+        parts.append(detail)
+    return f" ({': '.join(parts)})" if parts else ""
+
+
 @dataclass(frozen=True)
 class BackendRef:
     """One backends.json entry: a named backend and where its entities live."""
@@ -303,6 +384,20 @@ class ChannelBackend(Protocol):
 
 
 @runtime_checkable
+class PageBackend(Protocol):
+    """Read-only page sizes: how many messages the current page holds (design 542 C-3).
+
+    `page_size_at` also gives the backend's own time (the `Date` header, RFC 3339
+    UTC, or None) so the caller can judge a window without this machine's clock.
+    Backends without these methods are simply not checked for page sizes.
+    """
+
+    def page_size(self, entity: Entity) -> int: ...
+
+    def page_size_at(self, entity: Entity) -> tuple[int, str | None]: ...
+
+
+@runtime_checkable
 class EnumerableBackend(Protocol):
     """Read-only listing of a channel's whole history, for the local log mirror (#468).
 
@@ -413,6 +508,7 @@ class FakeBackend:
         start_entity_id: int = 1,
         start_comment_id: int = 1,
         clock: Any = None,
+        comment_limit: int = PAGE_COMMENT_LIMIT,
     ):
         self.resolver = resolver
         self._entities: dict[tuple[str, int], dict[str, Any]] = {}
@@ -423,6 +519,9 @@ class FakeBackend:
         self.next_create_error: Exception | None = None
         self.next_close_error: Exception | None = None
         self._clock = clock or _utc_now
+        # A page's size as a test set it (`set_page_size`); absent, the actual count is used.
+        self._page_sizes: dict[tuple[str, int], int] = {}
+        self.comment_limit = comment_limit
 
     @staticmethod
     def _key(repo: str, number: int) -> tuple[str, int]:
@@ -455,6 +554,10 @@ class FakeBackend:
     def entity_title(self, number: int, repo: str = "owner/repo") -> str | None:
         entry = self._entities.get(self._key(repo, number))
         return entry["title"] if entry else None
+
+    def set_page_size(self, number: int, n: int, *, repo: str = "owner/repo") -> None:
+        """Pin the page size an entity reports (instead of its real comment count)."""
+        self._page_sizes[self._key(repo, number)] = n
 
     def deliver(
         self,
@@ -509,10 +612,23 @@ class FakeBackend:
             return  # 404: already deleted, treated as already closed
         entry["state"] = "closed"
 
+    def page_size(self, entity: Entity) -> int:
+        return self.page_size_at(entity)[0]
+
+    def page_size_at(self, entity: Entity) -> tuple[int, str | None]:
+        self._check_injected_error()
+        override = self._page_sizes.get(self._key(entity.repo, entity.issue))
+        if override is not None:
+            return override, self._clock()
+        return len(self._comments_for(entity, None)), self._clock()
+
     def send(self, entity: Entity, message: Message) -> str:
         self._check_injected_error()
         if self._key(entity.repo, entity.issue) not in self._entities:
             raise ChannelNotFoundError(f"Channel '{entity.channel}' does not exist")
+        count = self.page_size(entity)
+        if count >= self.comment_limit:
+            raise ChannelFullError(entity.channel, count, presumed=False)
         self.deliver(entity, message)
         return message.id
 

@@ -19,7 +19,7 @@ import base64
 import json
 import re
 import time
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from angareion.transport import DefaultHttpTransport, HttpTransport, HttpResponse
 
@@ -129,6 +129,14 @@ class CommentPoster(Protocol):
         ...
 
 
+@runtime_checkable
+class RegistryCounter(Protocol):
+    """What `channel status` needs from a registry client: how many comments the issue has."""
+
+    def comment_count(self) -> int:
+        ...
+
+
 def post_with_retries(
     poster: CommentPoster,
     body: str,
@@ -226,6 +234,18 @@ class RegistryClient:
             data={"body": body},
         )
 
+    def comment_count(self) -> int:
+        """How many comments the registry issue has now (GET issue; design 542 C-5)."""
+        resp = self._request("GET", f"repos/{self.repo}/issues/{self.issue}")
+        try:
+            data = resp.json()
+        except ValueError as e:
+            raise RegistryError("the registry issue was not JSON") from e
+        count = data.get("comments") if isinstance(data, dict) else None
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise RegistryError("the registry issue has no comment count")
+        return count
+
     def list_comments(self, page: int) -> list[dict[str, Any]]:
         """One page of the registry thread (100 comments per page), oldest first."""
         resp = self._request(
@@ -322,6 +342,9 @@ class FakeRegistryClient:
         }
         self._comments.append(comment)
         return comment
+
+    def comment_count(self) -> int:
+        return len(self._comments)
 
     def list_comments(self, page: int) -> list[dict[str, Any]]:
         self.list_calls.append(page)

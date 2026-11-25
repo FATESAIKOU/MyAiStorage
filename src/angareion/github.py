@@ -8,7 +8,7 @@ repos (and MyAiStorage, for the registry comments).
 
 from __future__ import annotations
 
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 import email.utils
 import json
 import re
@@ -17,20 +17,25 @@ import urllib.parse
 
 from angareion.backend import (
     CURSOR_SEEN_MARGIN_SECONDS,
+    PAGE_COMMENT_LIMIT,
+    PAGE_ROLLOVER_AT,
     AuthenticationError,
     BackendError,
     BackendRef,
+    ChannelFullError,
     Cursor,
     ETagCache,
     ETagRecord,
     Entity,
     EntityResolver,
     MemoryETagCache,
+    RateLimitError,
     ReadResult,
     advance_cursor,
     comment_is_new,
     cursor_since,
     format_backend_time,
+    http_cause,
     new_reader_counts,
     parse_backend_time,
     scope_matches,
@@ -42,6 +47,9 @@ from angareion.transport import DefaultHttpTransport, HttpResponse, HttpTranspor
 USER_AGENT = "Angareion/0.2.0"
 HTTP_TIMEOUT_SECONDS = 30.0
 LISTING_PAGE_SIZE = 100
+# A message that goes into an error is cut to this many characters (design 542 §4).
+ERROR_MESSAGE_MAX_CHARS = 200
+SECONDARY_LIMIT_TEXT = "secondary rate limit"
 
 __all__ = [
     "DefaultHttpTransport",
@@ -50,6 +58,45 @@ __all__ = [
     "HttpTransport",
     "USER_AGENT",
 ]
+
+
+_REPO_IN_URL = re.compile(r"repos/([^/?]+/[^/?]+)/")
+_HASH_NUMBER = re.compile(r"#\s?\d+")
+_ISSUE_WORD = re.compile(r"\b(?:issues?[ /]|GH-)\d+", re.IGNORECASE)
+
+
+def _repo_of(url: str) -> str | None:
+    """`owner/repo` out of an API URL, so an error can name the backend instead of the repo."""
+    match = _REPO_IN_URL.search(url)
+    return match.group(1) if match else None
+
+
+def _compose(head: str, detail: str, tail: str = "not retrying") -> str:
+    """`<head>: <detail>; not retrying`, leaving out whichever of the detail and the tail is empty."""
+    text = f"{head}: {detail}" if detail else head
+    return f"{text}; {tail}" if tail else text
+
+
+def _epoch_to_backend_time(raw: str | None) -> str | None:
+    """An `x-ratelimit-reset` (epoch seconds) as the backend's own UTC time, or None."""
+    if raw is None:
+        return None
+    try:
+        moment = datetime.fromtimestamp(int(raw.strip()), tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+    return format_backend_time(moment)
+
+
+def _whole_seconds(raw: str | None) -> int | None:
+    """A `retry-after` in whole seconds, or None when it is missing or not a number."""
+    if raw is None:
+        return None
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return None
+    return value if value >= 0 else None
 
 
 class GitHubIssuesBackend:
@@ -108,6 +155,51 @@ class GitHubIssuesBackend:
             headers["If-None-Match"] = etag
         return headers
 
+    def _scrub(self, text: str, url: str) -> str:
+        """GitHub's own message, made safe for an error: one line, short, no token, no repo name, no issue number."""
+        text = self._mask(" ".join(text.split()))
+        repo = _repo_of(url)
+        if repo:
+            # GitHub may spell the repo in another case, or URL-encode the slash.
+            spellings = sorted({repo, repo.replace("/", "%2F")}, key=len, reverse=True)
+            text = re.sub("|".join(re.escape(s) for s in spellings), "<backend>", text, flags=re.IGNORECASE)
+        text = _HASH_NUMBER.sub("#…", text)
+        text = _ISSUE_WORD.sub("<issue>", text)
+        if len(text) > ERROR_MESSAGE_MAX_CHARS:
+            text = text[: ERROR_MESSAGE_MAX_CHARS - 1] + "…"
+        return text
+
+    @staticmethod
+    def _raw_message(resp: HttpResponse) -> str:
+        """The `message` field of a JSON error body, unprocessed; empty when there is none."""
+        try:
+            body = resp.json()
+        except ValueError:
+            return ""
+        if isinstance(body, dict) and isinstance(body.get("message"), str):
+            return body["message"]
+        return ""
+
+    def _rate_limit(self, resp: HttpResponse, url: str) -> RateLimitError | None:
+        """A 403/429 that is a rate limit, or None. Headers decide first (primary, then secondary); the text is the fallback."""
+        if resp.status not in (403, 429):
+            return None
+        raw = self._raw_message(resp)
+        detail = self._scrub(raw, url)
+        remaining = resp.headers.get("x-ratelimit-remaining")
+        if remaining is not None and remaining.strip() == "0":
+            reset_at = _epoch_to_backend_time(resp.headers.get("x-ratelimit-reset"))
+            when = f"resets at {reset_at}" if reset_at else "the reset time is unknown"
+            head = f"GitHub API rate limit reached (HTTP {resp.status}, primary; {when})"
+            return RateLimitError(_compose(head, detail), kind="primary", reset_at=reset_at)
+        retry_raw = resp.headers.get("retry-after")
+        if retry_raw is not None or SECONDARY_LIMIT_TEXT in raw.lower():
+            retry_after = _whole_seconds(retry_raw)
+            when = f"retry after {retry_after}s" if retry_after is not None else "no retry time given"
+            head = f"GitHub API secondary rate limit (HTTP {resp.status}; {when})"
+            return RateLimitError(_compose(head, detail), kind="secondary", retry_after=retry_after)
+        return None
+
     def _request(
         self,
         method: str,
@@ -116,7 +208,10 @@ class GitHubIssuesBackend:
         data: dict[str, Any] | None = None,
         *,
         timeout: float | None = None,
+        allow_refusal: bool = False,
     ) -> HttpResponse:
+        """One request. A 403/429 that is a rate limit raises RateLimitError; another 403 raises
+        BackendError, unless `allow_refusal` hands it back (POST comments decide that case, design 542 §4)."""
         url = self._full_url(path_or_url)
 
         body_bytes = None
@@ -133,10 +228,13 @@ class GitHubIssuesBackend:
 
         if resp.status == 401:
             raise AuthenticationError("Invalid or missing GitHub token (HTTP 401)")
-        if resp.status == 403:
-            raise BackendError(
-                "GitHub API refused the request (HTTP 403; secondary rate limit?); not retrying"
-            )
+        if resp.status in (403, 429):
+            limited = self._rate_limit(resp, url)
+            if limited is not None:
+                raise limited
+            if not (resp.status == 403 and allow_refusal):
+                head = f"GitHub API refused the request (HTTP {resp.status})"
+                raise BackendError(_compose(head, self._scrub(self._raw_message(resp), url)))
         if resp.status in (301, 302, 303, 307, 308):
             raise BackendError(
                 f"GitHub API redirected the request (HTTP {resp.status}); not following"
@@ -218,15 +316,61 @@ class GitHubIssuesBackend:
                 f"Message channel '{message.channel}' does not match target channel '{entity.channel}'"
             )
 
+        url = f"repos/{entity.repo}/issues/{entity.issue}/comments"
         resp = self._request(
             "POST",
-            f"repos/{entity.repo}/issues/{entity.issue}/comments",
+            url,
             headers=self._headers(),
             data={"body": serialize_message(message)},
+            allow_refusal=True,
         )
-        if resp.status not in (200, 201):
-            raise BackendError(f"Failed to send to channel '{entity.channel}': HTTP {resp.status}")
-        return message.id
+        if resp.status in (200, 201):
+            return message.id
+        if resp.status in (403, 422):
+            raise self._refused_send(entity, resp, url)
+        raise BackendError(f"Failed to send to channel '{entity.channel}': HTTP {resp.status}")
+
+    def _refused_send(self, entity: Entity, resp: HttpResponse, url: str) -> BackendError:
+        """A refused write that is not a rate limit: the page may simply be full (design 542 §4, rule 3).
+
+        Look at the page's count with one GET. At or above the rollover band the
+        error is ChannelFullError (presumed when below the hard limit); anything
+        else, or a failed GET, is a plain backend error.
+        """
+        detail = self._scrub(self._raw_message(resp), url)
+        try:
+            count: int | None = self.page_size(entity)
+        except AuthenticationError:
+            raise
+        except BackendError:
+            count = None
+        if count is not None and count >= PAGE_ROLLOVER_AT:
+            return ChannelFullError(
+                entity.channel,
+                count,
+                presumed=count < PAGE_COMMENT_LIMIT,
+                status=resp.status,
+                detail=detail,
+            )
+        return BackendError(f"Failed to send to channel '{entity.channel}'{http_cause(resp.status, detail)}")
+
+    # -- page size (read-only; design 542 C-3) ----------------------------
+
+    def page_size(self, entity: Entity) -> int:
+        return self.page_size_at(entity)[0]
+
+    def page_size_at(self, entity: Entity) -> tuple[int, str | None]:
+        """The comment count of the entity's issue, with the response's own `Date` (or None)."""
+        resp = self._request("GET", f"repos/{entity.repo}/issues/{entity.issue}", headers=self._headers())
+        if resp.status >= 400:
+            raise BackendError(f"Failed to read the size of channel '{entity.channel}': HTTP {resp.status}")
+        data = self._json(resp, f"reading the size of channel '{entity.channel}'")
+        count = data.get("comments") if isinstance(data, dict) else None
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise BackendError(
+                f"Failed to read the size of channel '{entity.channel}': no comment count in the response"
+            )
+        return count, self._backend_now(resp)
 
     def _entity_key(self, entity: Entity) -> str:
         return f"{entity.repo}#{entity.issue}"
