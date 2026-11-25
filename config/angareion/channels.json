@@ -80,6 +80,10 @@
       "backend": "aicompany-channel",
       "issue": 30
     },
+    "team-mylinuxpool-w4-b": {
+      "backend": "aicompany-channel",
+      "issue": 38
+    },
     "team-mylinuxpool-w5": {
       "backend": "aicompany-channel",
       "issue": 31
