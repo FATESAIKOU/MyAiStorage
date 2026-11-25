@@ -14,10 +14,13 @@ from typing import Any, Callable, Sequence
 
 from ainame import is_group
 from angareion.backend import (
+    PAGE_COMMENT_LIMIT,
+    PAGE_WARN_AT,
     BackendError,
     ChannelBackend,
     ChannelNotFoundError,
     EntityResolver,
+    PageBackend,
     Target,
     parse_backend_time,
 )
@@ -26,6 +29,7 @@ from angareion.channel_config import (
     ChannelConfigError,
     ChannelStore,
 )
+from angareion.channel_cli import cmd_channel_create, cmd_channel_delete, cmd_channel_status
 from angareion.client import POLL_INTERVAL_SECONDS, Angareion
 from angareion.decision_cli import cmd_decision
 from angareion.config import (
@@ -52,9 +56,6 @@ from angareion.registry import (
     CommentPoster,
     RegistryClient,
     RegistryError,
-    post_with_retries,
-    register_comment,
-    unregister_comment,
 )
 from angareion.log_cache import LogCache
 from angareion.log_query import AnchorNotFoundError, select as select_log
@@ -210,112 +211,21 @@ def _read_body(args: argparse.Namespace) -> str:
     return args.body
 
 
-def cmd_channel_create(
-    args: argparse.Namespace,
-    config: Config,
-    app: Angareion,
-    registry: CommentPoster,
-    store: ChannelStore,
-    token: str,
-    sleeper: Callable[[float], None] = time.sleep,
-) -> int:
-    """The three-step create (design section 6).
+def _warn_if_page_is_filling(app: Angareion, channel: str) -> None:
+    """C-4: a current page at or above PAGE_WARN_AT gets one warning line before the send.
 
-    1. open the backend entity; 2. verify it, then post a register comment on
-    the registry issue; 3. wait (bounded) for the rebuild to land the mapping.
+    A backend without page sizes, or a size that cannot be read, is silent: the
+    send goes ahead either way.
     """
+    backend = getattr(app, "backend", None)
+    if not isinstance(backend, PageBackend):
+        return
     try:
-        validate_channel_name(args.name)
-    except MessageValidationError as e:
-        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
-        return EXIT_USAGE
-
-    store.ensure_fresh()
-    if args.name in store.channels():
-        sys.stderr.write(
-            f"Error: channel '{args.name}' already exists; use `angareion channel delete` first to replace it.\n"
-        )
-        return EXIT_USAGE
-
-    try:
-        backend_ref = store.choose_backend_for_create(args.backend)
-    except BackendChoiceError as e:
-        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
-        return EXIT_USAGE
-    except ChannelConfigError as e:
-        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
-        return EXIT_BACKEND
-
-    # Step 1: open the entity in the backend.
-    try:
-        entity = app.create_channel(args.name, backend_ref)
+        count = backend.page_size(app.store.entity_for(channel))
     except BackendError:
-        sys.stderr.write(f"Error: channel '{args.name}' was not created.\n")
-        return EXIT_BACKEND
-
-    # Step 2: the client verifies the entity (exists and its title is the
-    # channel name) before anything is registered (review H2).
-    if not app.verify_channel(args.name, backend_ref, entity):
-        sys.stderr.write(
-            f"Error: channel '{args.name}' could not be verified in the backend; nothing was registered.\n"
-        )
-        return EXIT_BACKEND
-
-    body = register_comment(args.name, backend_ref.name, entity)
-    try:
-        post_with_retries(registry, body, sleeper=sleeper)
-    except RegistryError:
-        sys.stderr.write(
-            f"Error: channel '{args.name}' was not created: the registration could not be posted.\n"
-        )
-        return EXIT_BACKEND
-
-    # Step 3: wait for the mapping to land (bounded); a timeout is not an error.
-    if not store.poll_for_channel(args.name):
-        sys.stderr.write(
-            f"Notice: channel '{args.name}' is registered but has not shown up in the local copy yet; "
-            "it will be usable once the registry rebuild lands.\n"
-        )
-    sys.stdout.write(f"{args.name}\n")
-    return EXIT_OK
-
-
-def cmd_channel_delete(
-    args: argparse.Namespace,
-    config: Config,
-    app: Angareion,
-    registry: CommentPoster,
-    store: ChannelStore,
-    token: str,
-    sleeper: Callable[[float], None] = time.sleep,
-) -> int:
-    """Delete a channel: close the entity (keep the record), then unregister (design section 7)."""
-    try:
-        validate_channel_name(args.name)
-    except MessageValidationError as e:
-        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
-        return EXIT_USAGE
-
-    store.ensure_fresh()
-    entity = store.entity_for(args.name)  # a missing channel raises ChannelNotFoundError
-
-    try:
-        app.close_channel(entity)
-    except BackendError:
-        sys.stderr.write(f"Error: channel '{args.name}' was not deleted: the backend entity could not be closed.\n")
-        return EXIT_BACKEND
-
-    body = unregister_comment(args.name, entity.backend, entity.issue)
-    try:
-        post_with_retries(registry, body, sleeper=sleeper)
-    except RegistryError:
-        sys.stderr.write(
-            f"Error: channel '{args.name}' was closed but the unregistration could not be posted.\n"
-        )
-        return EXIT_BACKEND
-
-    sys.stdout.write(f"{args.name}\n")
-    return EXIT_OK
+        return
+    if count >= PAGE_WARN_AT:
+        _warn(f"channel '{channel}' has {count} of {PAGE_COMMENT_LIMIT} messages on its current page")
 
 
 def cmd_send(args: argparse.Namespace, config: Config, app: Angareion, token: str) -> int:
@@ -352,6 +262,7 @@ def cmd_send(args: argparse.Namespace, config: Config, app: Angareion, token: st
         return EXIT_USAGE
 
     app.store.ensure_fresh()
+    _warn_if_page_is_filling(app, args.channel)
     message_id = app.send(args.channel, message)
     sys.stdout.write(f"{message_id}\n")
     return EXIT_OK
@@ -646,6 +557,11 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Which backend to open the channel in (required when several are configured).")
     p_delete = channel_sub.add_parser("delete", help="Delete a channel; prints the channel name.")
     p_delete.add_argument("name", help="Channel name.")
+    p_status = channel_sub.add_parser(
+        "status", help="Messages on each channel's current page, and the registry issue's count (read-only)."
+    )
+    p_status.add_argument("names", nargs="*", metavar="NAME", help="Channels to show (default: all).")
+    p_status.add_argument("--json", action="store_true", help="Print the rows as a JSON array.")
 
     p_send = subparsers.add_parser(
         "send",
@@ -799,8 +715,8 @@ def main(
         return EXIT_USAGE
     if args.command == "channel" and args.channel_action is None:
         sys.stderr.write(
-            "Error: channel needs an action; try 'angareion channel create <name>' "
-            "or 'angareion channel delete <name>'.\n"
+            "Error: channel needs an action; try 'angareion channel create <name>', "
+            "'angareion channel delete <name>' or 'angareion channel status'.\n"
         )
         return EXIT_USAGE
     if args.command == "decision" and args.decision_action is None:
@@ -866,6 +782,8 @@ def main(
                 )
             if args.channel_action == "delete":
                 return cmd_channel_delete(args, config, app, active_registry, active_store, token, sleeper=active_sleeper)
+            if args.channel_action == "status":
+                return cmd_channel_status(args, app, active_registry, active_store, token)
             parser.print_help(sys.stderr)
             return EXIT_USAGE
         if args.command == "send":
