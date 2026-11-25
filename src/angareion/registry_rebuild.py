@@ -31,17 +31,21 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from angareion.registry import (
-    AUTHORIZED_ASSOCIATIONS,
-    InvalidAction,
     RegistryClient,
     RegistryError,
     RegistryWriteConflict,
-    parse_comment,
+)
+from angareion.registry_rules import (  # noqa: F401  (re-exported: existing imports keep working)
+    CONFIG_VERSION,
+    _comment_order,
+    _quote,
+    rebuild_channels,
+    render_channels,
+    report_text,
 )
 
 CHANNELS_PATH = "config/angareion/channels.json"
 BACKENDS_PATH = "config/angareion/backends.json"
-CONFIG_VERSION = 1
 WRITE_ATTEMPTS = 5
 COMMIT_MESSAGE = "angareion: rebuild config/angareion/channels.json from the registry issue"
 
@@ -72,19 +76,10 @@ class RebuildSummary:
 
     channels: dict[str, dict[str, Any]] = field(default_factory=dict)
     reports: list[str] = field(default_factory=list)
+    posted: list[str] = field(default_factory=list)
     changed: bool = False
     committed: bool = False
     comments_seen: int = 0
-
-
-def render_channels(channels: dict[str, dict[str, Any]]) -> str:
-    """The channels.json text: sorted keys, two-space indent, trailing newline."""
-    return json.dumps(
-        {"channels": channels, "version": CONFIG_VERSION},
-        indent=2,
-        sort_keys=True,
-        ensure_ascii=False,
-    ) + "\n"
 
 
 def load_backend_names(text: str) -> set[str]:
@@ -99,86 +94,6 @@ def load_backend_names(text: str) -> set[str]:
     if not isinstance(backends, dict):
         raise RebuildError(f"{BACKENDS_PATH} has no 'backends' object")
     return set(backends)
-
-
-def _quote(body: Any) -> str:
-    text = "" if body is None else str(body)
-    text = " ".join(text.split())
-    if len(text) > 300:
-        text = text[:300] + "…"
-    return text
-
-
-def report_text(reason: str, body: Any) -> str:
-    """A plain-text report; never a single-line JSON that could be parsed as an action."""
-    return (
-        "Angareion registry: this comment could not be applied.\n"
-        f"> {_quote(body)}\n"
-        f"Reason: {reason}\n"
-        "Nothing was changed by it; the rebuild always starts from the whole thread.\n"
-    )
-
-
-def _comment_order(comment: dict[str, Any]) -> tuple[str, int]:
-    """Sort key for the rebuild: the authoritative arrival order is (created_at, id)."""
-    created = comment.get("created_at")
-    if not isinstance(created, str):
-        created = ""
-    try:
-        comment_id = int(comment.get("id", 0))
-    except (TypeError, ValueError):
-        comment_id = 0
-    return (created, comment_id)
-
-
-def rebuild_channels(
-    comments: list[dict[str, Any]], backend_names: set[str]
-) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    """Rebuild the mapping from the comment thread (in order); return it plus reports."""
-    channels: dict[str, dict[str, Any]] = {}
-    reports: list[str] = []
-
-    for comment in sorted(comments, key=_comment_order):
-        if comment.get("author_association") not in AUTHORIZED_ASSOCIATIONS:
-            continue  # not authorized: ignored, and never reported
-        body = comment.get("body")
-        parsed = parse_comment(body)
-        if parsed is None:
-            continue  # not an action attempt: ignored silently
-        if isinstance(parsed, InvalidAction):
-            reports.append(report_text(parsed.reason, body))
-            continue
-        if parsed.backend not in backend_names:
-            reports.append(report_text(f"the backend {parsed.backend!r} is not configured", body))
-            continue
-
-        entry = {"backend": parsed.backend, "issue": parsed.issue}
-        current = channels.get(parsed.channel)
-        if parsed.action == "register":
-            if current is None:
-                channels[parsed.channel] = entry
-            elif current == entry:
-                continue  # the same entity registered twice: success, no-op
-            else:
-                reports.append(
-                    report_text(
-                        f"channel {parsed.channel!r} is already registered to a different entity "
-                        "(first come, first served)",
-                        body,
-                    )
-                )
-        else:  # unregister
-            if current == entry:
-                del channels[parsed.channel]
-            else:
-                reports.append(
-                    report_text(
-                        f"channel {parsed.channel!r} does not point at that entity (nothing to remove)",
-                        body,
-                    )
-                )
-
-    return channels, reports
 
 
 class Rebuilder:
@@ -227,22 +142,35 @@ class Rebuilder:
         text = render_channels(channels)
 
         changed = committed = False
+        fixed: list[str] = []
         try:
             changed, committed = self._write_if_changed(text)
         except RegistryWriteConflict:
-            reports.append(
+            fixed.append(
                 report_text(
                     "the repository file kept changing while writing; this run did not update it",
                     "",
                 )
             )
 
+        # A report that quotes a comment describes that comment, which does not change,
+        # so the same text is posted once (C-25). A fixed-text report describes this run,
+        # so it is posted every time it happens.
+        thread_bodies = {comment.get("body") for comment in comments}
+        posted: list[str] = []
         for report in reports:
+            if report in thread_bodies:
+                continue
             self.api.post_comment(report)
+            posted.append(report)
+        for report in fixed:
+            self.api.post_comment(report)
+            posted.append(report)
 
         return RebuildSummary(
             channels=channels,
-            reports=reports,
+            reports=reports + fixed,
+            posted=posted,
             changed=changed,
             committed=committed,
             comments_seen=len(comments),
