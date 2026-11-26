@@ -389,7 +389,7 @@ Angareion 對外 MUST 只有七個介面家族：建 channel、刪 channel、送
 
 #### Scenario: channel rollover（#542）
 - **WHEN** `angareion channel rollover X`（X 在設定檔裡有對應）
-- **THEN** 先強制 fetch 設定、不看則數、強制開下一頁並在註冊簿登記，等設定落地（上限 2 分鐘，逾時只在 stderr 提示、仍 exit 0）；stdout 只印 `X`，exit 0；若已有別的寫者換過頁（下一頁已在註冊簿），則不再開頁，只印 Notice，仍 exit 0
+- **THEN** 先強制 fetch 設定、不看則數、強制開下一頁並在註冊簿登記，等設定落地（上限 2 分鐘，逾時只在 stderr 提示、仍 exit 0）；stdout 只印 `X`，exit 0；若已有別的寫者換過頁（下一頁已在註冊簿），則不再開頁，只等設定落地（逾時才在 stderr 提示 Notice），仍 exit 0
 - **WHEN** 名字沒註冊
 - **THEN** exit 1
 - **WHEN** 任一步失敗（註冊簿讀不到、設定與註冊簿不相容、開頁或註冊失敗）
