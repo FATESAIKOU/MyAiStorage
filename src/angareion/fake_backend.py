@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -66,6 +68,7 @@ class FakeBackend:
         start_comment_id: int = 1,
         clock: Any = None,
         comment_limit: int = PAGE_COMMENT_LIMIT,
+        page_date: Callable[[], str | None] | None = None,
     ):
         self.resolver = resolver
         self._entities: dict[tuple[str, int], dict[str, Any]] = {}
@@ -81,6 +84,17 @@ class FakeBackend:
         # Reads of a page raise this error as set by `set_page_error` (design 542 C-22).
         self._page_errors: dict[tuple[str, int], BackendError] = {}
         self.comment_limit = comment_limit
+        # The `Date` a page size answers with; None uses the clock, as before.
+        self._page_date = page_date
+        # Sends to one page raise this error, as set by `set_send_error` (design 542 W-4, W-5, W-10, W-11).
+        self._send_errors: dict[tuple[str, int], BackendError] = {}
+        self.next_open_error: Exception | None = None
+        # The numbers of the pages `open_page` opened, in order.
+        self.opened: list[int] = []
+        # Every `page_size_at` call, by issue number (a `page_size` call counts too).
+        self.size_calls: list[int] = []
+        # Guards create_channel, open_page and deliver: two writers may share one fake (design 542 C-18).
+        self._lock = threading.RLock()
 
     @staticmethod
     def _key(repo: str, number: int) -> tuple[str, int]:
@@ -118,6 +132,14 @@ class FakeBackend:
         """Pin the page size an entity reports (instead of its real comment count)."""
         self._page_sizes[self._key(repo, number)] = n
 
+    def set_send_error(self, number: int, error: BackendError | None, *, repo: str = "owner/repo") -> None:
+        """Make every send to one page raise `error`; None clears it (design 542 W-4, W-5, W-10, W-11)."""
+        key = self._key(repo, number)
+        if error is None:
+            self._send_errors.pop(key, None)
+        else:
+            self._send_errors[key] = error
+
     def set_page_error(self, number: int, error: BackendError | None, *, repo: str = "owner/repo") -> None:
         """Make reads, checks and listings of one page raise `error`; None clears it (design 542 C-22)."""
         key = self._key(repo, number)
@@ -151,14 +173,15 @@ class FakeBackend:
             raise ValueError(
                 f"Message channel '{message.channel}' does not match target channel '{entity.channel}'"
             )
-        cid = self._next_comment_id if comment_id is None else comment_id
-        if cid >= self._next_comment_id:
-            self._next_comment_id = cid + 1
-        on_page = self._key(entity.repo, entity.issue if page is None else page)
-        comment = FakeComment(
-            id=cid, created_at=created_at or self._clock(), message=message, page=on_page
-        )
-        self._comments.append(comment)
+        with self._lock:
+            cid = self._next_comment_id if comment_id is None else comment_id
+            if cid >= self._next_comment_id:
+                self._next_comment_id = cid + 1
+            on_page = self._key(entity.repo, entity.issue if page is None else page)
+            comment = FakeComment(
+                id=cid, created_at=created_at or self._clock(), message=message, page=on_page
+            )
+            self._comments.append(comment)
         return comment
 
     # -- the backend protocol -------------------------------------------
@@ -171,9 +194,28 @@ class FakeBackend:
             raise err
         if not name or not isinstance(name, str):
             raise ValueError("Channel name must be a non-empty string")
-        number = self._next_entity_id
-        self._next_entity_id += 1
-        self._entities[self._key(backend.repo, number)] = {"title": name, "state": "open"}
+        with self._lock:
+            number = self._next_entity_id
+            self._next_entity_id += 1
+            self._entities[self._key(backend.repo, number)] = {"title": name, "state": "open"}
+        return number
+
+    def open_page(self, entity: Entity) -> int:
+        """Open the next page of a channel, as `PageOpener` does (design 542 S-4); its title is the channel."""
+        self._check_injected_error()
+        if self.next_open_error is not None:
+            err = self.next_open_error
+            self.next_open_error = None
+            raise err
+        with self._lock:
+            number = self._next_entity_id
+            self._next_entity_id += 1
+            self._entities[self._key(entity.repo, number)] = {
+                "title": entity.channel,
+                "state": "open",
+                "body": f"continued from #{entity.issue}",
+            }
+            self.opened.append(number)
         return number
 
     def verify_channel(self, name: str, backend: BackendRef, entity: int) -> bool:
@@ -196,17 +238,26 @@ class FakeBackend:
         return self.page_size_at(entity)[0]
 
     def page_size_at(self, entity: Entity) -> tuple[int, str | None]:
+        self.size_calls.append(entity.issue)
         self._check_injected_error()
+        date = self._page_date() if self._page_date is not None else self._clock()
+        return self._current_size(entity), date
+
+    def _current_size(self, entity: Entity) -> int:
+        """The page's size as a test set it, else its actual count (not recorded in `size_calls`)."""
         override = self._page_sizes.get(self._key(entity.repo, entity.issue))
         if override is not None:
-            return override, self._clock()
-        return len(self._comments_for(entity, None)), self._clock()
+            return override
+        return len(self._comments_for(entity, None))
 
     def send(self, entity: Entity, message: Message) -> str:
         self._check_injected_error()
-        if self._key(entity.repo, entity.issue) not in self._entities:
+        key = self._key(entity.repo, entity.issue)
+        if key not in self._entities:
             raise ChannelNotFoundError(f"Channel '{entity.channel}' does not exist")
-        count = self.page_size(entity)
+        if key in self._send_errors:
+            raise self._send_errors[key]
+        count = self._current_size(entity)
         if count >= self.comment_limit:
             raise ChannelFullError(entity.channel, count, presumed=False)
         self.deliver(entity, message)
