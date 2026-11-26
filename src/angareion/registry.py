@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import base64
 import json
 import re
+import threading
 import time
 from typing import Any, Callable, Protocol, runtime_checkable
 
@@ -161,7 +162,7 @@ def parse_comment(body: Any) -> Action | InvalidAction | None:
 class CommentPoster(Protocol):
     """What `channel create`/`channel delete` need from a registry client."""
 
-    def post_comment(self, body: str) -> None:
+    def post_comment(self, body: str) -> dict[str, Any]:
         ...
 
 
@@ -188,13 +189,16 @@ def post_with_retries(
     attempts: int = REGISTRY_RETRY_ATTEMPTS,
     interval: float = REGISTRY_RETRY_INTERVAL_SECONDS,
     sleeper: Callable[[float], None] = time.sleep,
-) -> None:
-    """Post one comment; retry a couple of times with a short gap, then raise."""
+) -> dict[str, Any]:
+    """Post one comment; retry a couple of times with a short gap, then raise.
+
+    Returns the comment the successful attempt posted (the last successful post, C-17); {} when it is not a dict.
+    """
     last_error: RegistryError | None = None
     for attempt in range(attempts):
         try:
-            poster.post_comment(body)
-            return
+            posted = poster.post_comment(body)
+            return posted if isinstance(posted, dict) else {}
         except RegistryError as e:
             last_error = e
             if attempt < attempts - 1:
@@ -271,12 +275,21 @@ class RegistryClient:
 
     # -- comments --------------------------------------------------------
 
-    def post_comment(self, body: str) -> None:
-        self._request(
+    def post_comment(self, body: str) -> dict[str, Any]:
+        """Post one comment; return the comment GitHub stored, or {} when the reply is not a JSON object.
+
+        The comment is already posted when the reply is read, so a bad reply is not an error.
+        """
+        resp = self._request(
             "POST",
             f"repos/{self.repo}/issues/{self.issue}/comments",
             data={"body": body},
         )
+        try:
+            data = resp.json()
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def comment_count(self) -> int:
         """How many comments the registry issue has now (GET issue; design 542 C-5)."""
@@ -355,6 +368,8 @@ class FakeRegistryClient:
         fail_posts_times: int = 0,
         stale_writes: int = 0,
         page_size: int = COMMENTS_PAGE_SIZE,
+        post_association: str = "NONE",
+        post_user_type: str = "Bot",
     ):
         self._comments: list[dict[str, Any]] = [dict(c) for c in (comments or [])]
         self.files: dict[str, str] = dict(files or {})
@@ -363,9 +378,16 @@ class FakeRegistryClient:
         self.fail_posts_times = fail_posts_times
         self.stale_writes = stale_writes
         self.page_size = page_size
+        self.post_association = post_association
+        self.post_user_type = post_user_type
         self.list_calls: list[int] = []
         self.put_calls: list[tuple[str, str | None]] = []
         self._sha = 1
+        # Called with each body before any failure is injected, and outside `_lock` (C-18's gate).
+        self.before_post: Callable[[str], None] | None = None
+        # Comment ids the listing hides (a replication lag); the count still includes them.
+        self.hidden_ids: set[int] = set()
+        self._lock = threading.RLock()
 
     def add_comment(
         self,
@@ -376,15 +398,16 @@ class FakeRegistryClient:
         comment_id: int | None = None,
         created_at: str | None = None,
     ) -> dict[str, Any]:
-        index = len(self._comments) + 1
-        comment = {
-            "id": comment_id if comment_id is not None else index,
-            "body": body,
-            "author_association": author_association,
-            "user": {"type": user_type, "login": "someone"},
-            "created_at": created_at or f"2026-10-10T12:00:{index:02d}Z",
-        }
-        self._comments.append(comment)
+        with self._lock:
+            index = len(self._comments) + 1
+            comment = {
+                "id": comment_id if comment_id is not None else index,
+                "body": body,
+                "author_association": author_association,
+                "user": {"type": user_type, "login": "someone"},
+                "created_at": created_at or f"2026-10-10T12:00:{index:02d}Z",
+            }
+            self._comments.append(comment)
         return comment
 
     def comment_count(self) -> int:
@@ -395,8 +418,9 @@ class FakeRegistryClient:
         if self.fail_comments_times > 0:
             self.fail_comments_times -= 1
             raise RegistryError("comment listing failed")
+        visible = [c for c in self._comments if c.get("id") not in self.hidden_ids]
         start = (page - 1) * self.page_size
-        return self._comments[start : start + self.page_size]
+        return visible[start : start + self.page_size]
 
     def all_comments(self) -> list[dict[str, Any]]:
         comments: list[dict[str, Any]] = []
@@ -408,12 +432,14 @@ class FakeRegistryClient:
                 return comments
             page += 1
 
-    def post_comment(self, body: str) -> None:
+    def post_comment(self, body: str) -> dict[str, Any]:
+        if self.before_post is not None:
+            self.before_post(body)
         if self.fail_posts_times > 0:
             self.fail_posts_times -= 1
             raise RegistryError("posting the comment failed")
         self.posted.append(body)
-        self.add_comment(body, author_association="NONE", user_type="Bot")
+        return self.add_comment(body, author_association=self.post_association, user_type=self.post_user_type)
 
     def get_file(self, path: str) -> tuple[str, str | None]:
         if path not in self.files:

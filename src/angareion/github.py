@@ -32,6 +32,7 @@ from angareion.backend import (
     PageUnavailableError,
     RateLimitError,
     ReadResult,
+    WriteRefusedError,
     comment_is_new,
     cursor_after_read,
     cursor_since,
@@ -290,19 +291,39 @@ class GitHubIssuesBackend:
         """Open a new issue in the backend repo; return its number (no members in the body)."""
         if not name or not isinstance(name, str):
             raise ValueError("Channel name must be a non-empty string")
+        return self._open_issue(
+            backend.repo,
+            name,
+            f"Angareion channel '{name}'. Messages are comments on this issue.\n",
+            what=f"Failed to create channel '{name}'",
+            context=f"creating channel '{name}'",
+        )
+
+    def open_page(self, entity: Entity) -> int:
+        """Open the next page of a channel: a new issue whose body names the page it continues from (design 542 S-4)."""
+        return self._open_issue(
+            entity.repo,
+            entity.channel,
+            f"Angareion channel '{entity.channel}', continued from #{entity.issue}. Messages are comments on this issue.\n",
+            what=f"Failed to open a new page for channel '{entity.channel}'",
+            context=f"opening a new page for channel '{entity.channel}'",
+        )
+
+    def _open_issue(self, repo: str, title: str, body: str, *, what: str, context: str) -> int:
+        """POST an issue to `repo` and return its number; `what` heads the error messages, `context` the JSON one."""
         resp = self._request(
             "POST",
-            f"repos/{backend.repo}/issues",
+            f"repos/{repo}/issues",
             headers=self._headers(),
-            data={"title": name, "body": f"Angareion channel '{name}'. Messages are comments on this issue.\n"},
+            data={"title": title, "body": body},
         )
         if resp.status not in (200, 201):
-            raise BackendError(f"Failed to create channel '{name}': HTTP {resp.status}")
-        data = self._json(resp, f"creating channel '{name}'")
+            raise BackendError(f"{what}: HTTP {resp.status}")
+        data = self._json(resp, context)
         try:
             return int(data["number"])
         except (KeyError, TypeError, ValueError) as e:
-            raise BackendError(f"Failed to create channel '{name}': no issue number in the response") from e
+            raise BackendError(f"{what}: no issue number in the response") from e
 
     def verify_channel(self, name: str, backend: BackendRef, entity: int) -> bool:
         """Whether the entity exists and its title is exactly the channel name (review H2)."""
@@ -356,7 +377,7 @@ class GitHubIssuesBackend:
 
         Look at the page's count with one GET. At or above the rollover band the
         error is ChannelFullError (presumed when below the hard limit); anything
-        else, or a failed GET, is a plain backend error.
+        else, or a failed GET, is a WriteRefusedError: the write is certainly not stored.
         """
         detail = self._scrub(self._raw_message(resp), url)
         try:
@@ -373,7 +394,10 @@ class GitHubIssuesBackend:
                 status=resp.status,
                 detail=detail,
             )
-        return BackendError(f"Failed to send to channel '{entity.channel}'{http_cause(resp.status, detail)}")
+        return WriteRefusedError(
+            f"Failed to send to channel '{entity.channel}'{http_cause(resp.status, detail)}",
+            status=resp.status,
+        )
 
     # -- page size (read-only; design 542 C-3) ----------------------------
 
