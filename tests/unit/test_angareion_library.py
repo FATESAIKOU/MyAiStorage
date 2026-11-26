@@ -8,7 +8,8 @@ import json
 import threading
 
 from _angareion_fakes import StaticResolver, entity
-from angareion.backend import Cursor, FakeBackend, Target
+from angareion.backend import Cursor, Target
+from angareion.fake_backend import FakeBackend
 from angareion.client import POLL_INTERVAL_SECONDS, READ_CONCURRENCY, Angareion
 from angareion.messages import Message
 from angareion.state import CursorStore, channel_cursor_key, recipient_cursor_key

@@ -30,7 +30,7 @@ from _decision_cli_lab import (
 from angareion import decision as dec
 from angareion import decision_cli
 from angareion import messages as M
-from angareion.backend import FakeBackend
+from angareion.fake_backend import FakeBackend
 from angareion.cli import build_parser
 from angareion.messages import Message, MessageValidationError, serialize_message
 

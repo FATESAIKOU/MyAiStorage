@@ -14,7 +14,8 @@ from pathlib import Path
 import pytest
 
 from _angareion_fakes import FakeGit, backends_json, channels_json, entity
-from angareion.backend import BackendError, FakeBackend
+from angareion.backend import BackendError
+from angareion.fake_backend import FakeBackend
 from angareion.channel_config import BACKENDS_PATH, CHANNELS_PATH, ChannelConfigError, ChannelStore
 from angareion.cli import main
 from angareion.config import Config, save_config
@@ -89,7 +90,7 @@ def test_enumerate_returns_tuple_with_parsed_none_for_nonmessage(cli_env):
     assert created == "2026-10-10T12:00:05Z"
     assert parsed is not None
     # non-message: append a FakeComment with message=None
-    from angareion.backend import FakeComment
+    from angareion.fake_backend import FakeComment
     cli_env["backend"]._comments.append(FakeComment(id=2, created_at="2026-10-10T12:00:06Z", message=None))
     out2 = cli_env["backend"].enumerate_conditional(ent)[0]
     # non-message enumerated with parsed=None

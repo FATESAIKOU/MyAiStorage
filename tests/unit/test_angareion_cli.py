@@ -18,7 +18,8 @@ from _angareion_fakes import (
     channels_json,
     entity,
 )
-from angareion.backend import BackendError, ChannelNotFoundError, Cursor, FakeBackend, Target
+from angareion.backend import BackendError, ChannelNotFoundError, Cursor, Target
+from angareion.fake_backend import FakeBackend
 from angareion.channel_config import BACKENDS_PATH, CHANNELS_PATH, ChannelStore
 from angareion.cli import build_parser, main
 from angareion.config import Config, save_config

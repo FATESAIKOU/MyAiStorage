@@ -15,7 +15,7 @@ import json
 import pytest
 
 from _angareion_fakes import FakeGit, backends_json, channels_json, entity
-from angareion.backend import FakeBackend
+from angareion.fake_backend import FakeBackend
 from angareion.channel_config import BACKENDS_PATH, CHANNELS_PATH, ChannelStore
 from angareion.cli import main
 from angareion.config import Config, save_config

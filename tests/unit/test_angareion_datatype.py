@@ -18,10 +18,10 @@ from angareion import backend, messages
 from angareion.backend import (
     ChannelBackend,
     EnumerableBackend,
-    FakeBackend,
     mention_matches,
     recipient_matches,
 )
+from angareion.fake_backend import FakeBackend
 from angareion.cli import _format_message
 from angareion.github import GitHubIssuesBackend
 from angareion.log_cache import LOG_CACHE_VERSION

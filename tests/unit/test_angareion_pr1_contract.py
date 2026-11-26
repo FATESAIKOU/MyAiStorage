@@ -17,11 +17,11 @@ from angareion.backend import (
     BackendRef,
     ChannelFullError,
     Cursor,
-    FakeBackend,
     PageBackend,
     RateLimitError,
     page_level,
 )
+from angareion.fake_backend import FakeBackend
 from angareion.cli import main
 from angareion.config import Config, save_config
 from angareion.github import GitHubIssuesBackend, HttpResponse
