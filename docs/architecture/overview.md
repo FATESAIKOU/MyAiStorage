@@ -169,9 +169,9 @@ schema／I/O：_io → errors；_jsonutil → errors；_lock → errors；paths 
 - **`client.py`**：`Angareion.read(target, since=None) -> ReadBatch` 把各頻道讀到的訊息合併後依 `(messages.received_at_key(received_at), channel, id)` 排序（#510 PR-4，#519；以前依時刻字串）。
 - **依賴方向**：`messages` 只依賴 `ainame`、標準庫和 `yaml`，不 import angareion 的其他模組；`backend → {config, messages}`；`log_cache → {backend, config, messages}`；`decision → messages`；`log_query → {backend, messages}`；`client → {backend, messages, state}`；`decision_cli → {decision, log_cache, backend, messages}`；`cli → decision_cli`。沒有環（設計 §13.2）。
 
-### angareion 頻道換頁（#542；PR-1、PR-2（2a／2b／2c）已 merge，PR-3 待實作）
+### angareion 頻道換頁（#542；PR-1、PR-2（2a／2b／2c）已 merge，PR-3 開工：3-0／3a／3b／3c）
 
-設計全文在 `docs/design-notes/542-channel-rollover.md`（§6.3 是 PR-2 的 2a／2b／2c 切法與介面簽名）；決定見 decisions D-34、D-35、D-36。手動換頁的操作步驟在 `docs/design-notes/542-manual-rollover-runbook.md`。本節寫 PR-1（#544）與 PR-2（2a #546、2b #547、2c #549）已經在 `src/angareion` 的部分；PR-3（`rollover.py`、`PageWriter`、`channel rollover`）合上時再補。行數是 main `4a38d72` 的 `wc -l`（括號內是 PR-1 合上時 `e324857` 的行數）。
+設計全文在 `docs/design-notes/542-channel-rollover.md`（§6.3 是 PR-2 的 2a／2b／2c 切法與介面簽名，§6.4 是 PR-3 的 3-0／3a／3b／3c）；決定見 decisions D-34、D-35、D-36、D-37。手動換頁的操作步驟在 `docs/design-notes/542-manual-rollover-runbook.md`。本節寫 PR-1（#544）與 PR-2（2a #546、2b #547、2c #549）已經在 `src/angareion` 的部分；PR-3（`rollover.py`、`PageWriter`、`channel rollover`）合上時再補。行數是 main `4a38d72` 的 `wc -l`（括號內是 PR-1 合上時 `e324857` 的行數）。
 
 - **`backend.py`**（911 行；718）：
   - PR-1：頁的門檻常數 `PAGE_WARN_AT`（2000）、`PAGE_ROLLOVER_AT`（2400）、`PAGE_COMMENT_LIMIT`（2500）與 `page_level(count) -> str`（`ok`／`warn`／`rollover`／`full`，`None` 是 `unknown`）。例外 `RateLimitError`（`kind` 是 `primary`／`secondary`，帶 `reset_at` 或 `retry_after`）與 `ChannelFullError`（`channel`、`count`、`presumed`；`presumed=True` 是 2400～2499 被拒，訊息是 `looks full (or the token was refused)`），兩者都是 `BackendError` 的子類，CLI 照舊 exit 2。`http_cause(status, detail) -> str` 組訊息尾。協定 `PageBackend`（`@runtime_checkable`：`page_size(entity) -> int`、`page_size_at(entity) -> tuple[int, str | None]`，後者帶回應的 `Date`）；`ChannelBackend` 不加方法。
@@ -194,4 +194,4 @@ schema／I/O：_io → errors；_jsonutil → errors；_lock → errors；paths 
   - `registry → transport`；`registry_rules → registry`；`registry_rebuild → {registry, registry_rules}`。
   - `decision_cli → {backend, config, decision, log_cache, messages}`；`channel_cli → {backend, channel_config, client, config, messages, registry, registry_rules}`。
   - `cli → {backend, channel_cli, channel_config, client, config, decision_cli, github, log_cache, log_query, messages, registry, state}`。
-  - 沒有環；`registry_rules` 不 import `backend`、`channel_config`、`registry_rebuild`；`channel_cli`、`decision_cli` 不 import `cli`。PR-3 要加的邊（`rollover → {backend, registry, registry_rules}`、`client → rollover`、`channel_cli → rollover`）見設計 §8.2，合上時再搬進本節。
+  - 沒有環；`registry_rules` 不 import `backend`、`channel_config`、`registry_rebuild`；`channel_cli`、`decision_cli` 不 import `cli`。PR-3 要加的邊（`fake_backend → {backend, messages}`（3-0）、`rollover → {backend, messages, registry, registry_rules}`（3b）、`client → rollover`、`channel_cli → rollover`（3c））見設計 §8.2 與 §6.4，各子 PR 合上時再搬進本節。
