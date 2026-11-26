@@ -1,0 +1,52 @@
+{
+  "ci_green_conclusions": [
+    "success",
+    "neutral",
+    "skipped"
+  ],
+  "ci_required": true,
+  "ci_workflows": [
+    "CI",
+    "Quality"
+  ],
+  "fail_verdicts": [
+    "要修",
+    "要退回",
+    "要退回設計"
+  ],
+  "github_review_role": "審查",
+  "kind": "taskquality-config",
+  "pass_verdicts": [
+    "可以 merge",
+    "通過"
+  ],
+  "review_roles": [
+    "審查"
+  ],
+  "rework_keywords": [
+    "修正",
+    "fix",
+    "fixes",
+    "follow-up",
+    "revert"
+  ],
+  "schema_version": 2,
+  "started_label": "狀態:進行中",
+  "ticket_ref_keywords": [
+    "closes",
+    "close",
+    "closed",
+    "fixes",
+    "fix",
+    "fixed",
+    "resolves",
+    "resolve",
+    "resolved",
+    "refs",
+    "ref"
+  ],
+  "verdict_pattern": "^(?P<role>\\S*審查)：(?P<model>\\S+) 結論：(?P<verdict>[^（]+)（head (?P<head>[0-9a-f]{7,40})）",
+  "verdict_sources": [
+    "comments"
+  ]
+}
