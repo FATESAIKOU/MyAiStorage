@@ -124,11 +124,11 @@ TBD - created by archiving change angareion-v0. Update Purpose after archive.
 - **THEN** 不採用先前的 ETag 記錄（游標不同），用完整查詢；有新訊息時 exit 0
 
 ### Requirement: 換過頁的頻道（#542）
-一個 channel 名可以對應一串頁（後端實體）：現頁，以及換頁前的退役頁（含競態多開的旁頁；格式與換頁的動作見 `angareion/channel-config`）。`read`、`wait`、`log` 與 `decision list` MUST 把一個頻道的頁當成同一個頻道讀：游標的 key 不因換頁改變，介面（參數、stdout、stderr、錯誤訊息）MUST NOT 出現頁、repo 或 issue 的概念。
+一個 channel 名可以對應一串頁（後端實體）：現頁，以及換頁前的退役頁（含競態多開的旁頁；格式與換頁的動作見 `angareion/channel-config`）。`read`、`wait`、`log` 與 `decision list` MUST 把一個頻道的頁當成同一個頻道讀：游標的 key 不因換頁改變，介面（參數、stdout、stderr、錯誤訊息）MUST NOT 出現頁、repo 或 issue 的概念（略過警告與 `channel status` 除外）。
 
 - **讀哪些頁**：`read`／`wait` MUST 讀現頁，以及「游標的後端時刻早於該頁的退役時刻＋48 小時」的退役頁（退役時刻＝讓它退役的那則註冊簿留言的後端時刻）；`--since` 以給的時刻判斷。新游標（新身分、游標刪掉：沒有後端時刻）MUST 只讀現頁，與「退役時刻＋48 小時」晚於最近一次換頁時刻的退役頁；更早退役的頁 MUST NOT 讀（要看用 `log` 或 `--since`）。`log` 與 `decision list` MUST 讀所有的頁，不看 48 小時。
 - **每一頁各自接續**：每一頁 MUST 以游標記下的那一頁的位置為起點，照單頁的規則判斷新不新；游標沒讀過的頁 MUST 從頭讀（MUST NOT 因為游標已越過那些留言的位置而略過）。各頁的結果依後端到達順序合併；同一則留言 MUST NOT 送兩次。`--since` 照舊 MUST NOT 改動游標。
-- **退役頁讀不到**：讀退役頁時後端回 404、410 或不是 rate limit 的 403，MUST 略過那一頁、其他頁照讀，exit 與 stdout 不因此改變；`read`、`log`、`decision list` MUST 在 stderr 印恰好一行 `Warning: an older page of channel '<C>' could not be read (HTTP <碼>); skipped`（不含編號），`wait` MUST NOT 印；那一頁在游標裡的位置 MUST NOT 前進：恢復之後從原處接續，MUST NOT 重送、MUST NOT 漏。現頁的任何錯誤，以及 rate limit、網路錯誤、5xx，照舊 exit 2。
+- **退役頁讀不到**：讀退役頁時後端回 404、410 或不是 rate limit 的 403，MUST 略過那一頁、其他頁照讀，exit 與 stdout 不因此改變；`read`、`log`、`decision list` MUST 在 stderr 印恰好一行 `Warning: an older page of channel '<C>' could not be read (HTTP <碼>); skipped`（不含編號），`wait` MUST NOT 印；那一頁在游標裡的位置 MUST NOT 前進：（仍在寬限期內時）恢復之後從原處接續，MUST NOT 重送、MUST NOT 漏。現頁的任何錯誤，以及 rate limit、網路錯誤、5xx，照舊 exit 2。
 - **相容**：游標檔多存每一頁的位置，舊版讀得到原有的三欄；舊版寫回游標檔時會丟掉每一頁的位置，之後新版以頻道的位置當每一頁的起點（因此同一個身分 MUST NOT 混用新舊兩版，見手動換頁的盤點）。channels.json 沒有退役頁的頻道，讀取的請求與結果和換頁功能之前相同。
 
 #### Scenario: 換頁後接續
@@ -224,7 +224,7 @@ token 檔的位置 MUST 能由 `ANGAREION_TOKEN_FILE` 指定（優先於其他�
 - **THEN** 正常讀取
 
 ### Requirement: 輸出與結束碼
-stdout MUST 只放結果（`channel create`／`channel delete` 印 channel 名，`channel status` 印每個頻道一列（名稱、現頁則數、上限、等級 `ok`／`warn`／`rollover`／`full`／`unknown`、頁數（現頁加退役頁）、旗標（`side`：7 天內退役的旁頁上有留言；`late`：最後一張非旁頁的退役頁，在退役後 24 小時之後還有留言；`unknown`：旗標查不到，exit 2；沒有旗標是 `-`））與最後一列 `registry`，`--json` 是物件的陣列（鍵 `name`、`count`、`limit`、`level`、`pages`、`flags`），不含 issue 編號，`send` 印訊息 id，`read` 印訊息或 `--json`，`log` 印訊息或 `--json`（空結果也是成功），`--capabilities` 印能力字樣一行），說明與錯誤放 stderr。結束碼：0 成功；1 用法或輸入錯誤；2 後端、網路或設定錯誤；3 `wait` 逾時沒有新訊息。
+stdout MUST 只放結果（`channel create`／`channel delete` 印 channel 名，`channel status` 印每個頻道一列（名稱、現頁則數、上限、等級 `ok`／`warn`／`rollover`／`full`／`unknown`、頁數（現頁加退役頁）、旗標（`side`：7 天內退役的旁頁上有留言；`late`：最後一張非旁頁的退役頁（7 天內退役的頁才查），在退役後 24 小時之後還有留言；`unknown`：旗標查不到，exit 2；沒有旗標是 `-`））與最後一列 `registry`，`--json` 是物件的陣列（鍵 `name`、`count`、`limit`、`level`、`pages`、`flags`），不含 issue 編號，`send` 印訊息 id，`read` 印訊息或 `--json`，`log` 印訊息或 `--json`（空結果也是成功），`--capabilities` 印能力字樣一行），說明與錯誤放 stderr。結束碼：0 成功；1 用法或輸入錯誤；2 後端、網路或設定錯誤；3 `wait` 逾時沒有新訊息。
 
 #### Scenario: 設定缺少
 - **WHEN** 沒有設定檔（或缺 channel／backend 設定檔）就執行 `angareion send`

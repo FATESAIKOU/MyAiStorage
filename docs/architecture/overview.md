@@ -167,7 +167,7 @@ schema／I/O：_io → errors；_jsonutil → errors；_lock → errors；paths 
 - **`decision_cli.py`**（PR-4）：`cmd_decision` 與六個 action（`ask`、`update`、`withdraw`、`submit`、`list`、`snapshot`）。流程：同步頻道的 log 快取（`LogCache.sync`）→ `decision.fold` 或 `plan_submit` 預檢 → 組 `datatype: decision` 的 `Message` → 寫入前 `serialize_message` 讀回檢查 → `backend.send`。自動 snapshot 在 ask／update／withdraw 寫成功後依 `decision.SNAPSHOT_EVERY` 判斷，失敗只警告。後端參數的型別是 `DecisionBackend`（在 `decision_cli.py` 宣告、使用端擁有的窄協定：繼承 `EnumerableBackend` 取得 `enumerate_conditional`，自己只宣告 `send`，C-20(e)），它不呼叫其他後端方法；離開碼常數在本模組另寫一份（`cli` import 它，不能反向 import），值與 `cli.py` 相同；不讀寫游標檔與 `wait` 狀態檔。
 - **`log_query.py`**（`angareion log` 的篩選）：`select(messages_by_channel, selected_channels, *, me, …)` 跨頻道（選了不只一個頻道）時依 `(messages.received_at_key(received_at), channel, id)` 排序；只選一個頻道時仍依 `comment_id`（#510 PR-4，#519）。
 - **`client.py`**：`Angareion.read(target, since=None) -> ReadBatch` 把各頻道讀到的訊息合併後依 `(messages.received_at_key(received_at), channel, id)` 排序（#510 PR-4，#519；以前依時刻字串）。
-- **依賴方向**：`messages` 只依賴 `ainame`、標準庫和 `yaml`，不 import angareion 的其他模組；`backend → messages`；`log_cache → {backend, messages}`；`decision → messages`；`log_query → {backend, messages}`；`client → {backend, messages, state}`；`decision_cli → {decision, log_cache, backend, messages}`；`cli → decision_cli`。沒有環（設計 §13.2）。
+- **依賴方向**：`messages` 只依賴 `ainame`、標準庫和 `yaml`，不 import angareion 的其他模組；`backend → {config, messages}`；`log_cache → {backend, config, messages}`；`decision → messages`；`log_query → {backend, messages}`；`client → {backend, messages, state}`；`decision_cli → {decision, log_cache, backend, messages}`；`cli → decision_cli`。沒有環（設計 §13.2）。
 
 ### angareion 頻道換頁（#542；PR-1、PR-2（2a／2b／2c）已 merge，PR-3 待實作）
 

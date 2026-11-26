@@ -223,7 +223,7 @@ gh issue comment <註冊簿編號> -R <註冊簿 repo> --body-file /path/to/roll
   - 旁頁上有留言時（7 天內退役的頁才查），`channel status` 的 `flags` 是 `side`。
 - **處理**：
   - 讀者照常讀旁頁（從頭讀，寬限期從它自己那則 `rollover` 的時刻算），訊息不會漏，不用補救。
-  - 不要從旁頁再貼 `rollover`（`from` 不是現頁，會被回報並略過）。也不要 `unregister` 旁頁：指向退役頁的 `unregister` 是 no-op，只會多一則回報。
+  - 不要從旁頁（或任何 `retired` 裡的頁）貼 `rollover`：它不會回報、頻道也不換頁，只會再多一張旁頁；`from` 一定要填 channels.json 的現頁。也不要 `unregister` 旁頁：指向退役頁的 `unregister` 是 no-op，只會多一則回報。
   - 空的旁頁就留著，不關、不刪。有 `side` 旗標時告知該頻道的 PM：上面的訊息會送到，只是寫者寫錯了頁。
 - **預防**：一個頻道一次只由一個人換（見開頭）；貼之前照第 2 節第 3 步看一次註冊簿。
 
