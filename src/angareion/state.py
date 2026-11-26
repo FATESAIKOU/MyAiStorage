@@ -328,3 +328,95 @@ class CursorStore:
             except OSError:
                 pass
             raise
+
+
+PENDING_PAGES_VERSION = 1
+
+
+def pending_pages_file_path(state_dir: Path | str, identity: str) -> Path:
+    """Path of the pending-page file for an agent name: pending-pages-<identity>.json."""
+    return Path(state_dir) / f"pending-pages-{identity_slug(identity)}.json"
+
+
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+class PendingPageStore:
+    """Pages this identity has opened but not yet registered (design 542 §1.3, 待註冊紀錄).
+
+    It only stores and reads back; the writer judges what a record means. A missing,
+    unreadable or malformed file reads as no record, and a failed write is ignored:
+    the record only saves an `open_page` call, so it must never fail a send. There is
+    no lock: two processes of one identity writing at once may lose a record, which
+    at worst leaves one orphan page (§1.3).
+    """
+
+    def __init__(
+        self,
+        state_dir: Path | str | None = None,
+        identity: str | None = None,
+        path: Path | str | None = None,
+    ):
+        if path is None:
+            if state_dir is None or identity is None:
+                raise ValueError("PendingPageStore needs either path, or state_dir and identity")
+            path = pending_pages_file_path(Path(state_dir), identity)
+        self.path = Path(path)
+
+    def _pages(self) -> dict[str, Any]:
+        """The stored `pages` object as written; {} when the file is missing, unreadable or not version 1."""
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        version = data.get("version")
+        if not _is_positive_int(version) or version != PENDING_PAGES_VERSION:
+            return {}
+        pages = data.get("pages")
+        return pages if isinstance(pages, dict) else {}
+
+    def get(self, channel: str) -> tuple[str, int, int] | None:
+        """(backend, issue, from issue) of the channel's pending page; None when there is no usable record."""
+        entry = self._pages().get(channel)
+        if not isinstance(entry, dict):
+            return None
+        backend = entry.get("backend")
+        issue = entry.get("issue")
+        from_issue = entry.get("from")
+        if not isinstance(backend, str) or not _is_positive_int(issue) or not _is_positive_int(from_issue):
+            return None
+        return backend, issue, from_issue
+
+    def put(self, channel: str, backend: str, issue: int, from_issue: int) -> None:
+        pages = self._pages()
+        pages[channel] = {"backend": backend, "issue": issue, "from": from_issue}
+        self._write(pages)
+
+    def drop(self, channel: str) -> None:
+        pages = self._pages()
+        if channel not in pages:
+            return
+        del pages[channel]
+        self._write(pages)
+
+    def _write(self, pages: dict[str, Any]) -> None:
+        payload = {"version": PENDING_PAGES_VERSION, "pages": pages}
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            # Same as CursorStore (L6): a unique temp file, then an atomic replace.
+            fd, tmp_name = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp", dir=self.path.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+                os.replace(tmp_name, self.path)
+            except BaseException:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
+        except OSError:
+            return  # a record that cannot be written is the same as none (§1.3)

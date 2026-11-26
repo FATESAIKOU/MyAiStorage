@@ -64,7 +64,7 @@ class RebuildApi(Protocol):
     def put_file(self, path: str, text: str, *, sha: str | None, message: str) -> None:
         ...
 
-    def post_comment(self, body: str) -> None:
+    def post_comment(self, body: str) -> dict[str, Any]:
         ...
 
 

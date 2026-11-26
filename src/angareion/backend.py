@@ -68,9 +68,18 @@ class PageUnavailableError(BackendError):
         self.status = status
 
 
+class WriteRefusedError(BackendError):
+    """POST 留言被拒（403／422）、不是 rate limit、也不是滿：確定沒有寫進去（設計 542 §1.3 W-4）."""
+
+    def __init__(self, message: str, *, status: int):
+        super().__init__(message)
+        self.status = status
+
+
 # Page limits (design 542 §1, §4). A page is one backend entity (one GitHub issue).
 PAGE_WARN_AT = 2000
 PAGE_ROLLOVER_AT = 2400
+PAGE_FILL_LIMIT = 2490  # a retired page may still be written up to here (design 542 §1.3: 10 left for races)
 PAGE_COMMENT_LIMIT = 2500
 
 # A retired page stays readable this long after it was retired (design 542 §1.3, §2.1).
@@ -526,6 +535,20 @@ class PageBackend(Protocol):
     def page_size(self, entity: Entity) -> int: ...
 
     def page_size_at(self, entity: Entity) -> tuple[int, str | None]: ...
+
+
+@runtime_checkable
+class PageOpener(Protocol):
+    """Open the next page of a channel (design 542 §1.3 S-4). Kept apart from PageBackend (A-5)."""
+
+    def open_page(self, entity: Entity) -> int:
+        """Open a new issue in `entity.repo` for the channel; return its number.
+
+        `entity` is the current page. The new issue's title is the channel name and
+        its body names the page it continues from. A failure raises BackendError
+        whose message carries no issue number.
+        """
+        ...
 
 
 @runtime_checkable
