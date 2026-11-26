@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from _angareion_fakes import FakeGit, backends_json, channels_json
+from angareion import decision as dec
 from angareion.backend import (
     BackendError,
     BackendRef,
@@ -25,7 +26,9 @@ from angareion.channel_cli import cmd_channel_rollover
 from angareion.channel_config import BACKENDS_PATH, CHANNELS_PATH, ChannelStore
 from angareion.cli import main
 from angareion.config import Config, save_config
+from angareion.decision_cli import DATATYPE
 from angareion.fake_backend import FakeBackend
+from angareion.messages import Message
 from angareion.registry import FakeRegistryClient, register_comment, rollover_comment
 from angareion.rollover import (
     MISMATCH,
@@ -41,6 +44,7 @@ from angareion.state import PendingPageStore
 
 ME = "myaistorage-impl-w1-1"
 ANSWERER = "myaistorage-impl-w1-2"
+OTHER_ASKER = "myaistorage-impl-w1-3"
 TOKEN = "gh" + "p_FAKE_PR3C_CLI_TOKEN_123"
 REPO = "owner/repo"
 BACKEND = "github-main"
@@ -339,6 +343,19 @@ def test_c19_poll_for_page_gives_up_on_the_clock_limit(cli_env):
 # -- C-20: send and decision go through the page writer ----------------------------------------------
 
 
+def _run_decision(argv: list[str], store, backend, registry, capsys):
+    ret = main(argv, backend=backend, store=store, registry=registry)
+    captured = capsys.readouterr()
+    return ret, captured.out, captured.err
+
+
+def _deliver_ask(backend: FakeBackend, entity: Entity, asker: str, created_at: str):
+    """A decision ask already on the channel, as a backend comment dated `created_at`."""
+    content = dec.build_payload("ask", ask_channel=CHANNEL, asker=asker, **DECISION_BODY)
+    message = Message(from_=asker, to=ANSWERER, channel=CHANNEL, content=content, datatype=DATATYPE)
+    return backend.deliver(entity, message, created_at=created_at)
+
+
 def _send_world(issue_size: int | None = None, *, registry_fail: int = 0):
     store = PagedStore(_entity())
     registry = _registry(fail_comments_times=registry_fail)
@@ -380,6 +397,72 @@ def test_c20_decision_ask_on_a_full_page_lands_on_the_next_page(cli_env, capsys)
     assert backend.opened == [N]
     assert len(_on_page(backend, N)) == 1
     assert _on_page(backend, P) == []
+
+
+def test_c20_decision_submit_on_a_full_page_lands_every_batch_on_the_next_page(cli_env, capsys, monkeypatch):
+    store, registry, backend = _send_world(2500)
+    now = _utc_now()
+    first = _deliver_ask(backend, store.entity, ME, format_backend_time(now))
+    second = _deliver_ask(backend, store.entity, OTHER_ASKER, format_backend_time(now))
+    monkeypatch.setenv("ANGAREION_IDENTITY", ANSWERER)  # submit is the answerer's action
+    body = yaml.safe_dump(
+        {
+            "items": [
+                # a fresh ask's version is its own id
+                {"ref": first.message.id, "base": first.message.id, "choice": "A"},
+                {"ref": second.message.id, "base": second.message.id, "choice": "B"},
+            ]
+        },
+        allow_unicode=True,
+        sort_keys=False,
+    )
+
+    ret = main(["decision", "submit", "--channel", CHANNEL, "--body", body], backend=backend, store=store, registry=registry)
+    captured = capsys.readouterr()
+
+    assert ret == 0, captured.err
+    assert captured.err == ""
+    assert len(captured.out.splitlines()) == 2  # one message per asker: two batches, two writes
+    assert backend.opened == [N]
+    assert len(_on_page(backend, N)) == 2
+    assert len(_on_page(backend, P)) == 2  # the two asks already there, nothing more
+
+
+def test_c20_decision_snapshot_on_a_full_page_lands_on_the_next_page(cli_env, capsys):
+    store, registry, backend = _send_world(2500)
+    now = _utc_now()
+    # The snapshot covers what is at least a minute older than the newest record, so the ask is dated earlier.
+    _deliver_ask(backend, store.entity, ME, format_backend_time(now - timedelta(hours=2)))
+    _deliver_ask(backend, store.entity, OTHER_ASKER, format_backend_time(now - timedelta(hours=1)))
+
+    ret, out, err = _run_decision(["decision", "snapshot", "--channel", CHANNEL], store, backend, registry, capsys)
+
+    assert ret == 0
+    assert err == ""
+    assert len(out.splitlines()) == 1
+    assert backend.opened == [N]
+    assert [dec.parse_payload(c.message)["op"] for c in _on_page(backend, N)] == ["snapshot"]
+
+
+def test_c20_decision_ask_that_makes_the_snapshot_due_writes_it_on_the_next_page(cli_env, capsys, monkeypatch):
+    # _maybe_snapshot runs after the ask once the asker has SNAPSHOT_EVERY decisions on the channel. The
+    # threshold is lowered here: at 200 full asks the snapshot is over the backend's message limit and
+    # would be refused. The asks are dated two hours back and one other record an hour back, so the
+    # snapshot's cut-off (a minute before the newest record) takes in all of them.
+    monkeypatch.setattr(dec, "SNAPSHOT_EVERY", 3)
+    store, registry, backend = _send_world(2500)
+    now = _utc_now()
+    for _ in range(dec.SNAPSHOT_EVERY):
+        _deliver_ask(backend, store.entity, ME, format_backend_time(now - timedelta(hours=2)))
+    _deliver_ask(backend, store.entity, OTHER_ASKER, format_backend_time(now - timedelta(hours=1)))
+    body = yaml.safe_dump(DECISION_BODY, allow_unicode=True, sort_keys=False)
+
+    ret, out, err = _run_decision(["decision", "ask", "--channel", CHANNEL, "--body", body], store, backend, registry, capsys)
+
+    assert ret == 0, err
+    assert err == ""
+    assert backend.opened == [N]
+    assert [dec.parse_payload(c.message)["op"] for c in _on_page(backend, N)] == ["ask", "snapshot"]
 
 
 def test_c20_a_page_at_2100_gets_exactly_the_c4_line_and_the_message_stays_on_the_page(cli_env, capsys):

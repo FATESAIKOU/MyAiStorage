@@ -224,7 +224,7 @@ token 檔的位置 MUST 能由 `ANGAREION_TOKEN_FILE` 指定（優先於其他�
 - **THEN** 正常讀取
 
 ### Requirement: 輸出與結束碼
-stdout MUST 只放結果（`channel create`／`channel delete` 印 channel 名，`channel status` 印每個頻道一列（名稱、現頁則數、上限、等級 `ok`／`warn`／`rollover`／`full`／`unknown`、頁數（現頁加退役頁）、旗標（`side`：7 天內退役的旁頁上有留言；`late`：最後一張非旁頁的退役頁（7 天內退役的頁才查），在退役後 24 小時之後還有留言；`unknown`：旗標查不到，exit 2；沒有旗標是 `-`））與最後一列 `registry`，`--json` 是物件的陣列（鍵 `name`、`count`、`limit`、`level`、`pages`、`flags`），不含 issue 編號，`send` 印訊息 id，`read` 印訊息或 `--json`，`log` 印訊息或 `--json`（空結果也是成功），`--capabilities` 印能力字樣一行），說明與錯誤放 stderr。結束碼：0 成功；1 用法或輸入錯誤；2 後端、網路或設定錯誤；3 `wait` 逾時沒有新訊息。
+stdout MUST 只放結果（`channel create`／`channel delete`／`channel rollover` 印 channel 名，`channel status` 印每個頻道一列（名稱、現頁則數、上限、等級 `ok`／`warn`／`rollover`／`full`／`unknown`、頁數（現頁加退役頁）、旗標（`side`：7 天內退役的旁頁上有留言；`late`：最後一張非旁頁的退役頁（7 天內退役的頁才查），在退役後 24 小時之後還有留言；`unknown`：旗標查不到，exit 2；沒有旗標是 `-`））與最後一列 `registry`，`--json` 是物件的陣列（鍵 `name`、`count`、`limit`、`level`、`pages`、`flags`），不含 issue 編號，`send` 印訊息 id，`read` 印訊息或 `--json`，`log` 印訊息或 `--json`（空結果也是成功），`--capabilities` 印能力字樣一行），說明與錯誤放 stderr。結束碼：0 成功；1 用法或輸入錯誤；2 後端、網路或設定錯誤；3 `wait` 逾時沒有新訊息。
 
 #### Scenario: 設定缺少
 - **WHEN** 沒有設定檔（或缺 channel／backend 設定檔）就執行 `angareion send`
@@ -260,7 +260,7 @@ stdout MUST 只放結果（`channel create`／`channel delete` 印 channel 名�
 - **THEN** exit 2，stderr 說明 channel 沒有建立成功；後端可能留著沒有對應的實體，但介面不提它
 
 ### Requirement: 能力標記（#542）
-`angareion --capabilities` MUST 在 stdout 印恰好一行、以空白分隔的能力字樣，exit 0；能力字樣只增不改。這一版是 `paged-read`（會跨頁讀，見「換過頁的頻道」）。`angareion --version` 的輸出 MUST NOT 因此改變。不認得這個旗標的舊版是用法錯誤（exit 不是 0），所以判斷「已升級」MUST 只認「exit 0 而且輸出含該字樣」。
+`angareion --capabilities` MUST 在 stdout 印恰好一行、以空白分隔的能力字樣，exit 0；能力字樣只增不改。這一版是 `paged-read paged-write`（跨頁讀、寫入時自動換頁，見「換過頁的頻道」）。`angareion --version` 的輸出 MUST NOT 因此改變。不認得這個旗標的舊版是用法錯誤（exit 不是 0），所以判斷「已升級」MUST 只認「exit 0 而且輸出含該字樣」。
 
 #### Scenario: 印能力
 - **WHEN** `angareion --capabilities`
@@ -389,10 +389,10 @@ Angareion 對外 MUST 只有七個介面家族：建 channel、刪 channel、送
 
 #### Scenario: channel rollover（#542）
 - **WHEN** `angareion channel rollover X`（X 在設定檔裡有對應）
-- **THEN** 先強制 fetch 設定、不看則數、強制開下一頁並在註冊簿登記，等設定落地（上限 2 分鐘，逾時只在 stderr 提示、仍 exit 0）；stdout 只印 `X`，exit 0
+- **THEN** 先強制 fetch 設定、不看則數、強制開下一頁並在註冊簿登記，等設定落地（上限 2 分鐘，逾時只在 stderr 提示、仍 exit 0）；stdout 只印 `X`，exit 0；若已有別的寫者換過頁（下一頁已在註冊簿），則不再開頁，只印 Notice，仍 exit 0
 - **WHEN** 名字沒註冊
 - **THEN** exit 1
-- **WHEN** 設定與註冊簿不相容、註冊失敗，或已有待落地的下一頁以外的失敗
+- **WHEN** 任一步失敗（註冊簿讀不到、設定與註冊簿不相容、開頁或註冊失敗）
 - **THEN** exit 2，stderr 說沒有換頁，不含 issue 編號
 
 ### Requirement: 唯讀查詢 log
