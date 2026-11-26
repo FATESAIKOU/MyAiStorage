@@ -8,6 +8,7 @@
   - 第 4 版（2026-11-25），依第 2 次重審（Sonnet，M-1～M-3、L-1～L-3、nit-1～3、A-10、A-11）修正；游標改成每頁一份（A-10）。PR-1 的範圍與 C-1～C-5 不動。改動對照在 §14。
   - 第 5 版（2026-11-25），第 3 次重審「可以」（Sonnet，head 5b72d07）之後，收低項與 nit（L-1、L-2、nit-1～3），並把 PR-2 切成 2a／2b／2c（§6.3）。PR-1 已由 #544 實作並 merge，範圍與 C-1～C-5 不動。改動對照在 §15。
   - 第 6 版（2026-11-25），依 #545 的審查（Sonnet，head b954a5e：W-1、nit-1～5）修 §6.3、C-22、§9、§10。改動對照在 §16。
+  - 第 7 版（2026-11-26），PR-3 開工（PMO 11-26 決定）：新增 §6.4（PR-3 切成 3-0／3a／3b／3c，附簽名）；§1.3 補三處（W-4 認 `WriteRefusedError`、W-9 的 refresh 寫成「以新實體從 A 重來」、新增 S-8′）；§4 補「拿到 403 原樣樣本後要改的地方」。基準：main `15790cf`。改動對照在 §17。
 - 範圍：只設計。動到的模組：`backend`、`github`、`state`、`channel_config`、`registry`、`registry_rebuild`、`client`、`log_cache`、`decision_cli`、`cli`；新增 `channel_cli`、`registry_rules`、`rollover`。主 spec（`openspec/specs/angareion/spec.md`、`angareion/channel-config/spec.md`）要補的地方列在 §9，由 PM 決定與撰寫。
 - 實測：只讀。`gh api` 讀得到註冊簿 MyAiStorage#47（2026-11-25 有 52 則留言）。AiCompany-channel 是私有 repo，這台 worker 的 `gh` 讀不到（404），所以各頁的留言數照 issue 本文引用，沒有自己量。沒有對真 GitHub 寫入。
 - 名詞：
@@ -52,7 +53,7 @@
    - PR-2（讀側跨頁＋重建認得 `rollover`）合上、所有席位升級之後，就可以**手動換頁**：PMO 在 AiCompany-channel 開新 issue，在註冊簿貼一行 `rollover` JSON。不必等 PR-3 的自動化。
    - 在那之前照現行做法用 `-b` 頂著。w3 已經有 `-b`；m1（約剩 260 則）、w4（約剩 550 則）請 PMO 用 PR-1 的 `channel status` 盯，必要時再開 `-b`（§6）。
 8. **`-b` 頻道不併回**：訊息本文的 `channel` 不同、游標 key 不同，併成某頻道的頁會讓已讀過的再送一次。換頁上線後改回原名發訊，`-b` 留 7 天再 `channel delete`（Q-3）。
-9. **切成 3 個 PR**：PR-1 → PR-2 → PR-3（PR-1 已 merge，#544）；PR-2 再切成 2a、2b、2c 三個可以各自合併的 PR（§6.3）。每一步合上後 main 都不會更糟：
+9. **切成 3 個 PR**：PR-1 → PR-2 → PR-3（PR-1 已 merge，#544）；PR-2 再切成 2a、2b、2c 三個可以各自合併的 PR（§6.3，都已 merge）；PR-3 切成 3-0、3a、3b、3c（§6.4，第 7 版）。每一步合上後 main 都不會更糟：
    - PR-2 在沒有 `retired` 時**輸出**不變（`LogCache` 升版會整份重建一次，見 C-14）；
    - 手動換頁與 PR-3 的 merge，都要等所有席位的 `angareion --capabilities` 列出 `paged-read`（Q-6、§6.2）。
    - 契約 C-1～C-26。
@@ -144,12 +145,12 @@
 | W-1 | A：`page_size(R)` | 成功，`Date − R.until < PAGE_FILL_WINDOW`，而且 n < 2490 | 寫 R |
 | W-2 | A：`page_size(R)` | 成功，但不在窗內或 n ≥ 2490；或沒有 `Date` | 到 B |
 | W-3 | A：`page_size(R)` | 失敗（任何 `BackendError`，含 404） | 到 B（不警告） |
-| W-4 | A：寫 R | `ChannelFullError` | 到 B |
+| W-4 | A：寫 R | `ChannelFullError`，或 `WriteRefusedError`（403／422 被拒、不是 rate limit，第 7 版） | 到 B。兩者都是「確定沒寫進去」 |
 | W-5 | A：寫 R | 其他錯誤（含 `RateLimitError`、網路） | 往外丟（exit 2）。POST 的結果不確定，換頁再寫可能重複 |
 | W-6 | B：`page_size(P)` | n < 2400 | 寫 P |
 | W-7 | B：`page_size(P)` | 失敗 | 寫 P（fail-open） |
 | W-8 | B：`page_size(P)` | 2400 ≤ n < 2500 | `ensure_successor`：成功 → E＝重算實體，回到 A；失敗 → 寫 P，stderr 一行警告（P 還沒滿） |
-| W-9 | B：`page_size(P)` | n ≥ 2500 | `ensure_successor`：成功 → E＝重算實體，回到 A；S-2 不相容 → 先 `refresh(C)`（強制 fetch 本機設定檔、取新的 E_local），再呼叫一次 `ensure_successor`；仍失敗（或其他失敗）→ exit 2 |
+| W-9 | B：`page_size(P)` | n ≥ 2500 | `ensure_successor`：成功 → E＝重算實體，回到 A；S-2 不相容 → 先 `refresh(C)`（強制 fetch 本機設定檔、取新的 E_local），E＝E_local，回到 A（算一次重來；第 7 版寫明：新的 E 若已落地新頁，就不必再讀註冊簿；若現頁仍是 P，會再走到 W-9、再呼叫一次 `ensure_successor`）；同一次 `write` 第二次 S-2 不相容，或其他失敗 → exit 2 |
 | W-10 | B：寫 P | `ChannelFullError`（含 §4 的「當作滿」） | 同 W-9 |
 | W-11 | B：寫 P | 其他錯誤 | 往外丟（exit 2），理由同 W-5 |
 | W-12 | 任一步 | 成功寫入 | 回傳訊息 id，結束 |
@@ -173,6 +174,7 @@
 | S-7 | `post_with_retries(rollover_comment(C, backend, N, P))` | 失敗 | 失敗（「opened a new page but could not register it」）；N 上 0 則訊息；待註冊紀錄保留，下一次 S-4 重試註冊同一頁 |
 | S-8 | 貼成功 → **事後重算**：再讀一次註冊簿，把自己貼出的那則（`post_with_retries` 回傳的留言：`id`、`created_at`、`author_association`）併進去（同 id 去重） | 讀成功 | 刪掉待註冊紀錄；回傳重算實體：N 是現頁就是 N；N 成了旁頁就是贏家的實體，N 保持空的 |
 | S-9 | 事後重算 | 讀失敗 | 刪掉待註冊紀錄；用 S-1 的留言加上自己那則重算，回傳（N 是現頁） |
+| S-8′ | S-8／S-9 的重算（第 7 版） | C 的現頁仍是 P（自己那則沒有被套用：例如貼出的留言的 `author_association` 不在 `AUTHORIZED_ASSOCIATIONS`、回應沒有 `id`，或重建回報了它） | 失敗（「the registry did not accept the new page」）；**待註冊紀錄保留**（下一次重試同一頁，不再開頁）。不這樣擋，`PageWriter` 會帶著同一個 E 回到 A、B，再走一次 S-4，每次重來都多一張頁 |
 
 - **註冊在第一次寫入之前**：新頁在 `rollover` 貼成功、而且事後重算之前，一則訊息都不寫。
 - 所有失敗都不在訊息裡印編號（spec：介面不出現 issue 概念）。沒註冊的新頁留在 backend，PMO 用標題找。
@@ -363,6 +365,21 @@ A、B 是兩個 ≥PR-3 的寫者，P 在 2400 以上；「讀者」是 ≥PR-2 
   - 若被拒其實是權限問題，新頁也會被拒，最後一樣是 exit 2。
 - 把 GitHub 的 `message` 帶進 `ChannelFullError`，第一次真的撞上限時就有樣本（§10 第 1 項）。
 
+### 4.1 拿到 403 原樣樣本之後要改的地方（第 7 版；現在不改）
+
+2026-11-26 w5 對 `team-mylinuxpool-w2`（頁已滿 2500）寫入，收到 HTTP 403，訊息含「Commenting is disabled」。這是真 GitHub 達上限的第一個實例；原樣樣本（狀態碼、標頭、完整 body、當時 angareion 印出的整行 stderr）由 w5 交給 PM。**在樣本到之前，§4 規則 3 的判斷（再 GET 一次看 `comments`，≥2400 就當作滿）不改**，也不預先寫任何 body 字樣。拿到樣本後依序看：
+
+1. **先判斷要不要改**：看 w5 當時的 stderr。若是 `channel '…' is full: … 2500 of 2500 …`，規則 3 已經判對（`comments` 沒有延遲），**程式不必改**，只把樣本記進 §10 第 1、2 項並關掉這兩項。只有下面兩種情況才要改：
+   - stderr 是一般的 `Failed to send …`（GET 失敗，或 `comments` 小於 2400：計數有延遲，或上限不是照 `comments` 算）；
+   - 樣本的標頭帶 `retry-after` 或 `x-ratelimit-remaining: 0`（會被規則 1、2 誤判成 rate limit）。
+2. **要改的函式**：
+   - `src/angareion/github.py` 的 `GitHubIssuesBackend._refused_send`（現在的規則 3）：在 GET 計數之前，先比對樣本的 `message`（用 `_raw_message(resp)` 的原文，不是遮蔽後的；比對方式照樣本定：完整字串相等或固定前綴，不用寬鬆的子字串）。相符就是 `ChannelFullError(presumed=False)`；計數讀得到就帶計數，讀不到時 `count` 用 `PAGE_COMMENT_LIMIT`（訊息照 §4 的格式）。不相符照現行規則 3。
+   - 若是第 1 點的第二種情況：`GitHubIssuesBackend._rate_limit` 要先排除樣本的 `message`（這是規則 1、2 的順序改動，要再審一次 C-1）。
+   - 鎖住的 issue 若回同一句話（§1.5、§10 第 6 項），兩者分不開；那就照樣當作滿，因為 PR-3 的處置（換頁）對兩者都對。
+3. **要改的契約**：C-2 加一列：「POST 留言回 403，`message` 等於樣本 → `ChannelFullError`，`presumed is False`，不論 GET 計數的結果；GET 失敗時 `count == 2500`」。C-1 只在第 2 點第二項成立時改。C-21 不受影響（樣本的 `message` 照舊經 `_scrub`）。
+4. **要改的測試**：`tests/unit/test_angareion_pr1_contract.py` 的 C-2 一組加兩個（樣本＋計數 2500、樣本＋GET 500），以及一個反例（相近但不相同的 message 照舊走計數）；樣本放成測試檔裡的常數（先依 C-2 的規則遮蔽 repo 名與 `#數字`）。`tests/unit/test_angareion_github.py` 既有的 403 測試不改。
+5. **誰改**：這是 d 或併進 3a（若 3a 還沒 merge），由 PM 決定；它不依賴 PR-3 的任何部分，PR-3 也不依賴它（PR-3 只看 `ChannelFullError` 這個型別）。
+
 ## 5. 告警
 
 - **誰量**：channel token 這一側。
@@ -389,7 +406,7 @@ A、B 是兩個 ≥PR-3 的寫者，P 在 2400 以上；「讀者」是 ≥PR-2 
 |---|---|---|---|
 | **PR-1**（急） | 403 分辨（`RateLimitError`、`ChannelFullError`）；`page_size`（GitHub＋Fake）；`cmd_send` 的 ≥2000 警告；`channel_cli.py`（搬 `create`／`delete`，加 `status`）；`RegistryCounter`／`comment_count` | 只有錯誤訊息變清楚、多一個唯讀指令；寫入多 1 個 GET（失敗不擋） | C-1～C-5 |
 | **PR-2**（切成 2a／2b／2c，§6.3） | `retired` 的解析；`registry_rules.py`（純規則）；`rollover` 動作的解析與重建；回報去重；`pages_to_read`；游標 `pages`、`page_base` 與 `pages_after_read`；GitHub／Fake 的跨頁 `read`／`check`（含從頭讀模式的掃描窗）；退役頁失敗略過；`LogCache` v3；Fake 依頁存留言；`--capabilities`；`channel status` 的頁旗標；`channel delete` 的過期檢查 | 沒有 `retired` 時輸出不變（既有測試不改預期）；重建對既有註冊簿逐位元組相同 | C-6～C-15、C-22～C-26 |
-| **PR-3** | `rollover.PageWriter`／`ensure_successor`；`open_page`；待註冊紀錄（`state.PendingPageStore`）；`post_with_retries` 回傳留言；`send`、`decision` 的寫入改走它；`channel rollover NAME` | 自動換頁上線；merge 前提見 §6.2 | C-16～C-21 |
+| **PR-3**（切成 3-0／3a／3b／3c，§6.4） | `rollover.PageWriter`／`ensure_successor`；`open_page`；待註冊紀錄（`state.PendingPageStore`）；`post_with_retries` 回傳留言；`send`、`decision` 的寫入改走它；`channel rollover NAME`；先行的 `fake_backend.py`（D-35） | 自動換頁上線（3c）；merge 前提見 §6.2 | C-16～C-21 |
 
 ### 6.1 PR-1 可以先實作（不等 PR-2／PR-3）
 
@@ -588,6 +605,397 @@ PR-1 已 merge（#544，main `e324857`）。PR-2 切成三個 PR，每一個都�
 - 改壞驗證照 §10 的 PR-2 清單，各子 PR 做自己契約的那幾項；**哪一項在哪個子 PR、靠哪個測試轉紅，照 §10 的 PR-2 分表**。要注意：C-23 列的五種 `page_base`／`pages_after_read` 改壞，在 2a 是靠 C-10 的純函式單元測試轉紅；C-22／C-23 的情境測試屬 2c，2c 再驗一次。
 - 不連真 GitHub；隔離照 AGENTS.md。
 
+### 6.4 PR-3 的切分：3-0、3a、3b、3c（第 7 版）
+
+PMO 2026-11-26 決定 PR-3 現在開工；**合併條件不變**：3c（讓寫入端開始換頁的那一個）要等 §6.2 的盤點通過才 merge。3-0、3a、3b 不改任何對外行為，可以先 merge。介面簽名寫到實作者不必再猜的程度；PR 內的程式怎麼排由實作決定，但**簽名、模組歸屬、依賴方向與 Fake 的鉤子照這一節**，要偏離就先問架構師。
+
+**和 PM 建議的切法不同的一處**：Fake 的 `open_page` 與 PR-3 的其他 Fake 鉤子從 3a 移到 3b。理由：3-0 把 `FakeBackend` 整段搬到新檔，3a 若也改 Fake，兩者就改到同一段程式，只能排隊；移走之後 3a 只碰 `backend.py` 的協定區、`github.py`、`registry.py`、`state.py`，**3-0 與 3a 可以並行**。Fake 的鉤子只有 3b 的測試用得到，放在第一個用它的 PR 也比較好審（D-37）。
+
+**依賴圖**（箭頭＝「要等它 merge 才能開工」）：
+
+```text
+3-0（Fake 搬家） ─┐
+                  ├─→ 3b（rollover.py＋Fake 鉤子）─→ 3c（接線，盤點後 merge）
+3a（前置介面）  ──┘
+```
+
+- 3-0 與 3a 互不依賴，可以同時開工、任意順序 merge。兩者都改 `backend.py`，但區段不重疊（3-0 刪掉檔尾的 Fake；3a 在 `PageBackend` 旁加協定與例外、在常數區加一個常數）；後 merge 的那一個 rebase 一次即可。
+- 3b 要等 3-0 與 3a 都在 main（它的 Fake 鉤子寫在 `fake_backend.py`，它的程式用 3a 的 `PageOpener`、`WriteRefusedError`、`post_with_retries` 的回傳值）。
+- 3c 要等 3b。
+
+**每一步合上後 main 是否更糟**：
+
+| 子 PR | 對外行為 | 理由 |
+|---|---|---|
+| 3-0 | 不變 | 只搬程式與改測試的 import；斷言一字不改 |
+| 3a | 不變 | `post_comment`／`post_with_retries` 多回傳值，既有呼叫端不看；`open_page`、`PendingPageStore` 沒有呼叫端；`WriteRefusedError` 是 `BackendError` 的子類，訊息逐字不變 |
+| 3b | 不變 | `rollover.py` 沒有正式程式 import 它（只有測試） |
+| 3c | 寫入開始換頁 | 這是 PR-3 的目的；merge 前提是 §6.2 的盤點（`paged-read` 在每一份安裝），3c 合上之後 `--capabilities` 多 `paged-write` |
+
+#### 3-0：`FakeBackend` 搬到 `angareion/fake_backend.py`（D-35）
+
+- **契約**：沒有新契約（D-35）。驗收是「既有測試全過、斷言一字不改」，外加下面兩個邊界測試。
+- **檔案**：
+  - 新 `src/angareion/fake_backend.py`：把 `backend.py` 的 `FakeComment`、`_utc_now`、`FakeBackend` 三段**原封不動**搬過來（現在是 `backend.py:612` 起到檔尾）。模組 docstring 一句：只給測試與本機開發用，正式程式不得 import。
+  - `src/angareion/backend.py`：刪掉這三段；刪掉只有它們用到的 import（例如 `timezone`，若其他地方不用）。**不留相容的重新匯出**（`from angareion.fake_backend import FakeBackend` 會成環）。
+  - 測試：20 個檔、22 行 import 改成 `from angareion.fake_backend import FakeBackend`（`FakeComment` 同理）。一行裡同時 import 別的名字的，拆成兩行，例如 `from angareion.backend import Cursor, FakeBackend, Target` 改成 `from angareion.backend import Cursor, Target` 加 `from angareion.fake_backend import FakeBackend`。函式內的 import 兩處（`test_angareion_log_query.py:252`、`test_angareion_log_sync.py:92` 的 `FakeComment`）一樣改。用 `grep -rn "FakeBackend\|FakeComment\|_utc_now" tests src` 確認沒有漏。`openspec/changes/archive/` 裡的舊文件不改。
+  - 新測試 `tests/unit/test_angareion_fake_backend_boundary.py`（第一行 `import _guard`）：
+    - `test_d35_no_production_module_imports_fake_backend`：用 `ast` 掃 `src/angareion/*.py`（`fake_backend.py` 本身除外），沒有任何 `import angareion.fake_backend` 或 `from angareion.fake_backend import …`，也沒有 `from angareion import fake_backend`。
+    - `test_d35_backend_does_not_reexport_the_fake`：`not hasattr(angareion.backend, "FakeBackend")`，`FakeComment` 同理。
+- **介面**：`fake_backend` 只 import `backend` 的公開名字、`messages` 與標準庫（`fake_backend → {backend, messages}`）。名字照 Fake 本體用到的逐一 import，不用 `import *`。
+- **合上後 main**：行為不變。`backend.py` 約 610 行。
+
+#### 3a：前置介面（協定、例外、GitHub 的 `open_page`、註冊簿回傳留言、待註冊紀錄）
+
+- **契約**：C-17 的前置部分（`post_with_retries` 回傳最後一次成功的留言物件；待註冊紀錄「讀不出或寫不進 → 當作沒有、不報錯」；GitHub 的 `open_page`）。W-4 的 `WriteRefusedError` 分類（GitHub 側）。
+- **檔案**：`src/angareion/backend.py`、`src/angareion/github.py`、`src/angareion/registry.py`、`src/angareion/state.py`；測試新檔 `tests/unit/test_angareion_pr3_prereq.py`（測試名帶契約編號，例如 `test_c17_post_with_retries_returns_the_posted_comment`）。
+- **介面**（`backend.py`）：
+
+  ```python
+  PAGE_FILL_LIMIT = 2490          # §1.3 的表；放在 PAGE_ROLLOVER_AT 旁邊
+
+  class WriteRefusedError(BackendError):
+      """POST 留言被拒（403／422）、不是 rate limit、也不是滿：確定沒有寫進去（設計 542 §1.3 W-4）。"""
+      def __init__(self, message: str, *, status: int):
+          super().__init__(message)
+          self.status = status
+
+  @runtime_checkable
+  class PageOpener(Protocol):
+      """Open the next page of a channel (design 542 §1.3 S-4). Kept apart from PageBackend (A-5)."""
+      def open_page(self, entity: Entity) -> int: ...
+      # entity＝現頁（單頁實體）。在 entity.repo 開一張新 issue：標題＝entity.channel，
+      # 本文含 "continued from #<entity.issue>"；回傳新 issue 的編號。失敗丟 BackendError（訊息不含編號）。
+  ```
+
+- **介面**（`github.py`）：
+  - `GitHubIssuesBackend.open_page(self, entity: Entity) -> int`：`POST repos/{entity.repo}/issues`，body `{"title": entity.channel, "body": f"Angareion channel '{entity.channel}', continued from #{entity.issue}. Messages are comments on this issue.\n"}`。2xx 以外 → `BackendError(f"Failed to open a new page for channel '{entity.channel}': HTTP {status}")`；回應不是 JSON 或沒有 `number` → `BackendError`（訊息同一句加 `: no issue number in the response`）。與 `create_channel` 共用的「POST issue、取 `number`」抽成私有方法 `_open_issue(self, repo: str, title: str, body: str, *, what: str) -> int`（`what` 是錯誤訊息的前半句），`create_channel` 改呼叫它，訊息逐字不變。
+  - `_refused_send` 最後一行的 `BackendError(...)` 改成 `WriteRefusedError(<同一個字串>, status=resp.status)`。`send` 的「不是 200／201、也不是 403／422」那一行不改（那是結果不確定的錯誤，W-5／W-11 照舊往外丟）。
+- **介面**（`registry.py`）：
+
+  ```python
+  class CommentPoster(Protocol):
+      def post_comment(self, body: str) -> dict[str, Any]: ...   # 原本 -> None
+
+  def post_with_retries(poster, body, *, attempts=..., interval=..., sleeper=time.sleep) -> dict[str, Any]
+      # 回傳第一次成功的那一次 post_comment 的回傳值；不是 dict 時回傳 {}
+
+  # RegistryClient.post_comment(body) -> dict[str, Any]
+  #   回傳 resp.json()；不是 JSON 或不是 dict → 回傳 {}（留言已經貼出，不丟例外）
+  ```
+
+  - `FakeRegistryClient`：
+    - `__init__` 多兩個關鍵字參數：`post_association: str = "NONE"`、`post_user_type: str = "Bot"`（`post_comment` 存下的留言用它們；預設值等於現行，既有測試不變）。PR-3 的測試要讓自己貼的 `rollover` 被重建接受，就傳 `post_association="OWNER"`。
+    - 新屬性 `before_post: Callable[[str], None] | None = None`：`post_comment` 一開始（在 `fail_posts_times` 檢查之前、**在鎖外**）呼叫 `before_post(body)`。C-18 用它當 gate。
+    - 新屬性 `hidden_ids: set[int]`（預設空）：`list_comments` 先濾掉 `id` 在這個集合裡的留言，再照 `page_size` 切頁。C-18 的 I-2 用它模擬列表的複寫延遲。
+    - 新屬性 `_lock = threading.RLock()`：`add_comment` 的「算 index、append」在鎖內，兩個執行緒同時貼不會拿到同一個 id。
+    - `post_comment(body) -> dict[str, Any]`：回傳 `add_comment(...)` 的回傳值。
+  - `channel_cli` 的兩個呼叫端、`registry_rebuild.Rebuilder` 不看回傳值，不改。
+- **介面**（`state.py`）：
+
+  ```python
+  def pending_pages_file_path(state_dir: Path | str, identity: str) -> Path
+      # Path(state_dir) / f"pending-pages-{identity_slug(identity)}.json"
+
+  class PendingPageStore:
+      """已開、還沒註冊成功的頁（設計 542 §1.3「待註冊紀錄」）。只存取，不解讀。"""
+      def __init__(self, state_dir: Path | str | None = None, identity: str | None = None,
+                   path: Path | str | None = None): ...      # 與 CursorStore 同一種參數規則
+      def get(self, channel: str) -> tuple[str, int, int] | None   # (backend, issue, from_issue)
+      def put(self, channel: str, backend: str, issue: int, from_issue: int) -> None
+      def drop(self, channel: str) -> None
+  ```
+
+  - 檔案內容 `{"version": 1, "pages": {"<C>": {"backend": "<名>", "issue": N, "from": P}}}`，`json.dumps(..., indent=2, sort_keys=True)` 加換行。
+  - `get`：檔案不存在、讀不出、不是 JSON、`version` 不是 `1`、`pages` 不是物件、那一筆缺鍵或型別不對（`backend` 不是字串；`issue`／`from` 不是正整數，`bool` 不算）→ `None`。不丟例外、不寫 stderr。
+  - `put`／`drop`：讀現有內容（讀不出就從空的開始），改一筆，用與 `CursorStore.save_many` 相同的原子寫入（同目錄的 `tempfile.mkstemp` 加 `os.replace`）寫回。`OSError` 一律吞掉（不丟、不寫 stderr）。`drop` 一個不存在的頻道不寫檔。
+  - 不加鎖（§1.3：同一身分兩個行程同時寫，後寫的蓋掉先寫的，最壞多一張孤兒頁）。
+- **測試**（`test_angareion_pr3_prereq.py`）：
+  - GitHub 假 transport：`open_page` 的 URL、方法、`title`、本文含 `continued from #<P>`、回傳編號；500 → `BackendError`，訊息不含 `#數字` 與 repo 名；`create_channel` 的既有測試照舊過。
+  - `_refused_send` 小於 2400 → `isinstance(err, WriteRefusedError)`、`err.status == 403`，訊息與改之前逐字相同（拿既有 C-2 測試的期望字串比）；GET 失敗同樣是 `WriteRefusedError`。rate limit 照舊是 `RateLimitError`（不是 `WriteRefusedError`）。
+  - `RegistryClient.post_comment` 回傳 transport 給的 dict；回應不是 JSON → `{}`。`post_with_retries`：第一次失敗、第二次成功 → 回傳第二次的留言，`sleeper` 被呼叫 1 次。
+  - `FakeRegistryClient`：`post_association="OWNER"` 存下的留言是 `OWNER`；`before_post` 在失敗注入之前被呼叫；`hidden_ids` 讓 `all_comments` 看不到那幾則、但 `comment_count` 仍算它們。
+  - `PendingPageStore`：存讀；兩個頻道互不影響；上面列的每一種壞資料各一個 → `None`；目錄不可寫（`chmod 0o500` 的暫存目錄）時 `put` 不丟例外、`get` 是 `None`。
+- **合上後 main**：行為不變（見上表）。
+
+#### 3b：`rollover.py`（`PageWriter`、`ensure_successor`）與 Fake 的鉤子
+
+- **契約**：C-16、C-17（含 S-8′）、C-18。全部在函式庫層驗（`PageWriter` 直接建構），不經 CLI。
+- **檔案**：新 `src/angareion/rollover.py`、`src/angareion/fake_backend.py`（鉤子）；測試新檔 `tests/unit/test_angareion_rollover.py`（C-16、C-17）、`tests/unit/test_angareion_rollover_race.py`（C-18）。
+- **import 邊**：`rollover → {backend, messages, registry, registry_rules}`（`messages` 只為 `Message` 型別；§8.2 原本漏列，本版補上）。**不 import** `channel_config`、`state`、`config`、`client`、`cli`、`github`、`fake_backend`。
+- **介面**（`rollover.py`）：
+
+  ```python
+  MAX_RESTARTS = 3
+
+  # SuccessorError.kind 的值（§1.3 的列）
+  REGISTRY_UNREADABLE = "registry-unreadable"   # S-1（含：registry 沒有 all_comments）
+  MISMATCH = "mismatch"                         # S-2（含：backends() 丟例外、本機 backend 不在 backends() 裡）
+  OPEN_FAILED = "open-failed"                   # S-5（含：backend 不是 PageOpener）
+  UNVERIFIED = "unverified"                     # S-6、S-6′
+  UNREGISTERED = "unregistered"                 # S-7
+  REJECTED = "rejected"                         # S-8′
+
+  REASONS = {                                   # 固定字串，不含編號
+      REGISTRY_UNREADABLE: "could not read the channel registry",
+      MISMATCH: "the local channel configuration does not match the registry",
+      OPEN_FAILED: "could not open a new page",
+      UNVERIFIED: "the new page could not be verified",
+      UNREGISTERED: "opened a new page but could not register it",
+      REJECTED: "the registry did not accept the new page",
+  }
+
+  class SuccessorError(BackendError):
+      def __init__(self, kind: str, message: str | None = None):
+          self.kind = kind
+          self.reason = REASONS[kind]
+          super().__init__(message or self.reason)
+
+  class PendingPages(Protocol):                  # state.PendingPageStore 在結構上符合它
+      def get(self, channel: str) -> tuple[str, int, int] | None: ...   # (backend, issue, from_issue)
+      def put(self, channel: str, backend: str, issue: int, from_issue: int) -> None: ...
+      def drop(self, channel: str) -> None: ...
+
+  class MemoryPendingPages:                      # 測試用；與 backend.MemoryETagCache 同一種角色
+      def get(...); def put(...); def drop(...)
+
+  def filling_warning(channel: str, count: int) -> str
+      # f"channel '{channel}' has {count} of {PAGE_COMMENT_LIMIT} messages on its current page"
+      # 與 PR-1 的 C-4 那一行逐字相同（不帶 "Warning: "，前綴由 warn 回呼加）
+  def prepare_failed_warning(channel: str, reason: str) -> str
+      # f"channel '{channel}' is nearly full and its next page could not be prepared ({reason}); "
+      # "the message was written to the current page"
+  def stuck_message(channel: str, reason: str) -> str
+      # f"channel '{channel}' is full and its next page could not be prepared ({reason}); "
+      # f"try again later, or run 'angareion channel rollover {channel}'"
+
+  class PageWriter:
+      def __init__(
+          self,
+          backend: ChannelBackend,
+          registry: Any,                                   # CommentPoster；有 all_comments 才能換頁
+          *,
+          pending: PendingPages,
+          backends: Callable[[], Mapping[str, BackendRef]],  # cli：store.backends()
+          refresh: Callable[[str], Entity],                # cli：store.fetch() 再 store.entity_for(C)
+          warn: Callable[[str], None] = lambda text: None,  # cli：cli._warn（加 "Warning: "）
+          now: Callable[[], datetime] = <UTC now>,         # 只用在「肯定在窗外」的跳過（L-2）
+          sleeper: Callable[[float], None] = time.sleep,    # 給 post_with_retries
+      ) -> None
+      def write(self, entity: Entity, message: Message) -> str
+      def ensure_successor(self, channel: str, current: int, local: Entity) -> Entity
+  ```
+
+- **`write` 的流程**（§1.3 的 W 表寫成程式的形狀；這段是規格，實作可以拆私有方法，但分支與順序照這裡）：
+
+  ```python
+  def write(self, entity, message):
+      if not isinstance(self.backend, PageBackend):
+          return self.backend.send(entity, message)       # C-4 第 3 點：沒有頁大小就照舊寫現頁，不警告
+      e, restarts, refreshed = entity, 0, False
+      while True:
+          # A：最後一個非旁頁的退役頁 R
+          r = next((p for p in reversed(e.retired) if not p.side), None)
+          if r is not None and self.now() <= parse_backend_time(r.until) + RETIRED_READ_GRACE:
+              page = page_entity(e, r.issue)
+              try:
+                  n, date = self.backend.page_size_at(page)
+              except BackendError:
+                  n, date = None, None                                     # W-3
+              if n is not None and _in_fill_window(date, r.until) and n < PAGE_FILL_LIMIT:
+                  try:
+                      return self.backend.send(page, message)              # W-1／W-12，不警告
+                  except (ChannelFullError, WriteRefusedError):
+                      pass                                                 # W-4 → B
+                  # 其他 BackendError 不接（W-5）
+          # B：現頁 P
+          p = page_entity(e, e.issue)
+          try:
+              n, _ = self.backend.page_size_at(p)
+          except BackendError:
+              n = None                                                     # W-7
+          prior = None
+          if n is not None and PAGE_ROLLOVER_AT <= n < PAGE_COMMENT_LIMIT:  # W-8
+              try:
+                  e = self.ensure_successor(e.channel, e.issue, e)
+                  restarts = self._restart(e.channel, restarts); continue
+              except SuccessorError as err:
+                  prior = err
+                  self.warn(prepare_failed_warning(e.channel, err.reason))
+          if n is None or n < PAGE_COMMENT_LIMIT:                          # W-6／W-7／W-8 失敗
+              if n is not None and n >= PAGE_WARN_AT:
+                  self.warn(filling_warning(e.channel, n))                 # C-20：寫現頁、寫入前 ≥2000
+              try:
+                  return self.backend.send(p, message)                     # W-12
+              except ChannelFullError:
+                  pass                                                     # W-10 → 與 W-9 相同
+              # 其他 BackendError（含 WriteRefusedError、RateLimitError）不接（W-11）
+          # W-9／W-10：P 已滿
+          if prior is None:
+              try:
+                  e = self.ensure_successor(e.channel, e.issue, e)
+                  restarts = self._restart(e.channel, restarts); continue
+              except SuccessorError as err:
+                  prior = err
+          if prior.kind == MISMATCH and not refreshed:
+              refreshed = True
+              e = self.refresh(e.channel)                                  # 例外照原樣往外丟
+              restarts = self._restart(e.channel, restarts); continue
+          if n is not None and n >= PAGE_COMMENT_LIMIT:
+              self.warn(filling_warning(e.channel, n))                     # 保住 PR-1 的 test_c4_the_warning_is_written_before_the_refusal_it_comes_with
+          raise SuccessorError(prior.kind, stuck_message(e.channel, prior.reason))
+  ```
+
+  - `_restart(channel, restarts) -> int`：`restarts + 1`；超過 `MAX_RESTARTS` 就丟 `BackendError(f"channel '{channel}': could not settle which page to write; try again later")`。
+  - `_in_fill_window(date: str | None, until: str) -> bool`：`date` 是 `None`，或兩者任一 `parse_backend_time` 丟 `ValueError` → `False`；否則 `parse_backend_time(date) - parse_backend_time(until) < PAGE_FILL_WINDOW`。
+  - **最後失敗（exit 2）之前的警告**：W-9 走到最後失敗時，先印 C-4 那一行（`filling_warning`），再丟 `SuccessorError`；`stuck_message` 含 `is full`。這讓 PR-1 的兩個既有測試不改也照樣過：`test_angareion_pr1_contract.py` 的 `test_c4_a_refused_write_at_the_limit_exits_2_with_the_full_message`（stderr 含 `is full`、exit 2）與 `test_c4_the_warning_is_written_before_the_refusal_it_comes_with`（警告在 `is full` 之前）。這兩個測試的註冊簿夾具沒有 `general` 的 `register`，所以會走 S-2 → refresh → 再 S-2 → 最後失敗，POST 0 次。W-10（寫入前 <2500、已印過警告）不再印第二次。
+  - W-10 在 W-8 失敗之後發生時，**不再呼叫第二次 `ensure_successor`**，直接用 W-8 的錯誤（`prior`）決定 refresh 或失敗。
+  - `self.now()` 回傳帶時區的 `datetime`；`parse_backend_time` 回傳的也是帶時區的，可以直接比。邊界：恰好等於 `until + 48h` 時照 W-1～W-3（`<=`）。
+- **`ensure_successor` 的流程**（§1.3 的 S 表）：
+
+  ```python
+  def ensure_successor(self, channel, current, local):
+      if not isinstance(self.registry, RegistryComments):
+          raise SuccessorError(REGISTRY_UNREADABLE)
+      try:
+          before = self.registry.all_comments()                           # S-1
+      except RegistryError:
+          raise SuccessorError(REGISTRY_UNREADABLE)
+      try:
+          refs = dict(self.backends())
+      except Exception:
+          raise SuccessorError(MISMATCH)
+      channels, _ = rebuild_channels(before, set(refs))
+      entry = channels.get(channel)
+      if local.backend not in refs or not _compatible(entry, current, local):
+          raise SuccessorError(MISMATCH)                                  # S-2，open_page 0 次
+      if entry["issue"] != current:                                       # S-3
+          self.pending.drop(channel)
+          return _entity_from_mapping(local, entry)
+      record = self.pending.get(channel)                                  # S-4
+      if record is not None and record[0] == local.backend and record[2] == current:
+          new = record[1]
+      else:
+          if not isinstance(self.backend, PageOpener):
+              raise SuccessorError(OPEN_FAILED)
+          try:
+              new = self.backend.open_page(page_entity(local, current))
+          except BackendError:
+              raise SuccessorError(OPEN_FAILED)                           # S-5
+          self.pending.put(channel, local.backend, new, current)
+      try:
+          ok = self.backend.verify_channel(channel, refs[local.backend], new)
+      except BackendError:
+          raise SuccessorError(UNVERIFIED)                                # S-6′：紀錄保留
+      if not ok:
+          self.pending.drop(channel)
+          raise SuccessorError(UNVERIFIED)                                # S-6：紀錄刪掉
+      try:
+          own = post_with_retries(self.registry, rollover_comment(channel, local.backend, new, current),
+                                  sleeper=self.sleeper)
+      except RegistryError:
+          raise SuccessorError(UNREGISTERED)                              # S-7：紀錄保留
+      own = own if isinstance(own, dict) and "id" in own else None
+      try:
+          after = self.registry.all_comments()                            # S-8
+      except RegistryError:
+          after = before                                                  # S-9
+      merged = [c for c in after if own is None or c.get("id") != own["id"]] + ([own] if own else [])
+      channels, _ = rebuild_channels(merged, set(refs))
+      entry = channels.get(channel)
+      if entry is None or entry["issue"] == current:
+          raise SuccessorError(REJECTED)                                  # S-8′：紀錄保留
+      self.pending.drop(channel)
+      return _entity_from_mapping(local, entry)
+  ```
+
+  - `_compatible(entry, current, local) -> bool`：`entry` 是 `None` → `False`；`entry["backend"] != local.backend` → `False`；令 `retired = {p["issue"] for p in entry.get("retired", [])}`，`current != entry["issue"]` 而且 `current not in retired` → `False`；`local.retired` 有任何一頁的 `issue` 不在 `retired` → `False`；其餘 `True`。（S-2 的四種）
+  - `_entity_from_mapping(local, entry) -> Entity`：`Entity(channel=local.channel, backend=entry["backend"], repo=local.repo, issue=entry["issue"], retired=tuple(RetiredPage(issue=p["issue"], until=p["until"], side=bool(p.get("side", False))) for p in entry.get("retired", [])))`。`repo` 取本機的：S-2 已確認 backend 名相同。
+  - S-6 對「剛開的頁」也刪紀錄（第 7 版寫明）：剛開的頁在 `put` 之後就在紀錄裡，與「來自紀錄的頁」是同一種情況。
+  - 關於 S-8′ 的實際機率：channel token 是擁有者的，真 GitHub 上自己的留言是 `OWNER`。S-8′ 主要擋測試替身與設定錯誤；擋住之後同一頁不再重開（紀錄保留），代價是每次重試在註冊簿多一則 `rollover`。
+- **Fake 的鉤子**（`fake_backend.py`；全部新加，既有的方法與預設行為不變）：
+  - `__init__` 多一個關鍵字參數 `page_date: Callable[[], str | None] | None = None`：`page_size_at` 的第二個值用 `page_date()`；沒給就照現行用 `clock()`。C-16 的「沒有 `Date`」傳 `page_date=lambda: None`。
+  - `open_page(self, entity: Entity) -> int`：先 `_check_injected_error()`；再看 `next_open_error`（有就清掉並丟出，與 `next_create_error` 同一種寫法）；新頁號＝`create_channel` 用的同一個計數器 `_next_entity_id`（所以 `add_entity` 過的最大號＋1 起跳；測試要固定新頁號就用 `start_entity_id` 或先 `add_entity`）；存 `{"title": entity.channel, "state": "open", "body": f"continued from #{entity.issue}"}`；把新頁號 append 到 `self.opened: list[int]`；回傳新頁號。
+  - `set_send_error(self, number: int, error: BackendError | None, *, repo: str = "owner/repo") -> None`：之後對那一頁的 `send` 一律丟 `error`（`None` 解除）；檢查放在「實體存在」之後、頁大小之前。用來做 W-4、W-5、W-10、W-11。
+  - `self.size_calls: list[int]`：`page_size_at` 每次被呼叫就 append `entity.issue`（`page_size` 經 `page_size_at`，也算）。**`send` 內部判斷滿頁改用私有的 `_current_size(entity)`，不經 `page_size_at`**，所以 `size_calls` 只記外部的呼叫。C-16 的「不發 `page_size(R)`」用它斷言。
+  - `self._lock = threading.RLock()`：`create_channel`、`open_page`、`deliver` 的本體在鎖內（C-18 兩個執行緒共用一個 Fake）。
+- **C-18 的 gate**（`test_angareion_rollover_race.py`；不用 sleep）：
+  - 共用：一個 `FakeBackend`（現頁 P，`set_page_size(P, 2450)`，`clock` 固定在註冊簿留言時間之後 1 分鐘內，讓 W-1 的窗成立；`FakeRegistryClient` 的留言時間是 `2026-10-10T12:00:<序號>Z`，所以 `clock` 用 `2026-10-10T12:01:00Z`，兩個 `PageWriter` 的 `now` 也用同一刻）、一個 `FakeRegistryClient(post_association="OWNER")`（夾具裡有 C 的 `register`）、兩個 `PageWriter`（各自一個 `MemoryPendingPages`，`sleeper=lambda s: None`）。
+  - gate：`barrier = threading.Barrier(2, timeout=5)`；`registry.before_post = lambda body: barrier.wait()`。兩個執行緒各自 `write`：兩邊都過了 S-1（「沒有下一頁」）、各自開了頁之後，才在貼 `rollover` 前會合，然後一起貼。執行緒內的例外收集到 list，主執行緒 `join(timeout=10)` 後斷言 list 是空的、兩個執行緒都結束了。某一邊沒走到貼留言（例如判斷錯成 S-3），另一邊會在 5 秒後 `BrokenBarrierError`，測試以失敗結束，不會卡住。
+  - 斷言：`backend.opened` 有 2 頁；註冊簿有兩則 `rollover from P`；`rebuild_channels` 得到一個現頁加一個 `side`；旁頁上 0 則；用 `rebuild` 出來的實體做一個 `StaticResolver`，PR-2 的讀者（`Angareion(...).read(Target(channel=C))`）讀到兩則訊息各恰好一次。
+  - 「B 在 A 貼出之後才開始」：不用執行緒，A 先 `write` 完、B 再 `write` → `backend.opened` 只有 A 那一頁。
+  - I-2：不用執行緒。這一組把 P 設成 `set_page_size(P, 2495)`（在 W-8 的區間、但 ≥2490，所以換頁後不會回頭寫 P，B 的訊息才會落在自己的頁上）。A 先 `write` 完；把 A 那則的 `id` 放進 `registry.hidden_ids`；B `write`（B 的 S-1 與 S-8 都看不到 A）→ B 開自己的頁並寫進去；清掉 `hidden_ids`，重建 → B 的頁是旁頁；讀者先用「只有現頁」的實體讀一次並 commit，再換成含旁頁的實體讀 → B 的訊息恰好一次。
+- **測試的寫法**（`test_angareion_rollover.py`）：
+  - 每個 W／S 列至少一個測試，名字帶列號，例如 `test_c16_w1_writes_the_retired_page_inside_the_fill_window`、`test_c17_s6_prime_keeps_the_pending_record`。
+  - 「寫到哪一頁」用 Fake 的 `_comments` 裡的 `page` 欄位斷言（`FakeComment.page == ("owner/repo", N)`），不靠訊息內容猜。
+  - 時鐘：`now` 傳固定的 `datetime`；`page_date` 傳固定字串；不用 `datetime.now()`。
+  - 錯誤訊息的「不含編號」：每個失敗測試對 `str(err)` 斷言不符合 `#\d+`、不含 `owner/repo`。
+- **合上後 main**：行為不變，沒有正式程式 import `rollover`。
+
+#### 3c：接線（`send`、`decision`、`channel rollover`、能力標記、說明）
+
+- **契約**：C-19、C-20、C-21；C-24 的 PR-3 部分（`paged-read paged-write`）。
+- **檔案**：`src/angareion/client.py`、`src/angareion/cli.py`、`src/angareion/decision_cli.py`、`src/angareion/channel_cli.py`、`src/angareion/channel_config.py`、`src/angareion/backend.py`（只改 `ChannelFullError` 的訊息尾）、`skills/angareion/SKILL.md`；測試新檔 `tests/unit/test_angareion_pr3_cli.py`（C-19、C-20）與 `tests/unit/test_angareion_no_numbers.py`（C-21）。
+- **介面**（`client.py`）：
+  - `Angareion.__init__(self, backend, cursors, store, identity, writer: PageWriter | None = None)`（最後一個參數，預設 `None`；既有的建構呼叫不改）。
+  - 新方法 `write(self, entity: Entity, message: Message) -> str`：`writer` 有值就 `writer.write(entity, message)`，否則 `backend.send(entity, message)`。
+  - `send(self, channel, message)` 改成 `return self.write(self.store.entity_for(channel), message)`。
+  - 新邊 `client → rollover`（只為 `PageWriter` 的型別；§8.2 已列）。
+- **介面**（`cli.py`）：
+  - `main` 在建 `app` 時多建一個 `PageWriter`：`backend=active_backend`、`registry=active_registry`、`pending=PendingPageStore(config.state_dir, config.identity)`、`backends=<見下>`、`refresh=<見下>`、`warn=_warn`、`sleeper=active_sleeper`；傳給 `Angareion(..., writer=writer)`。
+    - `backends`：`lambda: active_store.backends() if hasattr(active_store, "backends") else {}`（測試的 store 可能沒有這個方法；空的就是 S-2 不相容，不開頁）。
+    - `refresh(name)`：`fetch = getattr(active_store, "fetch", None)`；有就呼叫；回傳 `active_store.entity_for(name)`。
+  - `cmd_send`：刪掉 `_warn_if_page_is_filling` 的呼叫與函式本身（警告改由 `PageWriter` 經 `warn` 印，請求數不變：PR-1 的那一個 GET 就是 W-6 的 `page_size_at`）。`app.send(args.channel, message)` 不變。
+  - `CAPABILITIES = ("paged-read", "paged-write")`。
+  - parser：`channel` 多一個子命令 `rollover`（位置參數 `name`）；`main` 的「channel needs an action」訊息加上 `'angareion channel rollover <name>'`；派發到 `channel_cli.cmd_channel_rollover(args, config, app, active_registry, active_store, token, sleeper=active_sleeper)`。
+- **介面**（`decision_cli.py`）：三處 `backend.send(entity, message)`（`_maybe_snapshot`、`_write_one`、`cmd_submit` 的迴圈）改成 `app.write(entity, message)`。為此 `_maybe_snapshot(config, app, backend, entity, token)`、`_write_one(app, entity, message)` 多收 `app`（`backend` 仍用於 `_sync` 的列表）。不 import `client` 或 `rollover`（`app` 照舊是 `Any`），依賴邊不變。`tests/unit/_decision_cli_lab.py` 的 `_TRACKED` 不含 `page_size_at`，所以既有的 C-20(e)（#468 的編號）測試不改、照樣過；實作時若它轉紅，先回報架構師，不要擴大 `C20E_ALLOWED`。
+- **介面**（`channel_config.py`）：`ChannelStore.poll_for_page(self, name: str, issue: int, *, timeout: float = LANDING_POLL_TIMEOUT_SECONDS) -> bool`：與 `poll_for_channel` 同一個迴圈，條件改成 `self.channels().get(name)` 不是 `None` 而且它的 `issue == issue`。
+- **介面**（`channel_cli.py`）：
+
+  ```python
+  def cmd_channel_rollover(args, config, app, registry, store, token, sleeper=time.sleep) -> int
+  ```
+
+  1. `validate_channel_name(args.name)`，錯 → exit 1（同 `delete`）。
+  2. `store.ensure_fresh()`；`store.fetch()`（M-4）；`entity = store.entity_for(args.name)`（沒有這個頻道 → `ChannelNotFoundError`，由 `main` 轉成 exit 1）。
+  3. `app.writer` 是 `None` → stderr `Error: channel '<C>' cannot be rolled over by this command` exit 2。
+  4. `result = app.writer.ensure_successor(args.name, entity.issue, entity)`；`SuccessorError` → stderr `Error: channel '<C>' was not rolled over: <err.reason>` exit 2（不開頁的那幾種，S-1／S-2，`open_page` 0 次；S-5～S-8′ 同樣 exit 2）。
+  5. `store.poll_for_page(args.name, result.issue)` 是 `False` → stderr `Notice: channel '<C>' has a new page but the local copy has not caught up yet; it will be used once the registry rebuild lands.`（不是錯誤）。
+  6. stdout `<C>` 一行，exit 0。
+  - 不看則數（C-19：強制）。已落地、現頁就是剛換好的頁時再跑一次，會再開一頁：這是「強制」的意思，SKILL.md 要寫明「只在 PMO 判斷要換時跑」。
+  - 新邊 `channel_cli → rollover`（為了 `SuccessorError`；§8.2 已列）。
+- **介面**（`backend.py`）：`ChannelFullError` 的訊息尾加 `; run 'angareion channel rollover <C>'`（§4）。既有測試只比對子字串（`is full`、`looks full …`、`HTTP 403`），不受影響。
+- **`SKILL.md`**：`send` 滿頁時會自動換頁、寫的人不用做任何事；`channel rollover NAME` 是 PMO 的工具（強制換頁）；`--capabilities` 多 `paged-write`。不寫 issue 編號。
+- **測試**：
+  - C-20：`main(["send", …], backend=FakeBackend, store=<有 fetch／backends／entity_for 的 store>, registry=FakeRegistryClient(post_association="OWNER", comments=[register 那則]))`，Fake 現頁 `set_page_size(P, 2500)` → exit 0，訊息在新頁（`FakeComment.page`），stderr 沒有 C-4 那一行（寫的是新頁、寫入前 0 則）；`decision ask` 同樣寫到新頁。另一個：現頁 2100 → stderr 恰好一行 C-4 的警告（與 PR-1 的 `test_c4_*` 同一句）。
+  - C-19：列出的每一種結果各一個（含 S-3 的 `open_page` 0 次、未註冊的名字 exit 1、`poll_for_page` 逾時只有 Notice）。`poll_for_page` 的逾時測試要給 `ChannelStore` 會前進的 `clock`（`poll_for_channel` 的迴圈靠它結束；固定的 `clock` 會讓測試卡住）。
+  - C-21：`test_angareion_no_numbers.py` 用參數化跑過 C-16～C-20 的失敗情境（CLI 層：`send`、`decision ask`、`channel rollover`），對 stdout、stderr 斷言沒有 `#\d+`、沒有 `owner/repo`；另對 `rollover.REASONS` 的每個值與 `stuck_message`、`prepare_failed_warning`、`filling_warning` 的輸出逐一斷言。
+  - C-24：`test_angareion_paged_read.py` 的 `test_c24_capabilities_prints_one_line_and_exits_0` 期望值改成 `paged-read paged-write`（這是 C-24 寫明 PR-3 要改的，實作報告列出）。
+- **合上後 main**：寫入開始換頁。merge 前提是 §6.2 的盤點；PR 本文要附盤點結果（或連到 PMO 的盤點留言）。
+
+#### 手動換頁與 PR-3 並存（w2 的現實）
+
+w2 已滿 2500，PR-3 合上之前 PMO 會照 runbook 手動換頁。手動換過的頻道在 channels.json 裡就是一般的 `retired`，PR-3 的寫入端不分「手動」或「自動」：
+
+| 情況 | PR-3 寫入端的路徑 | 結果 |
+|---|---|---|
+| 已落地：現頁 N，`retired=[{P, until}]`，P 有 2500 則 | A：本機時鐘在 `until+48h` 以內 → `page_size(P)`＝2500 ≥ 2490 → W-2 → B：寫 N | 正確。換頁後 48 小時內，每次寫入多 1 個 GET（P 的計數）；之後 A 被本機時鐘跳過，不再多花 |
+| 已落地，但舊頁其實沒滿（PMO 提早換，例如 2300 則） | A：窗內而且 <2490 → W-1 寫 P | 這是「舊頁先寫滿」，Q-2 的 B；與自動換頁相同，讀者兩頁都讀。PMO 若不想要這個行為，要在換頁前讓舊頁 ≥2490，或接受它 |
+| 已落地，舊頁寫入被拒但計數 <2400（例如被鎖、或「Commenting is disabled」而計數延遲） | A：W-1 寫 P → `WriteRefusedError` → W-4 → B：寫 N | 正確。這是第 7 版把 `WriteRefusedError` 加進 W-4 的原因；第 6 版的表在這裡會 exit 2（W-5）一直到窗外 |
+| 舊頁已刪或讀不到（runbook §9 的往前修） | A：`page_size(P)` 失敗 → W-3 → B | 正確 |
+| 手動的 `rollover` 已貼、還沒落地（本機現頁仍是 P，已滿） | B：W-9 → `ensure_successor`：S-1 讀到手動那則 → S-3（P 在 `retired`）→ 回到 A：P 窗內但 ≥2490 → B：寫 N | 正確，`open_page` 0 次。S-2 的第四種檢查（本機的 `retired` 都在重算裡）對已有 `retired` 的頻道照樣成立 |
+| 手動換頁之後再自動換頁（N 也到 2400） | `ensure_successor(C, N)`：重算的現頁是 N、`retired=[P]` → S-4 → `retired=[P, N]` | 正確；A 看的是最後一個非旁頁（N） |
+| PMO 手動換頁的同時，有 PR-3 寫者在自動換 | 與 I-1 相同：先貼的成立，另一頁是旁頁 | 不漏不重送。PMO 的頁若成了旁頁，runbook §6 的驗證會看到現頁不是自己開的那張；照 runbook §8 處理（不必補救）。**PR-3 合上之後，runbook 第 3、4 節應改成 `angareion channel rollover <C>`**（它走 S-3 與待註冊紀錄，不會和自動換頁搶頁）；gh 的手動步驟留作 angareion 不能用時的備案。runbook 不在架構師可以 commit 的路徑，由 PM 改 |
+| 某寫者在手動換頁之前留下待註冊紀錄（`from=P`） | 換頁落地後，該頻道下一次走到 S-4 時 `from` 是 N，與紀錄不同 → 當作沒有並覆寫 | 舊紀錄那張頁成為孤兒（最多一張，§1.3 的上界）。不影響送達 |
+| `-b` 頻道 | 與換頁無關 | §3 照舊 |
+
+#### 給實作者的共通事項
+
+- 模組與依賴方向照 §8.1、§8.2。`rollover` 不 import `channel_config`、`state`；`decision_cli` 不 import `client`、`rollover`；正式程式不 import `fake_backend`。
+- 改壞驗證照 §10 的 PR-3 清單，各子 PR 做自己契約的那幾項。
+- 既有測試的斷言不改；唯一要改的是 C-24 的能力字串（3c），以及 3-0 的 import 行。其他的既有測試轉紅，先回報架構師。
+- 不連真 GitHub；隔離照 AGENTS.md。測試的假 secret 照 AGENTS.md 的規則。
+
 ## 7. 契約（每條都有測試對應；實作報告逐條對到測試名稱）
 
 ### PR-1
@@ -727,6 +1135,9 @@ PR-1 已 merge（#544，main `e324857`）。PR-2 切成三個 PR，每一個都�
   - 24h 用 `page_size_at` 的 `Date`（Fake 用注入的時鐘）；
   - W-8 成功、P 在窗內且 <2490 → 寫 P；
   - I-8（本機設定檔過期，P 早已換頁）→ 寫新頁，`open_page` 0 次。
+  - W-4 的 `WriteRefusedError`（第 7 版）：R 的寫入丟 `WriteRefusedError` → 寫 P；R 的寫入丟 `RateLimitError` → 往外丟（W-5），P 沒有被寫。
+  - W-9 最後失敗：stderr（`warn`）先有 C-4 那一行，再丟 `SuccessorError`，訊息含 `is full`；`open_page` 次數照 S 表。
+  - 後端不是 `PageBackend` → 直接 `send` 現頁，`page_size_at`、註冊簿都 0 次。
 - **C-17** `ensure_successor(C, P, E_local)`：§1.3 的 S-1～S-9（含 S-6′）每一列至少一個測試，另外：
   - S-2 的四種不相容各一個，都是 `open_page` 0 次；
   - S-7 之後新頁上 0 則訊息；
@@ -735,6 +1146,7 @@ PR-1 已 merge（#544，main `e324857`）。PR-2 切成三個 PR，每一個都�
   - `post_with_retries` 回傳最後一次成功的留言物件；S-8 用它的 `id`／`created_at`（L-3）；
   - S-8 的「N 是旁頁」→ 回傳贏家實體，N 上 0 則；
   - S-8 的列表裡沒有自己那則 → 結果與有時相同；
+  - S-8′（第 7 版）：`FakeRegistryClient` 用預設的 `post_association="NONE"` → 丟 `SuccessorError`（`kind == REJECTED`），待註冊紀錄保留；下一次 `open_page` 0 次、對同一頁再貼一次；
   - 失敗訊息不含編號。
 - **C-18** 競態（兩個寫者以 gate 交錯：兩邊都過了 S-1「沒有下一頁」之後才放行貼留言）：
   - 註冊簿出現兩則 `rollover from P`，重建出一個現頁加一個 `side`，旁頁上 0 則；
@@ -757,13 +1169,14 @@ PR-1 已 merge（#544，main `e324857`）。PR-2 切成三個 PR，每一個都�
 | 模組 | 新增或改動 | 不做什麼 |
 |---|---|---|
 | `backend.py` | `RetiredPage(issue, until, side)`、`Entity.retired`（預設 `()`，frozen 不變）、`Cursor.pages`（頁號→那一頁的 `Cursor`）、頁的常數、`pages_to_read`、`page_base`、`pages_after_read`、`cursor_after_read`（第 5 版）、`page_entity`、`skipped_page_warning`、`ReadResult.warnings`、例外 `ChannelFullError`／`RateLimitError`（PR-1）與 `PageUnavailableError`（2c）、協定 `PageBackend`（`page_size`、`page_size_at`，`runtime_checkable`）與 `PageOpener`（`open_page`）、Fake 的頁大小覆寫表（PR-1）與依頁存留言（PR-2） | 不知道註冊簿 |
+| `fake_backend.py`（新，3-0；D-35） | `FakeComment`、`FakeBackend`（從 `backend` 搬來）；PR-3 的鉤子（3b：`open_page`、`opened`、`set_send_error`、`size_calls`、`page_date`、鎖） | 只給測試與本機開發；正式程式不 import |
 | `github.py` | §4 的分辨；`page_size`；`open_page`；`read`／`check` 逐頁合併、沒讀過的頁從頭讀、退役頁失敗略過 | 不選寫哪一頁 |
 | `state.py` | 存讀 `Cursor.pages`（§2.1 的序列化與壞資料處理）；`PendingPageStore`（待註冊紀錄，PR-3） | 不解讀 `pages`；不決定何時用待註冊紀錄 |
 | `channel_config.py` | 解析 `retired` | 不決定讀哪幾頁 |
 | `registry.py` | `rollover` 的動作與 `from`、`rollover_comment`、協定 `RegistryCounter` 與 `comment_count`（GET issue；Fake 也有）、`post_comment` 與 `post_with_retries` 回傳留言 | 仍只用標準庫 |
 | `registry_rules.py`（新） | `rebuild_channels`、`render_channels`（從 `registry_rebuild` 搬來，加上 `rollover`） | 純函式，不做 I/O；只用標準庫與 `registry` |
 | `registry_rebuild.py` | workflow 殼：`Rebuilder`（含回報去重）、`main`、環境變數 | 不放規則 |
-| `rollover.py`（新） | `PageWriter`、`ensure_successor`、協定 `PendingPages`；`refresh` 與 `PendingPages` 由呼叫方注入 | 不讀游標、不列訊息；不 import `channel_config`、`state` |
+| `rollover.py`（新） | `PageWriter`、`ensure_successor`、協定 `PendingPages` 與 `MemoryPendingPages`、`SuccessorError`；`refresh`、`backends`、`PendingPages`、`warn`、時鐘由呼叫方注入（§6.4 3b） | 不讀游標、不列訊息、不寫 stderr；不 import `channel_config`、`state` |
 | `client.py` | PR-1 不動；2c 的 `ReadBatch.warnings`（只轉交，不寫 stderr）；PR-3 起 `Angareion.send` 經 `PageWriter`；讀的部分不變（跨頁在 backend 裡） | 不印警告 |
 | `log_cache.py` | v3 逐頁 | — |
 | `decision_cli.py` | 寫入改經 app 的 `PageWriter` | — |
@@ -779,7 +1192,8 @@ PR-1 已 merge（#544，main `e324857`）。PR-2 切成三個 PR，每一個都�
 - `registry → transport`
 - ＋`registry_rules → registry`
 - `registry_rebuild → registry`；＋`registry_rebuild → registry_rules`
-- ＋`rollover → {backend, registry, registry_rules}`
+- ＋`fake_backend → {backend, messages}`（3-0；正式程式不得 import 它）
+- ＋`rollover → {backend, messages, registry, registry_rules}`（`messages` 只為 `Message` 型別，第 7 版補）
 - `client → {backend, messages, state}`；＋`client → rollover`
 - `log_cache → {backend, messages, config}`
 - `decision_cli → {decision, log_cache, backend, messages}`
@@ -869,7 +1283,11 @@ PR-1 已 merge（#544，main `e324857`）。PR-2 切成三個 PR，每一個都�
     - **2a**：C-9 寬限比較改成 `<=`，或拿掉新游標的上限（A-12），或上限的比較改成 `>=` → C-9 的單元測試；C-23 的 L-1 與 A-13 兩種 → C-23 的 `state` 案例；`cursor_after_read` 只對現頁 `advance_cursor` → C-10 的純函式單元測試；**C-23 列的五種 `page_base`／`pages_after_read` 改壞 → C-10 的純函式單元測試**（`page_base` 的三種情況、`pages_after_read` 的六種情況逐一對應；「被略過」在單元測試裡就是 `to_read` 有、`entries_by_page` 沒有的頁，所以「不寫入結果」的改壞由「結果的鍵恰好是 `to_read`」那一條轉紅）。2a 沒有情境測試可轉紅，這五種以單元測試為準。
     - **2b**：C-25 拿掉去重 → C-25；C-8 旁頁改成取代現頁 → C-8 的競態列；`channel delete` 拿掉過期檢查 → C-8 的 CLI 測試。
     - **2c**：C-10 讀取只對現頁 `advance_cursor`、每頁各取一個 `floor` → C-10 的情境；C-11 ETag key 不含頁、拿掉從頭讀模式的 `_scan_since`、從頭讀模式不認新游標 → C-11；C-14 不讀退役頁 → C-14；C-22／C-23 的五種改壞再以情境測試各驗一次（列在 C-23）；`skipped_page_warning` 帶回 `Warning: ` 前綴 → C-22 的 `log` 測試（W-1）。
-  - PR-3：C-16 拿掉「先寫舊頁」；C-16 拿掉 W-9 的 `refresh`；C-17 先寫新頁再貼註冊；C-17 拿掉 S-8；C-17 拿掉 S-2 的相容檢查；C-17 拿掉待註冊紀錄（`open_page` 次數要變多）；C-17 S-6′ 也刪紀錄（`open_page` 次數要變多）。
+  - PR-3（第 7 版依子 PR 分；每一項寫「改壞 → 轉紅的測試」）：
+    - **3-0**：在 `backend.py` 留一行 `from angareion.fake_backend import FakeBackend` → `test_d35_backend_does_not_reexport_the_fake`；在任一正式模組 import `fake_backend` → `test_d35_no_production_module_imports_fake_backend`。
+    - **3a**：`post_with_retries` 改回回傳 `None` → C-17 前置的回傳值測試；`_refused_send` 改回丟一般 `BackendError` → `WriteRefusedError` 的型別測試；`PendingPageStore.get` 對壞資料丟例外 → 壞資料各案例；`FakeRegistryClient.before_post` 放到鎖內 → 不影響單執行緒測試，由 3b 的 C-18 轉紅（逾時）。
+    - **3b**：C-16 拿掉「先寫舊頁」（A 整段）→ W-1；W-4 不接 `WriteRefusedError` → W-4 的第 7 版測試；拿掉本機時鐘的跳過 → L-2 的 `size_calls` 斷言；拿掉 W-9 的 `refresh` → W-9 refresh 測試；W-10 在 W-8 失敗後再呼叫一次 `ensure_successor` → W-10 的 `open_page`／註冊簿次數斷言；拿掉最後失敗前的警告 → W-9 最後失敗的測試；C-17 先寫新頁再貼註冊 → S-7 的「新頁上 0 則」；拿掉 S-8（事後重算）→ C-18 的「旁頁上 0 則」；拿掉 S-2 的相容檢查 → S-2 四種；拿掉待註冊紀錄 → 孤兒頁上界（`open_page` 次數變多）；S-6′ 也刪紀錄 → S-6′（`open_page` 次數變多）；拿掉 S-8′ → S-8′ 測試（`open_page` 次數變多，或 `BackendError`「could not settle」）。
+    - **3c**：`cmd_send` 留著 PR-1 的 `_warn_if_page_is_filling` → C-20 的「恰好一行」（變成兩行）；`decision_cli` 有一處仍直接 `backend.send` → C-20 的 `decision ask` 寫到新頁；`CAPABILITIES` 少 `paged-write` → C-24；`channel rollover` 不先 `fetch` → C-19 的 S-3 情境（`open_page` 變成 1 次）。
 - **沒驗到、也不在測試裡驗的**（真 GitHub）：
   1. 達上限時的實際狀態碼與 body（issue 本文只記錄到 403 和我們自己的訊息）；
   2. 上限是否恰好是 `comments ≥ 2500`，有沒有把時間軸事件算進去；
@@ -893,6 +1311,8 @@ PR-1 已 merge（#544，main `e324857`）。PR-2 切成三個 PR，每一個都�
 | Q-6 | 手動換頁與 PR-3 merge 的前提 | §6.2 的盤點（`--capabilities` 含 `paged-read`、`config_pull_interval` 在範圍內、同一身分沒有未升級的安裝）通過才做／直接做 | 先盤點，由 PMO 做 | PMO |
 | Q-7 | 門檻值 | 2000／2400／2490／24h／48h（§1.3）；`config_pull_interval` 上限 6h（§6.2） | 照表 | PM |
 | Q-8 | 換頁前的營運 | m1、w4 先開 `-b`／等 PR-2 之後手動換頁 | 用 PR-1 的 `channel status` 盯；剩不到 50 則還沒有 PR-2 就開 `-b` | PMO |
+| Q-10 | 403「Commenting is disabled」的原樣樣本（第 7 版，§4.1） | 樣本到了照 §4.1 判斷要不要改；改的話另開 d 或併進 3a | 先看 w5 當時的 stderr 是不是 `is full`：是就不改程式 | PM（樣本由 w5 提供） |
+| Q-11 | PR-3 之後手動換頁的做法（第 7 版，§6.4 的並存表） | runbook 第 3、4 節改成 `angareion channel rollover <C>`、gh 步驟留作備案／照舊只用 gh | 改成 `channel rollover`（它會走 S-3 與待註冊紀錄，不和自動換頁搶頁） | PM（runbook 由 PM 改）、PMO（照做） |
 | Q-9 | 新游標（新身分、狀態目錄遺失）讀退役頁的範圍（第 5 版，A-12） | A 只讀最近一次換頁 48 小時內退役的頁（更早的頁上寄給自己的舊訊息讀不到，`log` 查得到）／B 全部退役頁（不漏，但請求數與重送量隨換頁次數長大） | A | PM（行為；結構面架構師建議 A，選 B 時只要刪掉 C-9 的上限與 §2.1 那一條，其餘不變） |
 
 其他風險：
@@ -998,3 +1418,16 @@ PR-1 的契約與 2a／2b／2c 的範圍、契約歸屬、順序都不動；只�
 - **nit-4**：403 訊息抽成 `GitHubIssuesBackend._refusal_message`，`_request` 與三個列表入口共用。
 - **nit-5**：§9 的 PR-1 那一條改成「只剩兩件，PM 於 #545 補」；§10 的 PR-2 改壞清單依 2a／2b／2c 分，五種 `page_base`／`pages_after_read` 改壞在 2a 由 C-10 的純函式單元測試轉紅；§6.3 的共通事項指過去。防呆與手動換頁步驟的歸屬仍是 PM 的事（§6.3 2c 的檔案段），不在這一版。
 - **重讀 §6.3 找到的同類**（前綴與訊息由誰組）：2b 的 `channel delete` 過期拒絕寫明 stderr＝`Error: `＋§1.2 的句子；2c 的 `_page_flags` 查詢失敗照 `_page_count` 現行的 `Warning: channel '<C>': …` 寫法。沒有其他自帶前綴的字串。
+
+## 17. 第 7 版的改動（PR-3 開工，BRIEF-pr3-arch，2026-11-26）
+
+- 新增 §6.4：PR-3 切成 3-0（D-35 的 Fake 搬家）、3a（協定、例外、GitHub 的 `open_page`、註冊簿回傳留言、`PendingPageStore`）、3b（`rollover.py` 與 Fake 的鉤子）、3c（接線）。與 PM 的建議不同處：Fake 的鉤子從 3a 移到 3b，讓 3-0 與 3a 可以並行（D-37）。
+- §1.3：
+  - W-4 多認 `WriteRefusedError`（403／422 被拒、不是 rate limit、計數 <2400）：這種錯誤確定沒寫進去，退役頁被鎖或計數延遲時改寫現頁，不再 exit 2（§6.4 的並存表第 3 列）。`github._refused_send` 的訊息逐字不變。
+  - W-9 的 refresh 寫成「以新實體從 A 重來」：意思與第 6 版「再呼叫一次 `ensure_successor`」相同，但新的實體若已落地就不必再讀註冊簿。
+  - 新增 S-8′：事後重算裡現頁仍是 P（自己那則沒被套用）→ 失敗、紀錄保留。第 6 版沒有這一列，`PageWriter` 會在同一次 `write` 裡重開頁到 3 次。
+- `write` 的警告改由注入的 `warn` 回呼印（`cmd_send` 的 PR-1 預檢刪掉，請求數不變）；W-9 最後失敗前先印 C-4 那一行，PR-1 的既有測試不改。
+- §4.1：拿到 403 原樣樣本後要改的地方（函式、契約、測試），現在不改。
+- §6.4 末：手動換頁與 PR-3 的並存表（Q-11）。
+- §7：C-16、C-17 補第 7 版的案例；§8.1、§8.2 補 `fake_backend` 與 `rollover → messages`；§10 的 PR-3 改壞依子 PR 分；§11 加 Q-10、Q-11。
+- 契約的意義沒有改：C-16～C-21 的既有文字都保留，只加案例。
