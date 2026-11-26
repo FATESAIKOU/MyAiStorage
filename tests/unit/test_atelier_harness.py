@@ -41,10 +41,9 @@ from __future__ import annotations
 
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
-import difflib
-
 from dataclasses import dataclass, field
 from pathlib import Path
+import difflib
 import os
 import re
 import subprocess
@@ -215,42 +214,6 @@ PM_V9_KEY_SENTENCES = tuple(s for s in PM_V8_KEY_SENTENCES if s != PM_V8_T8_SENT
     + PM_V9_NEW_SENTENCES
 #: The v8 sentences v9 still carries: all of `PM_V8_NEW_SENTENCES` but the T-8 one.
 PM_V8_NEW_SENTENCES_KEPT_IN_V9 = tuple(s for s in PM_V8_NEW_SENTENCES if s != PM_V8_T8_SENTENCE)
-#: What worker-team pm `v10` (#555, the #462 A/B experiment) adds to the twin-
-#: compaction item of `do`: the arm is set only by PMO's message and kept in the
-#: handoff file so a restarted PM can recover it; in an A week the PM does not
-#: propose the compaction even above N, and a K-1 reminder there is treated as a
-#: mistake; in a B week it proposes and acts on PMO's K-1 reminder. Whole clauses
-#: (each a substring of its line, verbatim from v10.md), so deleting or rewording
-#: one goes red.
-#: `PM_V10_KEY_SENTENCES` keeps every v9 key sentence.
-PM_V10_NEW_SENTENCES = (
-    "**實驗週（#462 A/B，PMO 用訊息明指本週是 A 週或 B 週）**：",
-    "本條優先於第 1 條與 `judge` 的觸發句：A 週不提出",
-    "本週的臂只由 PMO 的訊息決定",
-    "訊息第一句寫「本週 A」或「本週 B」",
-    "並帶週起訖；臂不自己判斷、不自己改。",
-    "收到臂的訊息就寫進交接檔最新一節（臂＋週起訖）",
-    "開機、重開、接手、孿生重開後，先讀交接檔那一行，向 PMO 回報「我記的是本週 A／B（起訖 …）」請它確認",
-    "週起訖已過、沒有新訊息時，向 PMO 問一次",
-    "問到之前維持上一個臂的行為（不是回 B）",
-    "沒有任何臂的紀錄（全新）才照 v9（＝B）",
-    "我沒有臂的紀錄，暫照 B，請確認",
-    "每開新的一節交接檔，把臂那一行（臂＋週起訖）帶過去",
-    "**A 週**：K-1 超過 N 也**不向 PMO 提出**孿生壓縮，照常工作",
-    "成本部門另記「本來會切」",
-    "探針、T-5 等其他規則不變",
-    "A 週收到 PMO 的「K-1 提醒」時，視為臂搞錯或訊息過期，不提出",
-    "失控標準：送不出 request、被模型拒絕，或 PMO 明說",
-    "等 PMO 回『本週改 B』才提出",
-    "在那之前給 PMO 的回報仍寫「臂＝A」並說明原因（這則回報就是提出訊息，不是開始切換）",
-    "照 v9 提出；收到 PMO 的「K-1 提醒」訊息時，在安全點盡快提出",
-    "目標 K-1 越線後 2 小時內",
-    "提出仍是你自己做的，不要等提醒才注意 K-1",
-    "每次提出時在訊息裡寫「臂＝A／B」與 K-1（供 PMO 記 `prompted_by_pmo`）。",
-    "實驗期間 harness 不升版",
-    "實驗結束由 PMO 用訊息明說「實驗結束，回 v9 行為」，結束前不自行回 v9",
-)
-PM_V10_KEY_SENTENCES = PM_V9_KEY_SENTENCES + PM_V10_NEW_SENTENCES
 #: The sentence v6:162 (`dont`) keeps and v7 must not weaken: teammates never
 #: dispatch workflows. Only the PM's own `ci.yml` exception above is new.
 PM_V6_TEAMMATE_DISPATCH_SENTENCE = (
@@ -652,7 +615,7 @@ PM_V6_REL = "atelier/worker-team/pm/v6.md"
 PM_V7_REL = "atelier/worker-team/pm/v7.md"
 PM_V8_REL = "atelier/worker-team/pm/v8.md"
 PM_V9_REL = "atelier/worker-team/pm/v9.md"
-PM_V10_REL = "atelier/worker-team/pm/v10.md"
+PMAB_V1_REL = "atelier/worker-team-ab/pm/v1.md"
 IMPL_V2_REL = "atelier/worker-team/impl/v2.md"
 REV_V2_REL = "atelier/worker-team/rev/v2.md"
 IMPL_V3_REL = "atelier/worker-team/impl/v3.md"
@@ -876,9 +839,10 @@ def findings_for(path: str, text: str) -> Findings:
     # `pm` v9 splits the T-8 record between PMO and PM; v8 and earlier are not bound.
     pm_version_9_or_later = team == "worker-team" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 9
-    # `pm` v10 (#555) adds the A/B experiment-week item; v9 and earlier are not bound.
-    pm_version_10_or_later = team == "worker-team" and role == "pm" \
-        and version_match is not None and int(version_match.group(1)) >= 10
+    # The A/B experiment series (#555) is its own series, not `worker-team` v10:
+    # `worker-team-ab` pm v1 is v9 plus the experiment-week item, and nothing else.
+    pmab_pm_v1 = team == "worker-team-ab" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) == 1
     pmo_version_4_or_later = team == "pmo" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 4
     # The H4 trigger sentence is version-bound (see its list above): v3 and v4
@@ -939,7 +903,7 @@ def findings_for(path: str, text: str) -> Findings:
             (pm_version_8_only, (PM_V8_T8_SENTENCE,), "v8 的 worker-team pm"),
             (pm_version_8_or_later, PM_V8_NEW_SENTENCES_KEPT_IN_V9, "v8 起的 worker-team pm"),
             (pm_version_9_or_later, PM_V9_NEW_SENTENCES, "v9 起的 worker-team pm"),
-            (pm_version_10_or_later, PM_V10_NEW_SENTENCES, "v10 起的 worker-team pm"),
+            (pmab_pm_v1, PM_V9_KEY_SENTENCES + PMAB_V1_NEW_SENTENCES, "worker-team-ab 的 pm v1（A/B 實驗版）"),
             (pmo_version_4_or_later, PMO_V4_KEY_SENTENCES, "v4 起的 pmo pm"),
             (pmo_version_5, PMO_V5_KEY_SENTENCES, "v5 的 pmo pm"),
             (pmo_version_6_or_later, PMO_V6_KEY_SENTENCES, "v6 起的 pmo pm"),
@@ -1249,7 +1213,6 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     + [(PM_V7_REL, sentence, "關鍵句") for sentence in PM_V7_KEY_SENTENCES]
     + [(PM_V8_REL, sentence, "關鍵句") for sentence in PM_V8_KEY_SENTENCES]
     + [(PM_V9_REL, sentence, "關鍵句") for sentence in PM_V9_KEY_SENTENCES]
-    + [(PM_V10_REL, sentence, "關鍵句") for sentence in PM_V10_KEY_SENTENCES]
     + [(PMO_V8_REL, sentence, "關鍵句") for sentence in PMO_V8_KEY_SENTENCES]
     + [(IMPL_V2_REL, sentence, "關鍵句") for sentence in IMPL_V2_KEY_SENTENCES]
     + [(REV_V2_REL, sentence, "關鍵句") for sentence in REV_V2_KEY_SENTENCES]
@@ -2023,8 +1986,9 @@ def test_pm_v8_has_matching_version_flags():
     assert not findings_for(PM_V8_REL, text).errors
 
 
-def test_pm_v9_has_matching_version_flags():
-    # 不再斷言「v9 是最新」：v10 起最新版換成 v10（#555），v9 的版本旗標照樣要對。
+def test_pm_v9_is_latest_and_has_matching_version_flags():
+    paths = list((HARNESS_ROOT / "worker-team/pm").glob("v*.md"))
+    assert max(paths, key=lambda p: int(p.stem[1:])).name == "v9.md"
     text = (REPO / PM_V9_REL).read_text(encoding="utf-8")
     assert "id: atelier:worker-team-pm@v9\n" in text
     assert "version: v9\n" in text
@@ -2075,61 +2039,6 @@ def test_pm_v9_weakening_the_no_self_close_rule_is_flagged(old, new):
     (PM_V9_REL, "@v9", "@v8"), (PM_V9_REL, "version: v9", "version: v8"),
 ])
 def test_a_wrong_version_flag_on_pm_v9_is_flagged(tmp_path, rel, old, new):
-    text = (REPO / rel).read_text(encoding="utf-8")
-    assert findings_for(rel, text.replace(old, new, 1)).errors
-
-
-def test_pm_v10_is_latest_and_has_matching_version_flags():
-    paths = list((HARNESS_ROOT / "worker-team/pm").glob("v*.md"))
-    assert max(paths, key=lambda p: int(p.stem[1:])).name == "v10.md"
-    text = (REPO / PM_V10_REL).read_text(encoding="utf-8")
-    assert "id: atelier:worker-team-pm@v10\n" in text
-    assert "version: v10\n" in text
-    assert "# PM（v10）\n" in text
-    assert not findings_for(PM_V10_REL, text).errors
-
-
-@pytest.mark.parametrize("sentence", PM_V10_NEW_SENTENCES)
-def test_pm_v10_without_a_new_sentence_is_flagged(sentence):
-    """每個 v10 新句刪掉就紅（負向測試）。"""
-    text = (REPO / PM_V10_REL).read_text(encoding="utf-8")
-    assert sentence in text
-    assert findings_for(PM_V10_REL, text.replace(sentence, "", 1)).errors
-
-
-@pytest.mark.parametrize("sentence", PM_V9_KEY_SENTENCES)
-def test_pm_v10_without_a_v9_sentence_is_flagged(sentence):
-    """v10 必須保留 v9 的每一句；刪掉任一句就紅（含 v9 的第 9 條）。"""
-    text = (REPO / PM_V10_REL).read_text(encoding="utf-8")
-    assert findings_for(PM_V10_REL, text.replace(sentence, "")).errors
-
-
-def test_pm_v10_differs_from_v9_only_in_the_title_and_the_twin_section():
-    """v10 與 v9 的差異只有標題與孿生一節：從 `# PM` 起逐行比對，差異行只能是標題與新增的第 10 條。"""
-    def body(rel):
-        lines = (REPO / rel).read_text(encoding="utf-8").splitlines()
-        return lines[next(i for i, line in enumerate(lines) if line.startswith("# PM")):]
-
-    diff = list(difflib.unified_diff(body(PM_V9_REL), body(PM_V10_REL), lineterm="", n=0))
-    removed = [line[1:] for line in diff if line.startswith("-") and not line.startswith("---")]
-    added = [line[1:] for line in diff if line.startswith("+") and not line.startswith("+++")]
-    assert removed == ["# PM（v9）"]
-    assert added[0] == "# PM（v10）"
-    assert len(added) == 2 and added[1].startswith("10. **實驗週")
-
-
-def test_pm_v9_is_not_bound_by_the_v10_sentences():
-    """v10 的新句只約束 worker-team pm v10 起；v9 沒有它們時仍無錯。"""
-    text = (REPO / PM_V9_REL).read_text(encoding="utf-8")
-    for sentence in PM_V10_NEW_SENTENCES:
-        assert sentence not in text, f"v9 不該有 v10 的句子：「{sentence}」"
-    assert not findings_for(PM_V9_REL, text).errors
-
-
-@pytest.mark.parametrize("rel,old,new", [
-    (PM_V10_REL, "@v10", "@v9"), (PM_V10_REL, "version: v10", "version: v9"),
-])
-def test_a_wrong_version_flag_on_pm_v10_is_flagged(rel, old, new):
     text = (REPO / rel).read_text(encoding="utf-8")
     assert findings_for(rel, text.replace(old, new, 1)).errors
 
@@ -2406,3 +2315,96 @@ def test_a_new_role_not_in_the_table_is_gated_from_its_second_version():
     old, new = "a\nb\n", "a\n"
     assert pair_violations("atelier/mac/pm/v2.md", old, new) == ["b"]
     assert pair_violations("atelier/mac/pm/v1.md", old, new) is None
+
+
+# --- the A/B experiment series (#555, worker-team-ab pm v1) -----------------------
+# `worker-team-ab` is its own series, not a later `worker-team` pm version: the
+# main line stays at v9 so `atelier show atelier:worker-team-pm` and the sessions
+# that open it by default never pick up the experiment item. Only the four PMs in
+# the #462 A/B open this id explicitly. v1 = v9 plus the item below, nothing else.
+#: The experiment-week item (`do`「長對話壓縮（孿生）」第 10 條), copied verbatim
+#: from `worker-team/pm/v10.md` (#555, commit 815b673). Whole clauses, each a
+#: substring of its line, so deleting or rewording one goes red.
+PMAB_V1_NEW_SENTENCES = (
+    "**實驗週（#462 A/B，PMO 用訊息明指本週是 A 週或 B 週）**：",
+    "本條優先於第 1 條與 `judge` 的觸發句：A 週不提出",
+    "本週的臂只由 PMO 的訊息決定",
+    "訊息第一句寫「本週 A」或「本週 B」",
+    "並帶週起訖；臂不自己判斷、不自己改。",
+    "收到臂的訊息就寫進交接檔最新一節（臂＋週起訖）",
+    "開機、重開、接手、孿生重開後，先讀交接檔那一行，向 PMO 回報「我記的是本週 A／B（起訖 …）」請它確認",
+    "週起訖已過、沒有新訊息時，向 PMO 問一次",
+    "問到之前維持上一個臂的行為（不是回 B）",
+    "沒有任何臂的紀錄（全新）才照 v9（＝B）",
+    "我沒有臂的紀錄，暫照 B，請確認",
+    "每開新的一節交接檔，把臂那一行（臂＋週起訖）帶過去",
+    "**A 週**：K-1 超過 N 也**不向 PMO 提出**孿生壓縮，照常工作",
+    "成本部門另記「本來會切」",
+    "探針、T-5 等其他規則不變",
+    "A 週收到 PMO 的「K-1 提醒」時，視為臂搞錯或訊息過期，不提出",
+    "失控標準：送不出 request、被模型拒絕，或 PMO 明說",
+    "等 PMO 回『本週改 B』才提出",
+    "在那之前給 PMO 的回報仍寫「臂＝A」並說明原因（這則回報就是提出訊息，不是開始切換）",
+    "照 v9 提出；收到 PMO 的「K-1 提醒」訊息時，在安全點盡快提出",
+    "目標 K-1 越線後 2 小時內",
+    "提出仍是你自己做的，不要等提醒才注意 K-1",
+    "每次提出時在訊息裡寫「臂＝A／B」與 K-1（供 PMO 記 `prompted_by_pmo`）。",
+    "實驗期間 harness 不升版",
+    "實驗結束由 PMO 用訊息明說「實驗結束，回 v9 行為」，結束前不自行回 v9",
+)
+PMAB_V1_KEY_SENTENCES = PM_V9_KEY_SENTENCES + PMAB_V1_NEW_SENTENCES
+
+
+def test_pmab_v1_has_matching_version_flags():
+    text = (REPO / PMAB_V1_REL).read_text(encoding="utf-8")
+    assert "id: atelier:worker-team-ab-pm@v1\n" in text
+    assert "team: worker-team-ab\n" in text
+    assert "role: pm\n" in text
+    assert "version: v1\n" in text
+    assert "# PM（A/B 實驗版 v1：v9＋第 10 條）\n" in text
+    assert not findings_for(PMAB_V1_REL, text).errors
+
+
+def test_pmab_v1_id_resolves_to_its_own_path():
+    """`atelier:worker-team-ab-pm@v1` 解析成這個系列的 v1 檔（team 可含連字號）。"""
+    ident = parse_id("atelier:worker-team-ab-pm@v1")
+    assert (ident.team, ident.role, ident.version) == ("worker-team-ab", "pm", 1)
+    assert path_for(ident.team, ident.role, ident.version) == PMAB_V1_REL
+    assert (REPO / PMAB_V1_REL).is_file()
+
+
+@pytest.mark.parametrize("sentence", PMAB_V1_NEW_SENTENCES)
+def test_pmab_v1_without_a_new_sentence_is_flagged(sentence):
+    """每個實驗週新句刪掉就紅（負向測試）。"""
+    text = (REPO / PMAB_V1_REL).read_text(encoding="utf-8")
+    assert sentence in text
+    assert findings_for(PMAB_V1_REL, text.replace(sentence, "", 1)).errors
+
+
+@pytest.mark.parametrize("sentence", PM_V9_KEY_SENTENCES)
+def test_pmab_v1_without_a_v9_sentence_is_flagged(sentence):
+    """v1 必須保留 v9 的每一句；刪掉任一句（全部出現處）就紅。"""
+    text = (REPO / PMAB_V1_REL).read_text(encoding="utf-8")
+    assert sentence in text
+    assert findings_for(PMAB_V1_REL, text.replace(sentence, "")).errors
+
+
+def test_pmab_v1_differs_from_v9_only_in_the_title_and_the_twin_section():
+    """A/B 版與 v9 的差異只有標題與孿生一節的第 10 條：從 `# PM` 起逐行比對。"""
+    def body(rel):
+        lines = (REPO / rel).read_text(encoding="utf-8").splitlines()
+        return lines[next(i for i, line in enumerate(lines) if line.startswith("# PM")):]
+
+    diff = list(difflib.unified_diff(body(PM_V9_REL), body(PMAB_V1_REL), lineterm="", n=0))
+    removed = [line[1:] for line in diff if line.startswith("-") and not line.startswith("---")]
+    added = [line[1:] for line in diff if line.startswith("+") and not line.startswith("+++")]
+    assert removed == ["# PM（v9）"]
+    assert added[0] == "# PM（A/B 實驗版 v1：v9＋第 10 條）"
+    assert len(added) == 2 and added[1].startswith("10. **實驗週")
+
+
+def test_the_main_pm_line_is_still_v9():
+    """`worker-team/pm` 的最新版仍是 v9：A/B 版是獨立系列，不影響預設開的 PM。"""
+    versions = sorted(int(p.stem[1:]) for p in (HARNESS_ROOT / "worker-team/pm").glob("v*.md"))
+    assert versions[-1] == 9
+    assert not (HARNESS_ROOT / "worker-team/pm/v10.md").exists()
