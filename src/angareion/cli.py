@@ -14,13 +14,11 @@ from typing import Any, Callable, Sequence
 
 from ainame import is_group
 from angareion.backend import (
-    PAGE_COMMENT_LIMIT,
-    PAGE_WARN_AT,
     BackendError,
     ChannelBackend,
     ChannelNotFoundError,
+    Entity,
     EntityResolver,
-    PageBackend,
     Target,
     parse_backend_time,
 )
@@ -29,7 +27,7 @@ from angareion.channel_config import (
     ChannelConfigError,
     ChannelStore,
 )
-from angareion.channel_cli import cmd_channel_create, cmd_channel_delete, cmd_channel_status
+from angareion.channel_cli import cmd_channel_create, cmd_channel_delete, cmd_channel_rollover, cmd_channel_status
 from angareion.client import POLL_INTERVAL_SECONDS, Angareion
 from angareion.decision_cli import cmd_decision
 from angareion.config import (
@@ -58,8 +56,9 @@ from angareion.registry import (
     RegistryError,
 )
 from angareion.log_cache import LogCache
+from angareion.rollover import PageWriter
 from angareion.log_query import AnchorNotFoundError, select as select_log
-from angareion.state import CursorStore, FileETagCache
+from angareion.state import CursorStore, FileETagCache, PendingPageStore
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -91,7 +90,7 @@ def _warn(message: str) -> None:
 
 # Capability words of this build (design 542 §6.2, C-24): a deployment check runs
 # `angareion --capabilities` and looks for `paged-read`. Only add words, never change one.
-CAPABILITIES = ("paged-read",)
+CAPABILITIES = ("paged-read", "paged-write")
 
 
 class UsageError(Exception):
@@ -216,23 +215,6 @@ def _read_body(args: argparse.Namespace) -> str:
     return args.body
 
 
-def _warn_if_page_is_filling(app: Angareion, channel: str) -> None:
-    """C-4: a current page at or above PAGE_WARN_AT gets one warning line before the send.
-
-    A backend without page sizes, or a size that cannot be read, is silent: the
-    send goes ahead either way.
-    """
-    backend = getattr(app, "backend", None)
-    if not isinstance(backend, PageBackend):
-        return
-    try:
-        count = backend.page_size(app.store.entity_for(channel))
-    except BackendError:
-        return
-    if count >= PAGE_WARN_AT:
-        _warn(f"channel '{channel}' has {count} of {PAGE_COMMENT_LIMIT} messages on its current page")
-
-
 def cmd_send(args: argparse.Namespace, config: Config, app: Angareion, token: str) -> int:
     to_addr: str | None = None
     if args.to is not None:
@@ -267,7 +249,6 @@ def cmd_send(args: argparse.Namespace, config: Config, app: Angareion, token: st
         return EXIT_USAGE
 
     app.store.ensure_fresh()
-    _warn_if_page_is_filling(app, args.channel)
     message_id = app.send(args.channel, message)
     sys.stdout.write(f"{message_id}\n")
     return EXIT_OK
@@ -577,6 +558,10 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Which backend to open the channel in (required when several are configured).")
     p_delete = channel_sub.add_parser("delete", help="Delete a channel; prints the channel name.")
     p_delete.add_argument("name", help="Channel name.")
+    p_rollover = channel_sub.add_parser(
+        "rollover", help="Move the channel to a new page now, whatever its count; prints the channel name (PMO's tool)."
+    )
+    p_rollover.add_argument("name", help="Channel name.")
     p_status = channel_sub.add_parser(
         "status", help="Messages on each channel's current page, and the registry issue's count (read-only)."
     )
@@ -736,7 +721,7 @@ def main(
     if args.command == "channel" and args.channel_action is None:
         sys.stderr.write(
             "Error: channel needs an action; try 'angareion channel create <name>', "
-            "'angareion channel delete <name>' or 'angareion channel status'.\n"
+            "'angareion channel delete <name>', 'angareion channel rollover <name>' or 'angareion channel status'.\n"
         )
         return EXIT_USAGE
     if args.command == "decision" and args.decision_action is None:
@@ -790,9 +775,28 @@ def main(
         sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
         return EXIT_BACKEND
 
-    app = Angareion(active_backend, CursorStore(config.state_dir, config.identity), active_store, config.identity)
     active_sleeper = sleeper or time.sleep
     active_clock = clock or time.monotonic
+
+    def refresh_channel(name: str) -> Entity:
+        """W-9's refresh: fetch the local configuration now, then return the channel as it reads."""
+        fetch = getattr(active_store, "fetch", None)
+        if fetch is not None:
+            fetch()
+        return active_store.entity_for(name)
+
+    writer = PageWriter(
+        active_backend,
+        active_registry,
+        pending=PendingPageStore(config.state_dir, config.identity),
+        backends=lambda: active_store.backends() if hasattr(active_store, "backends") else {},
+        refresh=refresh_channel,
+        warn=_warn,
+        sleeper=active_sleeper,
+    )
+    app = Angareion(
+        active_backend, CursorStore(config.state_dir, config.identity), active_store, config.identity, writer=writer
+    )
 
     try:
         if args.command == "channel":
@@ -802,6 +806,10 @@ def main(
                 )
             if args.channel_action == "delete":
                 return cmd_channel_delete(args, config, app, active_registry, active_store, token, sleeper=active_sleeper)
+            if args.channel_action == "rollover":
+                return cmd_channel_rollover(
+                    args, config, app, active_registry, active_store, token, sleeper=active_sleeper
+                )
             if args.channel_action == "status":
                 return cmd_channel_status(args, app, active_registry, active_store, token)
             parser.print_help(sys.stderr)

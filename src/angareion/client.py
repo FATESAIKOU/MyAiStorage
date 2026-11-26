@@ -15,6 +15,7 @@ from typing import Any, Callable, NamedTuple
 
 from angareion.backend import BackendRef, ChannelBackend, Cursor, Entity, EntityResolver, Target
 from angareion.messages import Message, received_at_key
+from angareion.rollover import PageWriter
 from angareion.state import CursorStore, channel_cursor_key, mention_cursor_key, recipient_cursor_key
 
 POLL_INTERVAL_SECONDS = 15.0
@@ -48,14 +49,28 @@ class ReadBatch(NamedTuple):
 class Angareion:
     """The five interfaces over a backend, with the local cursors for read/wait."""
 
-    def __init__(self, backend: ChannelBackend, cursors: CursorStore, store: EntityResolver, identity: str):
+    def __init__(
+        self,
+        backend: ChannelBackend,
+        cursors: CursorStore,
+        store: EntityResolver,
+        identity: str,
+        writer: PageWriter | None = None,
+    ):
         self.backend = backend
         self.cursors = cursors
         self.store = store
         self.identity = identity
+        self.writer = writer
+
+    def write(self, entity: Entity, message: Message) -> str:
+        """Post one message to the page the channel's state calls for (design 542 §1.3); `send` and `decision` use it."""
+        if self.writer is None:
+            return self.backend.send(entity, message)
+        return self.writer.write(entity, message)
 
     def send(self, channel: str, message: Message) -> str:
-        return self.backend.send(self.store.entity_for(channel), message)
+        return self.write(self.store.entity_for(channel), message)
 
     def create_channel(self, name: str, backend: BackendRef) -> int:
         """Step 1 of `channel create`: open the backend entity; returns its number."""

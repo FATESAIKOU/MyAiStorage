@@ -264,7 +264,7 @@ stdout MUST 只放結果（`channel create`／`channel delete` 印 channel 名�
 
 #### Scenario: 印能力
 - **WHEN** `angareion --capabilities`
-- **THEN** stdout 恰好是 `paged-read` 一行，exit 0；`angareion --version` 仍是一行
+- **THEN** stdout 恰好是 `paged-read paged-write` 一行，exit 0；`angareion --version` 仍是一行
 
 ### Requirement: 給 agent 的說明
 repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：六個訊息指令與待決的 `angareion decision` 的用法（含 `channel create`／`channel delete` 與落地有時間差、`angareion log` 的查詢用途與「不動游標」、`angareion decision` 的六個動作與「一律用指令寫、不自己拼 `datatype: decision`」）、身分、閒著時用 `angareion wait` 阻塞地等、收到高 urgency 訊息的處理。說明 MUST NOT 含任何秘密或私人資訊。
@@ -297,7 +297,7 @@ repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：六
 - **THEN** 同一批留言的到達位置與後端時刻一致；非 angareion 訊息的留言在「列舉」看得到（標示為非訊息），在「讀」（`read` 的輸出）則不會出現
 
 ### Requirement: 六個介面
-Angareion 對外 MUST 只有七個介面家族：建 channel、刪 channel、送訊息、確認有沒有新訊息、讀訊息、查詢訊息（唯讀）、待決（`decision`）；指令分別是 `angareion channel create`、`angareion channel delete`（另有唯讀的 `angareion channel status`，歸在「查詢」一類，見下面的情境）、`angareion send`、`angareion wait`、`angareion read`、`angareion log`、`angareion decision`。`decision` 的六個動作（`ask`、`update`、`withdraw`、`submit`、`list`、`snapshot`）的語意見 `angareion-pending-decision`；它的寫入也只是 append 一則訊息，MUST NOT 編輯或刪除任何訊息。MUST NOT 有 ack、已讀回條或限流。channel 名 MUST 是英文名（非空的 ASCII 字母、數字、`-`、`_`）；介面（參數、stdout、stderr、錯誤訊息）MUST NOT 出現 GitHub repo／issue 的概念。第一期 channel 對所有隊員公開，沒有成員設定：`channel create` MUST NOT 收 `--member`。`send` 的 `--channel` 必填、`--to` 選填（不給＝發到整個 channel）。`channel create` 與 `channel delete` 的 stdout MUST 只印 channel 名。`channel create` MUST 在送出註冊留言前先確認後端實體（存在而且標題等於 channel 名；不符 MUST exit 2、什麼都沒註冊——複審 H2），留言後 MUST 輪詢 fetch 到對應出現為止（上限 2 分鐘；逾時 MUST 在 stderr 印提示、仍 exit 0）；`channel delete` MUST NOT 等落地（送出註銷留言成功即 exit 0）。（註冊簿與重建見 `angareion/channel-config` 與 design §9／§10。）
+Angareion 對外 MUST 只有七個介面家族：建 channel、刪 channel、送訊息、確認有沒有新訊息、讀訊息、查詢訊息（唯讀）、待決（`decision`）；指令分別是 `angareion channel create`、`angareion channel delete`（另有唯讀的 `angareion channel status`，歸在「查詢」一類，見下面的情境；另有 PMO 用的 `angareion channel rollover NAME`，強制換頁，見下面的情境）、`angareion send`、`angareion wait`、`angareion read`、`angareion log`、`angareion decision`。`decision` 的六個動作（`ask`、`update`、`withdraw`、`submit`、`list`、`snapshot`）的語意見 `angareion-pending-decision`；它的寫入也只是 append 一則訊息，MUST NOT 編輯或刪除任何訊息。MUST NOT 有 ack、已讀回條或限流。channel 名 MUST 是英文名（非空的 ASCII 字母、數字、`-`、`_`）；介面（參數、stdout、stderr、錯誤訊息）MUST NOT 出現 GitHub repo／issue 的概念。第一期 channel 對所有隊員公開，沒有成員設定：`channel create` MUST NOT 收 `--member`。`send` 的 `--channel` 必填、`--to` 選填（不給＝發到整個 channel）。`channel create`、`channel delete` 與 `channel rollover` 的 stdout MUST 只印 channel 名。`send` 與 `decision` 的寫入在現頁寫滿或快滿時 MUST 自動換頁（寫的人不用做任何事）。`channel create` MUST 在送出註冊留言前先確認後端實體（存在而且標題等於 channel 名；不符 MUST exit 2、什麼都沒註冊——複審 H2），留言後 MUST 輪詢 fetch 到對應出現為止（上限 2 分鐘；逾時 MUST 在 stderr 印提示、仍 exit 0）；`channel delete` MUST NOT 等落地（送出註銷留言成功即 exit 0）。（註冊簿與重建見 `angareion/channel-config` 與 design §9／§10。）
 
 `log` 是唯讀的查詢介面（語意見「唯讀查詢 log」）：它 MUST NOT 讀取、改動或推進游標，MUST NOT 參與「同一個身分只留一個讀者」規則；它的旗標與錯誤訊息同樣 MUST NOT 出現 GitHub repo／issue 的概念（只用 channel 名、AI 名、訊息 id（ULID）、RFC 3339 時刻與字面字串表達）。
 
@@ -386,6 +386,14 @@ Angareion 對外 MUST 只有七個介面家族：建 channel、刪 channel、送
 - **THEN** exit 2，stderr 說 X 沒有被刪（現頁已經換了、本機設定還沒跟上，稍後再試）；不關任何實體、不送註銷，stdout 空
 - **WHEN** 註冊簿讀不到、重算裡沒有 X，或重算的現頁與本機相同
 - **THEN** 照現行的刪除流程
+
+#### Scenario: channel rollover（#542）
+- **WHEN** `angareion channel rollover X`（X 在設定檔裡有對應）
+- **THEN** 先強制 fetch 設定、不看則數、強制開下一頁並在註冊簿登記，等設定落地（上限 2 分鐘，逾時只在 stderr 提示、仍 exit 0）；stdout 只印 `X`，exit 0
+- **WHEN** 名字沒註冊
+- **THEN** exit 1
+- **WHEN** 設定與註冊簿不相容、註冊失敗，或已有待落地的下一頁以外的失敗
+- **THEN** exit 2，stderr 說沒有換頁，不含 issue 編號
 
 ### Requirement: 唯讀查詢 log
 `angareion log` MUST 是一次查到全部相關信件的唯讀查詢，MUST NOT 讀取、改動或推進游標（任何情況、任何旗標組合），MUST NOT 有「印完再 commit」的步驟。
