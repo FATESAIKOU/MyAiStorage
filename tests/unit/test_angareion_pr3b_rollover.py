@@ -199,6 +199,39 @@ def test_c16_w1_a_retired_page_with_2490_messages_is_skipped_for_the_current_pag
     assert pages(rig) == [P]
 
 
+def test_c16_w1_a_retired_page_exactly_24h_after_until_is_outside_the_fill_window():
+    rig = Rig(date="2026-10-11T12:00:00Z")  # Date - until == PAGE_FILL_WINDOW: not inside the window
+    rig.backend.set_page_size(R, 100)
+    rig.backend.set_page_size(P, 100)
+
+    rig.writer.write(local(P, retired_page()), message())
+    assert pages(rig) == [P]
+    assert rig.backend.size_calls == [R, P]
+
+
+def test_c16_w1_only_the_last_retired_page_is_read_when_there_are_two():
+    rig = Rig()
+    rig.backend.add_entity(CHANNEL, number=8)
+    rig.backend.set_page_size(8, 100)  # the older retired page: never looked at
+    rig.backend.set_page_size(R, 100)
+    rig.backend.set_page_size(P, 100)
+
+    rig.writer.write(local(P, retired_page(8), retired_page(R)), message())
+    assert pages(rig) == [R]
+    assert rig.backend.size_calls == [R]
+
+
+def test_c16_w2_an_unreadable_backend_date_is_outside_the_window_and_raises_nothing():
+    rig = Rig(date="garbage")
+    rig.backend.set_page_size(R, 100)
+    rig.backend.set_page_size(P, 100)
+
+    msg = message()
+    assert rig.writer.write(local(P, retired_page()), msg) == msg.id
+    assert pages(rig) == [P]
+    assert rig.warnings == []
+
+
 def test_c16_w2_a_retired_page_outside_the_fill_window_is_skipped():
     rig = Rig(date=OUT_WINDOW)
     rig.backend.set_page_size(R, 100)
@@ -276,6 +309,15 @@ def test_c16_w6_a_page_below_the_warn_level_gets_no_warning():
     assert rig.warnings == []
 
 
+def test_c16_w6_a_page_at_exactly_the_warn_level_gets_the_filling_warning():
+    rig = Rig()
+    rig.backend.set_page_size(P, 2000)
+
+    rig.writer.write(local(P), message())
+    assert pages(rig) == [P]
+    assert rig.warnings == [filling_warning(CHANNEL, 2000)]
+
+
 def test_c16_w7_a_failed_size_read_of_the_current_page_writes_it_anyway():
     rig = Rig()
     rig.backend.next_error = BackendError("temporarily unavailable")  # consumed by the only size read: P's
@@ -297,6 +339,16 @@ def test_c16_w8_a_failed_preparation_writes_the_current_page_with_a_warning():
         prepare_failed_warning(CHANNEL, REASONS[OPEN_FAILED]),
         filling_warning(CHANNEL, 2450),
     ]
+
+
+def test_c16_w8_a_page_at_exactly_the_rollover_level_starts_the_successor():
+    rig = Rig(date=OUT_WINDOW)  # the old page is outside its window: the write goes to the new page
+    rig.backend.set_page_size(P, 2400)
+
+    msg = message()
+    assert rig.writer.write(local(P), msg) == msg.id
+    assert rig.backend.opened == [NEW]
+    assert pages(rig) == [NEW]
 
 
 def test_c16_w8_success_then_the_retired_page_inside_the_window_takes_the_write():
@@ -383,6 +435,17 @@ def test_c16_w10_after_a_failed_preparation_does_not_prepare_again():
     assert_bare_message(info.value)
 
 
+def test_c16_w11_a_refused_current_page_is_raised_without_preparing_or_falling_back():
+    rig = Rig()
+    rig.backend.set_send_error(P, WriteRefusedError("refused", status=403))
+
+    with pytest.raises(WriteRefusedError):
+        rig.writer.write(local(P), message())
+    assert rig.backend.opened == []
+    assert rig.registry.posted == []
+    assert pages(rig) == []
+
+
 def test_c16_w11_another_error_writing_the_current_page_is_raised_without_preparing():
     rig = Rig()
     rig.backend.set_send_error(P, RateLimitError("slow down", kind="primary"))
@@ -403,6 +466,37 @@ def test_c16_more_than_three_restarts_is_a_backend_error():
     assert not isinstance(info.value, SuccessorError)
     assert MAX_RESTARTS == 3
     assert rig.backend.opened == [11, 12, 13, 14]  # three restarts succeeded; the fourth gave up
+    assert pages(rig) == []
+    assert_bare_message(info.value)
+    assert "#" not in str(info.value)  # no issue number in any form
+
+
+def test_c16_w8_successful_preparations_count_as_restarts_and_the_fourth_gives_up():
+    rig = Rig()
+    for page in (P, NEW, 12, 13, 14):
+        rig.backend.set_page_size(page, 2495)  # in the rollover band; at 2490 the retired pages take no writes
+
+    with pytest.raises(BackendError, match="could not settle which page to write") as info:
+        rig.writer.write(local(P), message())
+    assert not isinstance(info.value, SuccessorError)
+    assert rig.backend.opened == [11, 12, 13, 14]
+    assert pages(rig) == []
+
+
+def test_c16_a_refresh_and_the_successors_after_it_all_count_as_restarts():
+    rig = Rig()  # the registry has P as current and no retired page
+    rig.backend.set_page_size(P, 2500)
+    rig.backend.set_page_size(R, 2495)  # the stale local config still lists R: it must take no writes
+    rig.backend.set_page_size(NEW, 2495)
+    rig.backend.set_page_size(12, 2495)
+    stale = local(P, retired_page(R))  # R is not in the registry's mapping: a mismatch, so the write refreshes
+
+    with pytest.raises(BackendError, match="could not settle which page to write") as info:
+        rig.writer.write(stale, message())
+    assert not isinstance(info.value, SuccessorError)
+    # refresh (restart 1), NEW (2), 12 (3), 13 (4: gives up)
+    assert rig.refreshes == [CHANNEL]
+    assert rig.backend.opened == [11, 12, 13]
     assert pages(rig) == []
 
 
@@ -429,6 +523,16 @@ def test_c16_l2_past_the_grace_the_retired_page_is_not_read_at_all():
 
 def test_c16_l2_inside_the_grace_the_retired_page_is_read_as_usual():
     rig = Rig(now=backend_time(47))
+    rig.backend.set_page_size(R, 100)
+    rig.backend.set_page_size(P, 100)
+
+    rig.writer.write(local(P, retired_page()), message())
+    assert rig.backend.size_calls == [R]
+    assert pages(rig) == [R]
+
+
+def test_c16_l2_exactly_48h_after_until_the_retired_page_is_still_read():
+    rig = Rig(now=backend_time(48))  # the grace is "now <= until + 48h": the last instant still reads it
     rig.backend.set_page_size(R, 100)
     rig.backend.set_page_size(P, 100)
 
@@ -829,6 +933,21 @@ def test_c17_s8_when_another_rollover_won_the_channel_it_returns_the_winner():
     assert rig.pending.get(CHANNEL) is None
 
 
+def test_c17_s8_a_registration_reply_without_an_id_is_read_back_from_the_listing(monkeypatch):
+    rig = Rig()
+    post = rig.registry.post_comment
+
+    def reply_without_id(body):
+        post(body)
+        return {"body": body}  # the reply has no id: the listing is the only proof of the registration
+
+    monkeypatch.setattr(rig.registry, "post_comment", reply_without_id)
+    result = rig.ensure()
+    assert result.issue == NEW
+    assert [a.issue for a in rollover_actions(rig.registry)] == [NEW]
+    assert rig.pending.get(CHANNEL) is None
+
+
 def test_c17_s9_an_unreadable_listing_after_the_post_uses_the_own_comment():
     rig = Rig()
 
@@ -985,7 +1104,7 @@ def test_c18_guard_the_fake_registry_gives_comments_posted_at_once_different_ids
         # until this one has appended, so the join times out; without it the second thread takes the same id.
         registry.before_append = None
         second.start()
-        second.join(timeout=2)
+        second.join(timeout=0.5)
 
     registry.before_append = gap
     registry.add_comment("first")
