@@ -65,7 +65,7 @@ TBD - created by archiving change angareion-v0. Update Purpose after archive.
 - **THEN** 狀態檔不會被寫壞（整檔原子替換）；最壞情況是少記一筆、下一次用完整查詢，不會出現壞檔被當成 304 或漏訊息
 
 ### Requirement: 目標與游標
-`wait` 與 `read` 的目標是某個 channel（`--channel`）或「寄給我的」（不給 `--channel`：所有 channel 裡 `to` 是自己 agent 名、或沒有 `to` 的訊息）。判斷訊息新不新 MUST 只看後端（到達位置與後端記錄的時刻），MUST NOT 使用寄件者填的 `at` 或 `id`。`read` 不給 `--since` 時 MUST 從本機游標之後讀起並把游標往前推；給了 `--since`（後端時刻）就回傳不早於它的訊息（含邊界），MUST NOT 改動本機游標。`read` 的每則輸出 MUST 帶後端記錄的時刻 `received_at`。游標刪掉（或沒有游標的新身分）時，`--channel` 與 `--mentioned` MUST 從頭讀起；不給 `--channel` 的「寄給我的」第一次讀（游標檔裡沒有任何一筆「寄給我的」游標，即沒有任何 `to:` 游標）時，`to` 是自己（或 `mentions` 有自己）的訊息 MUST 從頭讀起，沒有 `to` 也沒點名自己的廣播 MUST 只讀後端時刻（回應的 `Date`）不早於第一次讀那一刻的（含邊界；那是後端時刻，不是本機時鐘）；要看舊廣播就自己給 `--since`；第一次讀之後游標照常前進，被濾掉的舊廣播 MUST NOT 在第二次讀時冒出來；後端時刻拿不到時 MUST 退回從頭讀起。
+`wait` 與 `read` 的目標是某個 channel（`--channel`）或「寄給我的」（不給 `--channel`：所有 channel 裡 `to` 是自己 agent 名、或沒有 `to` 的訊息）。判斷訊息新不新 MUST 只看後端（到達位置與後端記錄的時刻），MUST NOT 使用寄件者填的 `at` 或 `id`。`read` 不給 `--since` 時 MUST 從本機游標之後讀起並把游標往前推；給了 `--since`（後端時刻）就回傳不早於它的訊息（含邊界），MUST NOT 改動本機游標。`read` 的每則輸出 MUST 帶後端記錄的時刻 `received_at`。游標刪掉（或沒有游標的新身分）時，`--channel` 與 `--mentioned` MUST 從頭讀起（換過頁的頻道，「頭」的範圍見「換過頁的頻道」：現頁與最近一次換頁 48 小時內退役的頁）；不給 `--channel` 的「寄給我的」第一次讀（游標檔裡沒有任何一筆「寄給我的」游標，即沒有任何 `to:` 游標）時，`to` 是自己（或 `mentions` 有自己）的訊息 MUST 從頭讀起（換過頁的頻道，「頭」的範圍見「換過頁的頻道」：現頁與最近一次換頁 48 小時內退役的頁），沒有 `to` 也沒點名自己的廣播 MUST 只讀後端時刻（回應的 `Date`）不早於第一次讀那一刻的（含邊界；那是後端時刻，不是本機時鐘）；要看舊廣播就自己給 `--since`；第一次讀之後游標照常前進，被濾掉的舊廣播 MUST NOT 在第二次讀時冒出來；後端時刻拿不到時 MUST 退回從頭讀起。
 
 `read`／`wait` 給了 `--channel` 時 MUST 在 stderr 印一行警告，說明這會讀到 channel 裡所有訊息（包含寄給別人的訊息）；不給 `--channel`（「寄給我的」，含廣播）時 MUST NOT 印。警告 MUST NOT 改變 exit code 或 stdout。
 
@@ -122,6 +122,46 @@ TBD - created by archiving change angareion-v0. Update Purpose after archive.
 #### Scenario: 刪掉游標後 wait 仍完整查詢
 - **WHEN** 刪掉游標檔之後 B 執行 `angareion wait`
 - **THEN** 不採用先前的 ETag 記錄（游標不同），用完整查詢；有新訊息時 exit 0
+
+### Requirement: 換過頁的頻道（#542）
+一個 channel 名可以對應一串頁（後端實體）：現頁，以及換頁前的退役頁（含競態多開的旁頁；格式與換頁的動作見 `angareion/channel-config`）。`read`、`wait`、`log` 與 `decision list` MUST 把一個頻道的頁當成同一個頻道讀：游標的 key 不因換頁改變，介面（參數、stdout、stderr、錯誤訊息）MUST NOT 出現頁、repo 或 issue 的概念。
+
+- **讀哪些頁**：`read`／`wait` MUST 讀現頁，以及「游標的後端時刻早於該頁的退役時刻＋48 小時」的退役頁（退役時刻＝讓它退役的那則註冊簿留言的後端時刻）；`--since` 以給的時刻判斷。新游標（新身分、游標刪掉：沒有後端時刻）MUST 只讀現頁，與「退役時刻＋48 小時」晚於最近一次換頁時刻的退役頁；更早退役的頁 MUST NOT 讀（要看用 `log` 或 `--since`）。`log` 與 `decision list` MUST 讀所有的頁，不看 48 小時。
+- **每一頁各自接續**：每一頁 MUST 以游標記下的那一頁的位置為起點，照單頁的規則判斷新不新；游標沒讀過的頁 MUST 從頭讀（MUST NOT 因為游標已越過那些留言的位置而略過）。各頁的結果依後端到達順序合併；同一則留言 MUST NOT 送兩次。`--since` 照舊 MUST NOT 改動游標。
+- **退役頁讀不到**：讀退役頁時後端回 404、410 或不是 rate limit 的 403，MUST 略過那一頁、其他頁照讀，exit 與 stdout 不因此改變；`read`、`log`、`decision list` MUST 在 stderr 印恰好一行 `Warning: an older page of channel '<C>' could not be read (HTTP <碼>); skipped`（不含編號），`wait` MUST NOT 印；那一頁在游標裡的位置 MUST NOT 前進：恢復之後從原處接續，MUST NOT 重送、MUST NOT 漏。現頁的任何錯誤，以及 rate limit、網路錯誤、5xx，照舊 exit 2。
+- **相容**：游標檔多存每一頁的位置，舊版讀得到原有的三欄；舊版寫回游標檔時會丟掉每一頁的位置，之後新版以頻道的位置當每一頁的起點（因此同一個身分 MUST NOT 混用新舊兩版，見手動換頁的盤點）。channels.json 沒有退役頁的頻道，讀取的請求與結果和換頁功能之前相同。
+
+#### Scenario: 換頁後接續
+- **WHEN** 讀者讀到舊頁某一則之後頻道換頁；之後舊頁又寫 2 則、新頁寫 3 則，讀者 `read`
+- **THEN** 恰好得到這 5 則，依到達順序；再 `read` 一次得到 0 則；換頁前讀過的不再出現
+
+#### Scenario: 寬限期之後不再讀舊頁
+- **WHEN** 讀者游標的後端時刻已超過舊頁的退役時刻＋48 小時
+- **THEN** `read`／`wait` 不再對舊頁發請求；`log --channel` 仍列出舊頁的訊息
+
+#### Scenario: 晚一步出現的頁從頭讀
+- **WHEN** 讀者游標已越過某些留言的位置，之後設定檔才多了一頁（旁頁、或設定檔晚到），那一頁上有位置較小、時刻較早的訊息
+- **THEN** 下一次 `read` 讀到那一頁上的全部訊息；再讀一次 0 則
+- **WHEN** 游標已讀過的頁上沒有新留言
+- **THEN** 它不被從頭讀，`read` 兩次都是 0 則
+
+#### Scenario: 新游標只讀最近一次換頁的頁
+- **WHEN** 頻道有三張退役頁，退役時刻分別是最近一次換頁的 10 天前、47 小時前與當下；刪掉游標後 `read --channel` 該頻道
+- **THEN** 讀現頁與後兩張退役頁，不讀 10 天前那一張
+
+#### Scenario: 退役頁讀不到
+- **WHEN** 一張讀過的退役頁回 404，現頁有一則新訊息，`read`
+- **THEN** exit 0，得到現頁那一則，stderr 恰好一行略過的警告（不含編號、只有一個 `Warning: `）
+- **WHEN** 那一頁恢復後再 `read`
+- **THEN** 恰好得到略過期間它上面新到的訊息，之前已送過的 0 則重送
+- **WHEN** 現頁回同樣的錯誤
+- **THEN** exit 2
+
+#### Scenario: wait 看所有要讀的頁
+- **WHEN** 退役頁沒有新訊息，只有現頁有一則給我的新訊息
+- **THEN** `angareion wait --timeout 0` exit 0
+- **WHEN** 退役頁讀不到（404），其他頁都沒有新訊息
+- **THEN** `wait` 照常等待或逾時（exit 3），stderr 沒有略過的警告
 
 ### Requirement: 訊息格式
 一則訊息 MUST 有 `from`、`to`、`channel`、`urgency`（0～9 的整數，預設 5）、`content`、`attachments`，加上寄件者產生的 `id`（ULID）與 `at`（含時區）；`id` 與 `at` 只用來辨識與顯示，MUST NOT 用來判斷新舊。`from`、`to` 與自己的身分 MUST 是 agent 名：驗證用的正規式是 `^[A-Za-z0-9][A-Za-z0-9._-]*-(pm|arch|impl|test)(-[A-Za-z0-9_.]+)?$`（repo 段含 `-`；複審 M1）；**驗證與解析是兩步**——regex 只驗整體形狀，另做由右而左的解析（先取可省的 `-<id>`、再取最右邊的角色字，左邊剩下的都是 repo 名；例 `MyLinuxPool-impl-2`、`LLMGateway-pm`、`my-repo-impl-2` → repo `my-repo`、角色 `impl`、id `2`；同角色只有一個時省略 id；角色字只有小寫的 `pm|arch|impl|test`）；`to` 選填（不給＝發到整個 channel）。`--json` 輸出的 `from`／`to` 也是這個字串。不做嚴格的身分認證（任何人可以用任何名字送）。送出時內文 MUST 來自 `--body <文字>` 或 `--body -`（stdin），沒給 `--body` MUST exit 1。
@@ -184,7 +224,7 @@ token 檔的位置 MUST 能由 `ANGAREION_TOKEN_FILE` 指定（優先於其他�
 - **THEN** 正常讀取
 
 ### Requirement: 輸出與結束碼
-stdout MUST 只放結果（`channel create`／`channel delete` 印 channel 名，`channel status` 印每個頻道一列（名稱、現頁則數、上限、等級 `ok`／`warn`／`rollover`／`full`／`unknown`、頁數、旗標）與最後一列 `registry`，`--json` 是物件的陣列（鍵 `name`、`count`、`limit`、`level`、`pages`、`flags`），不含 issue 編號，`send` 印訊息 id，`read` 印訊息或 `--json`，`log` 印訊息或 `--json`（空結果也是成功）），說明與錯誤放 stderr。結束碼：0 成功；1 用法或輸入錯誤；2 後端、網路或設定錯誤；3 `wait` 逾時沒有新訊息。
+stdout MUST 只放結果（`channel create`／`channel delete` 印 channel 名，`channel status` 印每個頻道一列（名稱、現頁則數、上限、等級 `ok`／`warn`／`rollover`／`full`／`unknown`、頁數（現頁加退役頁）、旗標（`side`：7 天內退役的旁頁上有留言；`late`：最後一張非旁頁的退役頁，在退役後 24 小時之後還有留言；`unknown`：旗標查不到，exit 2；沒有旗標是 `-`））與最後一列 `registry`，`--json` 是物件的陣列（鍵 `name`、`count`、`limit`、`level`、`pages`、`flags`），不含 issue 編號，`send` 印訊息 id，`read` 印訊息或 `--json`，`log` 印訊息或 `--json`（空結果也是成功），`--capabilities` 印能力字樣一行），說明與錯誤放 stderr。結束碼：0 成功；1 用法或輸入錯誤；2 後端、網路或設定錯誤；3 `wait` 逾時沒有新訊息。
 
 #### Scenario: 設定缺少
 - **WHEN** 沒有設定檔（或缺 channel／backend 設定檔）就執行 `angareion send`
@@ -218,6 +258,13 @@ stdout MUST 只放結果（`channel create`／`channel delete` 印 channel 名�
 #### Scenario: 送註冊失敗
 - **WHEN** `channel create X` 的第 2 步（送註冊）失敗後重試 2 次（共 3 次嘗試）都失敗
 - **THEN** exit 2，stderr 說明 channel 沒有建立成功；後端可能留著沒有對應的實體，但介面不提它
+
+### Requirement: 能力標記（#542）
+`angareion --capabilities` MUST 在 stdout 印恰好一行、以空白分隔的能力字樣，exit 0；能力字樣只增不改。這一版是 `paged-read`（會跨頁讀，見「換過頁的頻道」）。`angareion --version` 的輸出 MUST NOT 因此改變。不認得這個旗標的舊版是用法錯誤（exit 不是 0），所以判斷「已升級」MUST 只認「exit 0 而且輸出含該字樣」。
+
+#### Scenario: 印能力
+- **WHEN** `angareion --capabilities`
+- **THEN** stdout 恰好是 `paged-read` 一行，exit 0；`angareion --version` 仍是一行
 
 ### Requirement: 給 agent 的說明
 repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：六個訊息指令與待決的 `angareion decision` 的用法（含 `channel create`／`channel delete` 與落地有時間差、`angareion log` 的查詢用途與「不動游標」、`angareion decision` 的六個動作與「一律用指令寫、不自己拼 `datatype: decision`」）、身分、閒著時用 `angareion wait` 阻塞地等、收到高 urgency 訊息的處理。說明 MUST NOT 含任何秘密或私人資訊。
@@ -320,7 +367,7 @@ Angareion 對外 MUST 只有七個介面家族：建 channel、刪 channel、送
 
 #### Scenario: log 是第六個介面
 - **WHEN** `angareion --help` 印出的子指令清單、`angareion channel --help` 印出的子子指令清單，與 `angareion log --help` 印出的旗標清單（低-14：三份清單都由 WHEN 的輸出觀察）
-- **THEN** 頂層子指令恰好是 `channel`、`send`、`wait`、`read`、`log`、`decision`（由 `angareion --help` 斷言）；`decision` 下的 action 恰好是 `ask`、`update`、`withdraw`、`submit`、`list`、`snapshot`（由 `angareion decision --help` 斷言）；`channel` 下的子子指令恰好是 `create`、`delete`（由 `angareion channel --help` 斷言）；`log` 的旗標是查詢類（`--channel`、`--from`、`--to`、`--mentioned`、`--since`、`--until`、`--grep`、`--around`、`--thread`、`--before`、`--after`、`--limit`、`--json`），沒有 `--body` 等寫入旗標（log 不寫信；`--to` 在 log 是收件人的「過濾」條件，不是 `send` 的寫入）
+- **THEN** 頂層子指令恰好是 `channel`、`send`、`wait`、`read`、`log`、`decision`（由 `angareion --help` 斷言）；`decision` 下的 action 恰好是 `ask`、`update`、`withdraw`、`submit`、`list`、`snapshot`（由 `angareion decision --help` 斷言）；`channel` 下的子子指令恰好是 `create`、`delete`、`status`（由 `angareion channel --help` 斷言）；`log` 的旗標是查詢類（`--channel`、`--from`、`--to`、`--mentioned`、`--since`、`--until`、`--grep`、`--around`、`--thread`、`--before`、`--after`、`--limit`、`--json`），沒有 `--body` 等寫入旗標（log 不寫信；`--to` 在 log 是收件人的「過濾」條件，不是 `send` 的寫入）
 
 #### Scenario: log 的介面不出現後端概念
 - **WHEN** 檢查 `angareion log` 的參數清單、stdout、stderr 與說明（`--help`）
@@ -333,6 +380,12 @@ Angareion 對外 MUST 只有七個介面家族：建 channel、刪 channel、送
 - **THEN** 那一列等級 `unknown`，stderr 說明，其他列照印，exit 2
 - **WHEN** 給了沒註冊的頻道名
 - **THEN** exit 1
+
+#### Scenario: 刪 channel 時本機設定落後於換頁
+- **WHEN** `channel delete X`，本機設定檔的 X 在強制 fetch 之後仍指向某一頁，而由註冊簿重算的結果裡那一頁已經退役
+- **THEN** exit 2，stderr 說 X 沒有被刪（現頁已經換了、本機設定還沒跟上，稍後再試）；不關任何實體、不送註銷，stdout 空
+- **WHEN** 註冊簿讀不到、重算裡沒有 X，或重算的現頁與本機相同
+- **THEN** 照現行的刪除流程
 
 ### Requirement: 唯讀查詢 log
 `angareion log` MUST 是一次查到全部相關信件的唯讀查詢，MUST NOT 讀取、改動或推進游標（任何情況、任何旗標組合），MUST NOT 有「印完再 commit」的步驟。
@@ -436,12 +489,12 @@ Angareion 對外 MUST 只有七個介面家族：建 channel、刪 channel、送
 ### Requirement: log 的本機快取
 `log` 的查詢 MUST 以本機快取服務：對查詢涉及的每個 channel 先做**增量同步**，同步成功（304 的條件式請求也算成功）之後才在本機過濾回答。
 
-- 同步用後端的「列舉」動作（見「後端可以替換」），帶 `since = 上一次同步到的後端時刻 − 60 秒`（與游標同源的 margin；快取為空時不帶 `since`）；合併 MUST 是冪等的 upsert：到達位置比已記錄的新、**或從未出現過**（接住亂序晚到的較小位置）就進鏡射，同位置內容不同（後端被編輯）就覆蓋；已記錄的最大位置與時刻 MUST NOT 後退。
+- 同步對頻道的**每一頁**（現頁與所有退役頁）各用後端的「列舉」動作（見「後端可以替換」），帶 `since = 該頁上一次同步到的後端時刻 − 60 秒`（與游標同源的 margin；該頁沒同步過時不帶 `since`）；ETag 也是每頁一份；合併 MUST 是冪等的 upsert：到達位置比已記錄的新、**或從未出現過**（接住亂序晚到的較小位置）就進鏡射，同位置內容不同（後端被編輯）就覆蓋；已記錄的最大位置與時刻 MUST NOT 後退。
 - 回應含新訊息時 MUST NOT 記錄 ETag（不得成為下次「沒有新訊息」的驗證器）；回應完整掃過且乾淨、單頁未滿才記錄（沿用 `wait` 的條件式查詢規則）；下次同步同一視窗 MUST 送 `If-None-Match`，304 MUST 視為「沒有增量」且不計後端額度。
-- 任一涉入 channel 的同步失敗（HTTP 錯、逾時）MUST 以 exit 2 結束且 MUST NOT 輸出任何查詢結果——不用「部分同步＋舊鏡射」當完整答案。
+- 任一涉入 channel 的同步失敗（HTTP 錯、逾時）MUST 以 exit 2 結束且 MUST NOT 輸出任何查詢結果——不用「部分同步＋舊鏡射」當完整答案。例外：退役頁回 404、410 或不是 rate limit 的 403 時，那一頁略過並在 stderr 警告一行（見『換過頁的頻道』），那一頁的同步狀態保留，其他頁照常，查詢照常回答。
 - 快取 MUST 每身分一份（檔名跟身分的 slug，同游標檔的分位），放在 state 目錄；channel 的檔名 MUST 以 channel 名的**可逆轉義**成檔（屬 `[a-z0-9_-]` 的字元原樣，**大寫 ASCII 字母與其餘字元一律以 `%XX` 編碼其 UTF-8 位元組**——大寫也轉義是低-16 定案：大小寫不敏感的檔案系統上，只差大小寫的兩個 channel 名 MUST NOT 落到同一個檔，`A` 與 `a` MUST 各有自己的快取檔；轉義 MUST 無條件可逆且單射），MUST NOT 依賴 channel 名的字元限制成立——組態檔裡出不合法的名字（`a/b`、`../x` 這類）時 MUST 仍不出快取目錄（轉義後不成路徑分隔；design D3.2 的 `channel_slug`），檔內記原始 channel 名並在載入時比對（不符＝整檔視為空）；與游標檔、`wait` 的 ETag 狀態檔 MUST NOT 共用檔案，也 MUST NOT 被對方讀寫。快取 MUST NOT 寫進或讀出任何游標。
 - 快取檔 MUST 以「同目錄暫存＋原子替換」寫出，檔案權限 0600、目錄 0700（快取含頻道訊息內文，只能本身分讀）。
-- 快取檔不存在、不是合法 JSON、版本不認得、缺欄位、或檔內記的 channel↔entity 對應與設定檔不符時，MUST 整檔視為空並全量重建；MUST NOT 部分信任。刪掉快取 MUST 只造成下一次全量同步，MUST NOT 讓訊息漏掉或查詢結果變異。
+- 快取檔不存在、不是合法 JSON、版本不認得、缺欄位、或檔內記的 backend repo 與設定檔不符時，MUST 整檔視為空並全量重建；頻道在設定檔裡已經沒有的頁，它的訊息 MUST 從鏡射移除（換頁本身不重建：現頁與退役頁的鏡射照常沿用）；MUST NOT 部分信任。刪掉快取 MUST 只造成下一次全量同步，MUST NOT 讓訊息漏掉或查詢結果變異。
 - 快取寫不進去（唯讀目錄、磁碟滿）MUST 只在 stderr 警告一次（同一行程最多一次），查詢照常以本輪記憶體內的鏡射回答；exit code 與 stdout MUST NOT 因此改變。
 - 兩個 `log` 行程並行同一身分時，快取檔 MUST NOT 半寫（原子替換）；最壞情況是其中一輪的增量被下一輪重補（upsert 冪等），結果不漏。
 - **已知限制**：合併只有 upsert，MUST NOT 解後端的刪除——後端刪掉的留言會留在快取與結果裡、`--since` 增量 MUST NOT 回報刪除；它在全量重建之後才不再出現。skill 的說明 MUST 寫明 log 的結果不是「這則現在還在」的證據。
@@ -477,8 +530,16 @@ Angareion 對外 MUST 只有七個介面家族：建 channel、刪 channel、送
 - **THEN** exit 2，stdout 沒有內容；不會用其餘 channel 的舊鏡射交出「看似完整」的答案
 
 #### Scenario: 壞檔與對應失配都重建
-- **WHEN** 快取檔被截斷／不是 JSON／版本不認得／缺欄位；或 channel X 對應的 issue 換了（檔內記的是舊實體）
+- **WHEN** 快取檔被截斷／不是 JSON／版本不認得／缺欄位；或檔內記的 backend repo 與設定檔不同
 - **THEN** 該 channel 整檔視為空、全量重建，`log` 的結果照常正確（exit 0）；不部分信任舊內容
+
+#### Scenario: 換頁之後 log 看得到兩頁
+- **WHEN** 頻道換頁之後 `log --channel X`
+- **THEN** 結果含舊頁與新頁的訊息，依到達順序；升版後第一次 `log` 會整份重建一次（之後照常增量）
+
+#### Scenario: 頻道少了一頁
+- **WHEN** 設定檔裡 X 已經沒有某一頁（例如重新註冊到別的實體）
+- **THEN** 那一頁的訊息不再出現在 `log` 的結果裡
 
 #### Scenario: 權限
 - **WHEN** 首次執行 `angareion log`（快取目錄與檔案初次建立）
