@@ -216,18 +216,37 @@ PM_V9_KEY_SENTENCES = tuple(s for s in PM_V8_KEY_SENTENCES if s != PM_V8_T8_SENT
 #: The v8 sentences v9 still carries: all of `PM_V8_NEW_SENTENCES` but the T-8 one.
 PM_V8_NEW_SENTENCES_KEPT_IN_V9 = tuple(s for s in PM_V8_NEW_SENTENCES if s != PM_V8_T8_SENTENCE)
 #: What worker-team pm `v10` (#555, the #462 A/B experiment) adds to the twin-
-#: compaction item of `do`: the arm is set only by PMO's message; in an A week the
-#: PM does not propose the compaction even above N, in a B week it does and acts on
-#: PMO's K-1 reminder. Whole sentences (each a substring of its line), so deleting
-#: or rewording one goes red. `PM_V10_KEY_SENTENCES` keeps every v9 key sentence.
+#: compaction item of `do`: the arm is set only by PMO's message and kept in the
+#: handoff file so a restarted PM can recover it; in an A week the PM does not
+#: propose the compaction even above N, and a K-1 reminder there is treated as a
+#: mistake; in a B week it proposes and acts on PMO's K-1 reminder. Whole clauses
+#: (each a substring of its line, verbatim from v10.md), so deleting or rewording
+#: one goes red.
+#: `PM_V10_KEY_SENTENCES` keeps every v9 key sentence.
 PM_V10_NEW_SENTENCES = (
     "**實驗週（#462 A/B，PMO 用訊息明指本週是 A 週或 B 週）**：",
-    "沒有收到明指時照 v9（＝B）；臂不自己判斷、不自己改。",
+    "本條優先於第 1 條與 `judge` 的觸發句：A 週不提出",
+    "本週的臂只由 PMO 的訊息決定",
+    "訊息第一句寫「本週 A」或「本週 B」",
+    "並帶週起訖；臂不自己判斷、不自己改。",
+    "收到臂的訊息就寫進交接檔最新一節（臂＋週起訖）",
+    "開機、重開、接手、孿生重開後，先讀交接檔那一行，向 PMO 回報「我記的是本週 A／B（起訖 …）」請它確認",
+    "週起訖已過、沒有新訊息時，向 PMO 問一次",
+    "問到之前維持上一個臂的行為（不是回 B）",
+    "沒有任何臂的紀錄（全新）才照 v9（＝B）",
     "**A 週**：K-1 超過 N 也**不向 PMO 提出**孿生壓縮，照常工作",
-    "因 context 失控而無法工作時，向 PMO 回報（PMO 會把該週改記 B）。",
-    "**B 週**：照 v9 提出；收到 PMO 的「K-1 提醒」訊息時，在安全點盡快提出",
+    "成本部門另記「本來會切」",
+    "探針、T-5 等其他規則不變",
+    "A 週收到 PMO 的「K-1 提醒」時，視為臂搞錯或訊息過期，不提出",
+    "失控標準：送不出 request、被模型拒絕，或 PMO 明說",
+    "等 PMO 回『本週改 B』才提出",
+    "在那之前的提出訊息仍寫「臂＝A」並說明原因",
+    "照 v9 提出；收到 PMO 的「K-1 提醒」訊息時，在安全點盡快提出",
+    "目標 K-1 越線後 2 小時內",
+    "提出仍是你自己做的，不要等提醒才注意 K-1",
     "每次提出時在訊息裡寫「臂＝A／B」與 K-1（供 PMO 記 `prompted_by_pmo`）。",
-    "實驗期間 harness 不升版；實驗結束後回到 v9 的行為由 PMO 通知。",
+    "實驗期間 harness 不升版",
+    "實驗結束由 PMO 用訊息明說「實驗結束，回 v9 行為」，結束前不自行回 v9",
 )
 PM_V10_KEY_SENTENCES = PM_V9_KEY_SENTENCES + PM_V10_NEW_SENTENCES
 #: The sentence v6:162 (`dont`) keeps and v7 must not weaken: teammates never
