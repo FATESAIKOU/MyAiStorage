@@ -387,6 +387,8 @@ class FakeRegistryClient:
         self.before_post: Callable[[str], None] | None = None
         # Comment ids the listing hides (a replication lag); the count still includes them.
         self.hidden_ids: set[int] = set()
+        # Called inside `_lock` after a comment's id is worked out, before it is appended (the 3b id-race guard).
+        self.before_append: Callable[[], None] | None = None
         self._lock = threading.RLock()
 
     def add_comment(
@@ -407,6 +409,8 @@ class FakeRegistryClient:
                 "user": {"type": user_type, "login": "someone"},
                 "created_at": created_at or f"2026-10-10T12:00:{index:02d}Z",
             }
+            if self.before_append is not None:
+                self.before_append()
             self._comments.append(comment)
         return comment
 
