@@ -14,7 +14,7 @@
 | `<backend 名>` | channels.json 裡這個頻道的 `backend` |
 | `<頻道 repo>` | `<backend 名>` 在 backends.json 指到的 repo |
 | `<註冊簿 repo>`、`<註冊簿編號>` | 註冊簿 issue 所在的 repo 與編號（angareion 設定檔的 `registry_repo`／`registry_issue`） |
-| `<config_dir>` | angareion 設定檔的 `config_dir`（本機的 MyAiStorage clone） |
+| `<config_dir>` | angareion 設定檔的 `config_dir`（本機的設定 repo clone，channels.json 從它的 `origin/main` 讀） |
 | `<換頁時刻>` | 那則 `rollover` 留言的 `created_at`（後端時刻，UTC） |
 
 - 開 issue 與貼留言都是對 GitHub 的寫入。照 PMO 的規矩先取得本人同意，再用本人的 `gh` 做。不要用 bot 或 GitHub App 的 token：註冊簿 workflow 只在非 Bot 的留言上觸發，而且只採計 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言。
