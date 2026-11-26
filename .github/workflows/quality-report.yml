@@ -1,0 +1,41 @@
+name: quality-report
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 1"   # code: weekly
+    - cron: "41 2 * * *"   # task: daily backfill
+  issues:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      tickets:
+        description: "issue numbers, space separated (task only)"
+        default: ""
+      rev:
+        description: "commit to measure (code only; default: the latest commit)"
+        default: ""
+permissions: {}
+jobs:
+  code:
+    if: github.event_name == 'push' || github.event.schedule == '17 3 * * 1' || (github.event_name == 'workflow_dispatch' && inputs.tickets == '')
+    permissions:
+      contents: read
+    uses: FATESAIKOU/MyCodeQuality/.github/workflows/code-quality-report.yml@524cd44bb0286edf5082c7cdc16b2bb8bde262ad
+    with:
+      qmetrics-ref: 524cd44bb0286edf5082c7cdc16b2bb8bde262ad
+      rev: ${{ inputs.rev }}
+      src: src
+      tests: tests
+  task:
+    if: (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.issue.author_association)) || github.event.schedule == '41 2 * * *' || (github.event_name == 'workflow_dispatch' && inputs.tickets != '')
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+    uses: FATESAIKOU/MyCodeQuality/.github/workflows/task-quality-report.yml@524cd44bb0286edf5082c7cdc16b2bb8bde262ad
+    with:
+      qmetrics-ref: 524cd44bb0286edf5082c7cdc16b2bb8bde262ad
+      tickets: ${{ inputs.tickets }}
+      config: .github/taskquality.json
