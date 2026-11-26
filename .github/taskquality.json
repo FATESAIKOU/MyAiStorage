@@ -18,6 +18,7 @@
   "kind": "taskquality-config",
   "pass_verdicts": [
     "可以 merge",
+    "可以",
     "通過"
   ],
   "review_roles": [
