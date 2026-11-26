@@ -10,7 +10,8 @@ from __future__ import annotations
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
 from _angareion_fakes import StaticResolver, entity
-from angareion.backend import FakeBackend, Target
+from angareion.backend import Target
+from angareion.fake_backend import FakeBackend
 from angareion.client import Angareion
 from angareion.log_query import select
 from angareion.messages import Message

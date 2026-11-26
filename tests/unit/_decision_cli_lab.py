@@ -21,7 +21,8 @@ from _angareion_fakes import FakeGit, backends_json, channels_json
 from angareion import decision as dec
 from angareion import decision_cli
 from angareion import messages as M
-from angareion.backend import BackendError, Cursor, ETagRecord, FakeBackend, format_backend_time
+from angareion.backend import BackendError, Cursor, ETagRecord, format_backend_time
+from angareion.fake_backend import FakeBackend
 from angareion.channel_config import BACKENDS_PATH, CHANNELS_PATH, ChannelStore
 from angareion.cli import build_parser, main
 from angareion.config import Config, save_config

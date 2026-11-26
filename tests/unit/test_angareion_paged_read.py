@@ -26,13 +26,13 @@ from angareion.backend import (
     BackendError,
     Cursor,
     Entity,
-    FakeBackend,
     PageUnavailableError,
     RateLimitError,
     RetiredPage,
     parse_backend_time,
     skipped_page_warning,
 )
+from angareion.fake_backend import FakeBackend
 from angareion.channel_config import BACKENDS_PATH, CHANNELS_PATH, ChannelStore
 from angareion.cli import main
 from angareion.config import Config, save_config

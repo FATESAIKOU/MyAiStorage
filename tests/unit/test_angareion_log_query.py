@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 
 from _angareion_fakes import FakeGit, backends_json, channels_json, entity
-from angareion.backend import FakeBackend, Cursor
+from angareion.backend import Cursor
+from angareion.fake_backend import FakeBackend
 from angareion.channel_config import BACKENDS_PATH, CHANNELS_PATH, ChannelStore
 from angareion.cli import main
 from angareion.config import Config, save_config
@@ -249,7 +250,7 @@ def test_nonmessage_not_counted_in_around(two_env, capsys):
     # seed 5 messages plus a non-message comment in between
     for i in range(1, 6):
         seed(two_env, "general", 10, f"01M{i:02d}000000000000000000000", i, f"2026-10-10T12:00:{i:02d}Z", content=f"m{i}")
-    from angareion.backend import FakeComment
+    from angareion.fake_backend import FakeComment
     two_env["backend"]._comments.append(FakeComment(id=99, created_at="2026-10-10T12:00:99Z", message=None))
     # anchor m3, before 1 after 1 -> m2,m3,m4 (non-message not counted)
     anchor = "01M03000000000000000000000"

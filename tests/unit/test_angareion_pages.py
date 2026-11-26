@@ -18,7 +18,6 @@ from _angareion_fakes import FakeGit, StaticResolver, backends_json, entity
 from angareion.backend import (
     Cursor,
     Entity,
-    FakeBackend,
     RetiredPage,
     advance_cursor,
     cursor_after_read,
@@ -28,6 +27,7 @@ from angareion.backend import (
     pages_after_read,
     pages_to_read,
 )
+from angareion.fake_backend import FakeBackend
 from angareion.channel_config import BACKENDS_PATH, CHANNELS_PATH, ChannelConfigError, ChannelRef, ChannelStore
 from angareion.messages import Message
 from angareion.state import CursorStore

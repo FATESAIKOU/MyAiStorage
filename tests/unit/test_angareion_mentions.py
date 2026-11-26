@@ -14,7 +14,8 @@ from typing import Any
 import pytest
 
 from _angareion_fakes import StaticResolver, entity
-from angareion.backend import Cursor, FakeBackend, Target
+from angareion.backend import Cursor, Target
+from angareion.fake_backend import FakeBackend
 from angareion.client import Angareion
 from angareion.github import GitHubIssuesBackend, HttpResponse
 from angareion.messages import (

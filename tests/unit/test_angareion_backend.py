@@ -16,7 +16,6 @@ from angareion.backend import (
     ChannelNotFoundError,
     Cursor,
     Entity,
-    FakeBackend,
     ReadResult,
     Target,
     advance_cursor,
@@ -25,6 +24,7 @@ from angareion.backend import (
     parse_backend_time,
     recipient_matches,
 )
+from angareion.fake_backend import FakeBackend
 from angareion.messages import Message
 
 ME = "mylinuxpool-impl-w1-1"
