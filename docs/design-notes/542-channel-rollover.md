@@ -10,6 +10,7 @@
   - 第 6 版（2026-11-25），依 #545 的審查（Sonnet，head b954a5e：W-1、nit-1～5）修 §6.3、C-22、§9、§10。改動對照在 §16。
   - 第 7 版（2026-11-26），PR-3 開工（PMO 11-26 決定）：新增 §6.4（PR-3 切成 3-0／3a／3b／3c，附簽名）；§1.3 補三處（W-4 認 `WriteRefusedError`、W-9 的 refresh 寫成「以新實體從 A 重來」、新增 S-8′）；§4 補「拿到 403 原樣樣本後要改的地方」。基準：main `15790cf`。改動對照在 §17。
   - 第 8 版（2026-11-26），依第 7 版的非作者審查（Sonnet，head 8b75629：中-1、中-2、低-1～低-7）修正：S-8′ 的重貼加上界（新增 S-4′，`channel rollover` 的 `repost`）、§4.1 的樣本規則加計數條件，其餘是 §6.4 的簽名與測試寫法補齊。切分與依賴不變。改動對照在 §18。
+  - 第 9 版（2026-11-27，#569）：403 原樣樣本入 §10／§4.1，runbook 改用 `channel rollover`。
 - 範圍：只設計。動到的模組：`backend`、`github`、`state`、`channel_config`、`registry`、`registry_rebuild`、`client`、`log_cache`、`decision_cli`、`cli`；新增 `channel_cli`、`registry_rules`、`rollover`。主 spec（`openspec/specs/angareion/spec.md`、`angareion/channel-config/spec.md`）要補的地方列在 §9，由 PM 決定與撰寫。
 - 實測：只讀。`gh api` 讀得到註冊簿 MyAiStorage#47（2026-11-25 有 52 則留言）。AiCompany-channel 是私有 repo，這台 worker 的 `gh` 讀不到（404），所以各頁的留言數照 issue 本文引用，沒有自己量。沒有對真 GitHub 寫入。
 - 名詞：
@@ -377,7 +378,7 @@ A、B 是兩個 ≥PR-3 的寫者，P 在 2400 以上；「讀者」是 ≥PR-2 
 - 標頭：本樣本沒有記錄（§10 第 1 項）。
 - angareion 印出：`channel '<頻道>' is full: its current page has 2500 of 2500 messages and the backend refused the write (HTTP 403: Commenting is disabled on issues with more than 2500 comments)`。
 
-判斷：§4 規則 3 已經判對（`comments` 沒有延遲，計數 2500 ≥ 2400 → `ChannelFullError`）。所以**不需要**改 `GitHubIssuesBackend._refused_send`、`_rate_limit`，也不加「樣本比對」的規則；比對 `message` 會多一條要維護的分支，而判「滿」用的數字本來就可以重查。樣本的 `message` 只放進 C-2 的測試當常數（依 C-2 的規則遮蔽），不改 `ChannelFullError` 的訊息格式。
+判斷：§4 規則 3 已經判對（該次計數沒有延遲，計數 2500 ≥ 2400 → `ChannelFullError`）。所以**不需要**改 `GitHubIssuesBackend._refused_send`、`_rate_limit`，也不加「樣本比對」的規則；比對 `message` 會多一條要維護的分支，而判「滿」用的數字本來就可以重查。樣本的 `message` 只放進 C-2 的測試當常數（依 C-2 的規則遮蔽），不改 `ChannelFullError` 的訊息格式。
 
 ## 5. 告警
 
@@ -1320,10 +1321,10 @@ w2 已滿 2500，PR-3 合上之前 PMO 會照 runbook 手動換頁。手動換�
   3. GET issue 的 `comments` 會不會延遲；
   4. comment id **跨 issue** 是否全站遞增。這是這份設計新增的依賴；D4 只依賴同一實體內遞增。審查者對 MyAiStorage 的 71 則留言抽樣，結果單調，但那不是 AiCompany-channel，也不是證明。第 4 版起每一頁用自己的游標讀，送達（不漏、不重送）不依賴它；若不成立，只有同一次讀取回傳的訊息跨頁的相對順序可能與到達順序不同，主游標的 `position`（跨頁最大 id）只用在 `pages` 是 `None` 的起點。另外，頁的寬限移除依賴主游標的 `at` 單調前進，而 `at` 是最大 id 那則的時間；不成立時最壞是已移除的頁回到 `to_read`、被從頭讀而整頁重送（不會漏；§2.1，重審 nit-1）；
   5. 交互參照會不會吃留言額度；
-  6. 鎖住的 issue 是否擋得住擁有者留言（文件說擋不住）；以及計數很小的頁收到與滿頁相同的拒絕句（§4.1 的樣本）時，是不是代表整個 repo 或帳號被禁止留言（第 8 版補；§4.1 對這種情況不換頁）；
+  6. 鎖住的 issue 是否擋得住擁有者留言（文件說擋不住）；以及計數很小的頁收到與滿頁相同的拒絕句（§4.1 的樣本）時，是不是代表整個 repo 或帳號被禁止留言（第 8 版補；未驗。現行規則下計數小（<2400）只得到 `WriteRefusedError`、不換頁，由 C-2 的 `test_c2_the_same_message_at_a_low_count_follows_the_current_rule` 鎖住，見 §4.1）；
   7. 註冊簿列表的複寫延遲；
   8. 留言的 `since` 過濾是否以 `updated_at` 為準（C-26 的 `late` 旗標靠它；推論）。
-  - 第 1 項會在 PR-1 上線後，靠錯誤訊息裡的 GitHub `message` 取得樣本。
+  - 第 1 項的樣本已在 11-26 靠錯誤訊息裡的 GitHub `message` 取得（§4.1）；標頭仍未記錄。
 
 ## 11. 風險與未決
 
@@ -1337,7 +1338,7 @@ w2 已滿 2500，PR-3 合上之前 PMO 會照 runbook 手動換頁。手動換�
 | Q-6 | 手動換頁與 PR-3 merge 的前提 | §6.2 的盤點（`--capabilities` 含 `paged-read`、`config_pull_interval` 在範圍內、同一身分沒有未升級的安裝）通過才做／直接做 | 先盤點，由 PMO 做 | PMO |
 | Q-7 | 門檻值 | 2000／2400／2490／24h／48h（§1.3）；`config_pull_interval` 上限 6h（§6.2） | 照表 | PM |
 | Q-8 | 換頁前的營運 | m1、w4 先開 `-b`／等 PR-2 之後手動換頁 | 用 PR-1 的 `channel status` 盯；剩不到 50 則還沒有 PR-2 就開 `-b` | PMO |
-| Q-10 | 403「Commenting is disabled」的原樣樣本（第 7 版，§4.1） | 樣本到了照 §4.1 判斷要不要改；改的話另開 d 或併進 3a | 先看 w5 當時的 stderr 是不是 `is full`：是就不改程式 | PM（樣本由 w5 提供） |
+| Q-10 | **已結**：403「Commenting is disabled」的原樣樣本已到（第 7 版，§4.1，11-26） | 樣本到了照 §4.1 判斷要不要改；改的話另開 d 或併進 3a | 已結：規則 3 判對（計數 2500 → `ChannelFullError`），程式不改（見 §4.1） | PM（樣本由 w5 提供） |
 | Q-11 | PR-3 之後手動換頁的做法（第 7 版，§6.4 的並存表） | runbook 第 3、4 節改成 `angareion channel rollover <C>`、gh 步驟留作備案／照舊只用 gh | 改成 `channel rollover`（它會走 S-3 與待註冊紀錄，不和自動換頁搶頁） | PM（runbook 由 PM 改）、PMO（照做） |
 | Q-9 | 新游標（新身分、狀態目錄遺失）讀退役頁的範圍（第 5 版，A-12） | A 只讀最近一次換頁 48 小時內退役的頁（更早的頁上寄給自己的舊訊息讀不到，`log` 查得到）／B 全部退役頁（不漏，但請求數與重送量隨換頁次數長大） | A | PM（行為；結構面架構師建議 A，選 B 時只要刪掉 C-9 的上限與 §2.1 那一條，其餘不變） |
 

@@ -275,7 +275,7 @@ def test_c2_the_real_2500_sample_is_a_full_channel():
     assert OWNER_REPO not in str(err)
 
 
-def test_c2_the_same_message_at_a_low_count_is_a_plain_refusal():
+def test_c2_the_same_message_at_a_low_count_follows_the_current_rule():
     transport = Transport()
     _refused_post(transport, status=403, message=REAL_2500_MESSAGE, comments=2450)
     with pytest.raises(ChannelFullError) as excinfo:

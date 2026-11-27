@@ -2,7 +2,7 @@
 
 一個頻道的現頁快到留言上限時，PMO 用這份說明手動開一張新頁，在註冊簿貼一則 `rollover` 留言，讓頻道換到新頁。讀者不用做任何事。
 
-- 對象：PR-2（2a／2b／2c）已經在 main、自動換頁（PR-3）還沒上線的這段期間。PR-3 上線之後改用 `angareion channel rollover`，這份說明只留作備援。
+- 對象：現況是 PR-2（2a／2b／2c）與 PR-3（3c）都已在 main；這份說明描述 `angareion channel rollover`（第 3 節，主要做法）與它不能用時的備案（第 4 節）。
 - 依據：設計 `docs/design-notes/542-channel-rollover.md`（§1.1、§1.2、§2、§3、§6.2；決定 D-34）與現行程式（`registry.rollover_comment`、`registry_rules.rebuild_channels`、`channel_cli` 的 `status`、`cli.CAPABILITIES`）。
 - 這份文件在公開 repo，所以不寫任何 repo 名、issue 編號與機器位址，一律用占位符：
 
@@ -82,7 +82,7 @@
    # registry    60     2500   ok     1      -
    ```
 
-   在 `warn`（≥2000）就可以換，最晚在 `rollover`（≥2400）之前換。真正碰到上限時的回應沒有驗過（第 11 節），不要等到 `full`。
+   在 `warn`（≥2000）就可以換，最晚在 `rollover`（≥2400）之前換。碰到上限時的回應已觀察到 HTTP 403＋`Commenting is disabled on issues with more than 2500 comments`、計數 2500（第 2501 則被拒）；2500 以下與 `comments` 計數是否延遲未驗（第 11 節），不要等到 `full`。
 
 3. 確認註冊簿上沒有別人正在換這個頻道：看註冊簿最近的留言，沒有 `"channel": "<頻道名>"` 的 `rollover` 還沒落地。
 
@@ -99,7 +99,7 @@
 
    它依序做：
 
-   - 先強制 fetch 註冊簿（不用定期拉的那一份），在 `<頻道 repo>` 開一張新 issue（標題＝頻道名），再在註冊簿貼一則 `rollover` 留言（`from` 是 channels.json 的現頁）。
+   - 先強制拉最新設定（channels.json，不用定期拉的那一份），在 `<頻道 repo>` 開一張新 issue（標題＝頻道名），再在註冊簿貼一則 `rollover` 留言（`from` 是 channels.json 的現頁）。
    - 等本機設定落地，上限 2 分鐘。逾時只印一行 `Notice: …`，exit 仍是 0；之後照第 5 節第 2 步用 `git fetch` 確認 main。
    - 成功時 stdout 印出頻道名。
 
@@ -109,7 +109,7 @@
    |---|---|---|
    | 0 | 換頁完成（逾時的 `Notice` 也是 0） | 是 |
    | 1 | 頻道未註冊，或頻道名不合法 | 否 |
-   | 2 | 失敗（開 issue、貼留言等）；stderr 有原因 | 否 |
+   | 2 | 失敗（開 issue、貼留言等）；stderr 有原因。先再跑一次這個指令（它會續用同一張已開的新頁）；仍失敗才走第 4 節手動步驟（否則多一張孤兒頁） | 否 |
 
    前提：`angareion --capabilities` 的輸出含 `paged-write`；沒有這個指令或這一項，改用第 4 節。
 
@@ -161,7 +161,7 @@
 ```
 
 - `schema` 是 `1`；`action` 是 `"rollover"`。
-- `issue` 與 `from` 是**正整數，不加引號**，兩者不能相同。`from` 是第 2 節看到的現頁，`issue` 是第 3 節開的新頁。
+- `issue` 與 `from` 是**正整數，不加引號**，兩者不能相同。`from` 是第 2 節看到的現頁，`issue` 是第 4.1 節開的新頁。
 - 恰好這六個鍵。少一個、多一個（例如多一個 `note`）、`register`／`unregister` 帶 `from`，都會被重建回報並略過。
 - 留言裡不要再寫別的字：本文去掉前後空白後必須以 `{` 開頭，而且整段是一個 JSON 物件。
 
@@ -308,7 +308,7 @@ gh issue comment <註冊簿編號> -R <註冊簿 repo> --body-file /path/to/roll
 
 ## 11. 已知風險
 
-1. **真正的上限回應沒有驗過**：GitHub 在 2500 則時回的狀態碼與內容（只觀察到 403）、上限是不是恰好 `comments ≥ 2500`、`comments` 會不會延遲，都沒驗過。angareion 在 2400 以上被拒就當作「看起來滿了」（`looks full (or the token was refused)`），2500 以上是 `is full`，兩者都是 exit 2、不重試。所以照第 2 節在 `warn` 時就換，不要等到 `full`。
+1. **真正的上限回應只部分驗過**：已觀察到 HTTP 403＋`Commenting is disabled on issues with more than 2500 comments`、計數 2500（第 2501 則被拒）；2500 以下與 `comments` 計數是否延遲未驗（上限是不是恰好 `comments ≥ 2500`、時間軸事件是否計入也沒驗過）。angareion 在 2400 以上被拒就當作「看起來滿了」（`looks full (or the token was refused)`），2500 以上是 `is full`，兩者都是 exit 2、不重試。所以照第 2 節在 `warn` 時就換，不要等到 `full`。
 2. **設定沒拉到新版的寫者會繼續寫舊頁**：手動換頁沒有「舊頁先寫滿」的上限，一個寫者在拉到新設定之前寫的訊息都在舊頁上。換頁後 24 小時內這是正常的過渡，已升級的讀者照樣讀得到（舊頁要讀到讀者游標超過 `<換頁時刻>`＋48 小時）。超過 24 小時還有人寫舊頁，`channel status` 會出現 `late` 旗標（只看 7 天內退役的頁）；超過 48 小時才寫進舊頁的訊息，游標已經越過寬限期的讀者就讀不到了（`log` 查得到）。看到 `late` 就找出那個寫者：通常是 `config_pull_interval` 是 0，或它的 `git fetch` 一直失敗。
 3. **未升級的讀者**：只讀現頁，舊頁上還沒讀的訊息它讀不到。第 1 節的盤點就是擋這個。
 4. **同一身分混用兩版**：舊版會洗掉每頁游標，換過頁的頻道又會在設定晚到時漏訊息（不會重送）。第 1 節第 3 條擋這個。
