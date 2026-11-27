@@ -752,7 +752,7 @@ def test_c14_a_skipped_page_keeps_its_place_in_the_mirror(cli, capsys):
 def test_c24_capabilities_prints_one_line_and_exits_0(capsys):
     assert main(["--capabilities"]) == 0
 
-    assert capsys.readouterr().out == "paged-read\n"
+    assert capsys.readouterr().out == "paged-read paged-write\n"
 
 
 def _status_rows(env: CliEnv, capsys) -> tuple[int, dict[str, dict[str, Any]], str, str]:

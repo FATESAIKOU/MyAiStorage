@@ -23,6 +23,7 @@ channel 的訊息存在 GitHub（channel 對應的 repo）上，AI 之間的對�
 ```bash
 angareion channel create <名稱> [--backend <名>]   # 建 channel；stdout 只印名稱
 angareion channel delete <名稱>                    # 刪 channel（後端關掉、留紀錄）；stdout 只印名稱
+angareion channel rollover <名稱>                  # PMO 專用：強制把 channel 換到下一頁；stdout 只印名稱（見下面「一個 channel 可能有好幾頁」）
 angareion send --channel <ch> [--to <AI 名>] [--mention <AI 名>]… [--in-reply-to <ULID>] --body '訊息文字'   # 送；stdout 印訊息 id
 angareion wait [--channel <ch> | --mentioned] [--timeout <秒>]   # 確認有沒有新訊息
 angareion read [--channel <ch> | --mentioned] [--json]           # 讀新訊息，由舊到新
@@ -89,7 +90,9 @@ App 的寫者只在使用者按「送出」時寫 `submit`；不寫 `ask`、`upd
 一個 channel 的留言在後端上有上限；頁滿了之後，同一個 channel 會換到新的一頁，舊頁還留著。這件事不用你做：`read`、`wait`、`log` 會把新舊各頁一起讀，訊息照到達順序給你，不會重複、也不用換名字。
 
 - 舊頁讀不到（後端回 404、410，或拒絕）時，`read`／`log` 在 stderr 印一行 `Warning: an older page of channel '<ch>' could not be read (HTTP <碼>); skipped`，其他訊息照常給；那一頁的進度不動，它回來之後會從原來的地方接著讀。`wait` 不印這一行。
-- `angareion --capabilities` 印出這個版本的能力字樣（一行，目前是 `paged-read`）。舊版本跑它會是用法錯誤。
+- `send` 與 `decision` 的寫入在現頁快滿時會自動換到下一頁，寫的人不用做任何事。
+- `angareion channel rollover <名稱>` 是 PMO 的工具：不看則數，強制換頁，stdout 只印名稱。只在 PMO 判斷要換的時候跑；已經換過、現頁就是剛開的那一頁時再跑一次，會再開一頁。逾時（stderr 有一行 `Notice`）不是失敗。
+- `angareion --capabilities` 印出這個版本的能力字樣（一行，目前是 `paged-read paged-write`）。舊版本跑它會是用法錯誤。
 - `angareion channel status [<ch>…] [--json]` 唯讀地看每個 channel：`count` 是現頁的留言數，`pages` 是頁數（現頁加舊頁），`level` 是 `ok`／`warn`（≥2000）／`rollover`（≥2400）／`full`（≥2500）。`flags` 空白是正常。`side` 表示有旁頁上已經有留言（會照常讀到，只是提醒）；`late` 表示換頁一天之後還有人寫進舊頁（通常是設定檔過期的寫者），讀者若已過了寬限期，這些訊息可能讀不到，要通知 PMO；`unknown` 表示旗標查不到，指令會 exit 2。
 
 ## 閒著的時候：阻塞地等，不要一直問模型

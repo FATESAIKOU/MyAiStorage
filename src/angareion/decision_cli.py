@@ -3,7 +3,7 @@
 The rules (what a record means, what is open, how a snapshot is read) live in
 `decision.py`. This module only syncs the channel's log mirror, asks `decision`
 for the summary and the preflight, builds `datatype: decision` messages and
-posts them with `backend.send`. It never reads or moves the cursors (C-18).
+posts them with `app.write` (the page writer, design 542 §1.3). It never reads or moves the cursors (C-18).
 """
 
 from __future__ import annotations
@@ -132,7 +132,7 @@ def _precheck(result: dec.FoldResult, ref: str, identity: str) -> dict:
     return question
 
 
-def _maybe_snapshot(config: Config, backend: DecisionBackend, entity: Entity, token: str) -> None:
+def _maybe_snapshot(config: Config, app: Any, backend: DecisionBackend, entity: Entity, token: str) -> None:
     """Automatic snapshot after the asker's own write (§7.1).
 
     The whole step (listing, counting, building, sending) runs after the write
@@ -148,7 +148,7 @@ def _maybe_snapshot(config: Config, backend: DecisionBackend, entity: Entity, to
             return
         message = _message(config, channel=entity.channel, to=config.identity, content=text)
         serialize_message(message)
-        backend.send(entity, message)
+        app.write(entity, message)
     except Exception as e:
         _warn(
             f"snapshot was not written ({mask_token(str(e), token)}); "
@@ -156,10 +156,10 @@ def _maybe_snapshot(config: Config, backend: DecisionBackend, entity: Entity, to
         )
 
 
-def _write_one(config: Config, backend: DecisionBackend, entity: Entity, message: Message) -> str:
-    """Check a message can be read back (strict, §4) before it is sent; a refusal sends nothing."""
+def _write_one(app: Any, entity: Entity, message: Message) -> str:
+    """Check a message can be read back (strict, §4) before it is written; a refusal sends nothing."""
     serialize_message(message)
-    return backend.send(entity, message)
+    return app.write(entity, message)
 
 
 def cmd_ask(args: Any, config: Config, app: Any, backend: DecisionBackend, token: str) -> int:
@@ -168,8 +168,8 @@ def cmd_ask(args: Any, config: Config, app: Any, backend: DecisionBackend, token
     content = dec.build_payload("ask", ask_channel=args.channel, asker=config.identity, **fields)
     _sync(config, backend, entity)
     message = _message(config, channel=args.channel, to=fields["answerer"], content=content)
-    sys.stdout.write(f"{_write_one(config, backend, entity, message)}\n")
-    _maybe_snapshot(config, backend, entity, token)
+    sys.stdout.write(f"{_write_one(app, entity, message)}\n")
+    _maybe_snapshot(config, app, backend, entity, token)
     return EXIT_OK
 
 
@@ -181,8 +181,8 @@ def cmd_update(args: Any, config: Config, app: Any, backend: DecisionBackend, to
     result = dec.fold(_sync(config, backend, entity), use_snapshot=True)
     _precheck(result, ref, config.identity)
     message = _message(config, channel=args.channel, to=fields["answerer"], content=content, in_reply_to=ref)
-    sys.stdout.write(f"{_write_one(config, backend, entity, message)}\n")
-    _maybe_snapshot(config, backend, entity, token)
+    sys.stdout.write(f"{_write_one(app, entity, message)}\n")
+    _maybe_snapshot(config, app, backend, entity, token)
     return EXIT_OK
 
 
@@ -196,8 +196,8 @@ def cmd_withdraw(args: Any, config: Config, app: Any, backend: DecisionBackend, 
     message = _message(
         config, channel=args.channel, to=question["answerer"], content=content, in_reply_to=ref
     )
-    sys.stdout.write(f"{_write_one(config, backend, entity, message)}\n")
-    _maybe_snapshot(config, backend, entity, token)
+    sys.stdout.write(f"{_write_one(app, entity, message)}\n")
+    _maybe_snapshot(config, app, backend, entity, token)
     return EXIT_OK
 
 
@@ -268,7 +268,7 @@ def cmd_submit(args: Any, config: Config, app: Any, backend: DecisionBackend, to
     for index, (channel, message) in enumerate(outgoing, start=1):
         entity = app.store.entity_for(channel)
         try:
-            message_id = backend.send(entity, message)
+            message_id = app.write(entity, message)
         except BackendError as e:
             sys.stderr.write(
                 f"Error: record {index}/{total} failed ({mask_token(str(e), token)}); "
@@ -286,7 +286,7 @@ def cmd_snapshot(args: Any, config: Config, app: Any, backend: DecisionBackend, 
     if text is None:
         return EXIT_OK
     message = _message(config, channel=args.channel, to=config.identity, content=text)
-    sys.stdout.write(f"{_write_one(config, backend, entity, message)}\n")
+    sys.stdout.write(f"{_write_one(app, entity, message)}\n")
     return EXIT_OK
 
 

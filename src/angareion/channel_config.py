@@ -252,10 +252,21 @@ class ChannelStore:
         This is the landing wait of `channel create`; it is not used while a
         command is otherwise polling (wait never fetches after it started).
         """
+        return self._poll_until(lambda: name in self.channels(), timeout)
+
+    def poll_for_page(self, name: str, issue: int, *, timeout: float = LANDING_POLL_TIMEOUT_SECONDS) -> bool:
+        """Poll the clone until the channel's current page is `issue` (the landing wait of `channel rollover`)."""
+        def on_page() -> bool:
+            ref = self.channels().get(name)
+            return ref is not None and ref.issue == issue
+
+        return self._poll_until(on_page, timeout)
+
+    def _poll_until(self, landed: Callable[[], bool], timeout: float) -> bool:
         deadline = self._clock() + timeout
         while True:
             self.fetch()
-            if name in self.channels():
+            if landed():
                 return True
             if self._clock() >= deadline:
                 return False

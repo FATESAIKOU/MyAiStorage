@@ -128,7 +128,9 @@ class ChannelFullError(BackendError):
         else:
             head = f"channel '{channel}' is full"
         cause = http_cause(status, detail)
-        super().__init__(f"{head}: {where} and the backend refused the write{cause}")
+        super().__init__(
+            f"{head}: {where} and the backend refused the write{cause}; run 'angareion channel rollover {channel}'"
+        )
 
 
 def http_cause(status: int | None, detail: str) -> str:

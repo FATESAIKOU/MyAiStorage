@@ -1,7 +1,7 @@
-"""`angareion channel <action>`: create, delete and status (design 542 §6.1, C-5).
+"""`angareion channel <action>`: create, delete, status and rollover (design 542 §6.1, C-5, C-19).
 
 `create` and `delete` moved here from cli.py unchanged; `status` is new and only
-reads (fetch, no writes, no cursor). cli.py imports this module, so it is not
+reads (fetch, no writes, no cursor); `rollover` forces the next page (PMO's tool). cli.py imports this module, so it is not
 imported back: the exit codes and `mask_token` are repeated here, as
 decision_cli.py does.
 """
@@ -44,6 +44,7 @@ from angareion.registry import (
     unregister_comment,
 )
 from angareion.registry_rules import rebuild_channels
+from angareion.rollover import SuccessorError
 
 # The same exit codes as cli.py (cli imports this module, so they are not imported back).
 EXIT_OK = 0
@@ -187,6 +188,48 @@ def cmd_channel_delete(
         )
         return EXIT_BACKEND
 
+    sys.stdout.write(f"{args.name}\n")
+    return EXIT_OK
+
+
+def cmd_channel_rollover(
+    args: argparse.Namespace,
+    config: Config,
+    app: Angareion,
+    registry: CommentPoster,
+    store: ChannelStore,
+    token: str,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> int:
+    """Force the channel onto a new page now, whatever the count says (design 542 C-19; PMO's tool).
+
+    The writer does the work: `ensure_successor` with `repost=True`. Run it only when PMO has decided
+    to move the channel; a second run on the page it just opened opens another page.
+    """
+    try:
+        validate_channel_name(args.name)
+    except MessageValidationError as e:
+        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
+        return EXIT_USAGE
+
+    store.ensure_fresh()
+    store.fetch()  # the forced move works from the newest registry view, not the periodic one
+    entity = store.entity_for(args.name)  # a missing channel raises ChannelNotFoundError
+    if app.writer is None:
+        sys.stderr.write(f"Error: channel '{args.name}' cannot be rolled over by this command\n")
+        return EXIT_BACKEND
+
+    try:
+        successor = app.writer.ensure_successor(args.name, entity.issue, entity, repost=True)
+    except SuccessorError as e:
+        sys.stderr.write(f"Error: channel '{args.name}' was not rolled over: {e.reason}\n")
+        return EXIT_BACKEND
+
+    if not store.poll_for_page(args.name, successor.issue):
+        sys.stderr.write(
+            f"Notice: channel '{args.name}' has a new page but the local copy has not caught up yet; "
+            "it will be used once the registry rebuild lands.\n"
+        )
     sys.stdout.write(f"{args.name}\n")
     return EXIT_OK
 
