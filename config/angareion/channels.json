@@ -70,7 +70,13 @@
     },
     "team-mylinuxpool-w3": {
       "backend": "aicompany-channel",
-      "issue": 29
+      "issue": 40,
+      "retired": [
+        {
+          "issue": 29,
+          "until": "2026-11-27T01:35:15Z"
+        }
+      ]
     },
     "team-mylinuxpool-w3-b": {
       "backend": "aicompany-channel",
