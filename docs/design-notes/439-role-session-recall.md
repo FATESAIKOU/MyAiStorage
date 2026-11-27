@@ -470,7 +470,10 @@ U-1、U-2、U-3、U-9、U-11、U-13 已裁定或隨之定案，下面的 R-3 只
 
 **和 MLP 回覆末段 11 項的關係**：本附錄只處理其中和孿生交會的幾項：第 2 項（明示不記）、第 3 項（`fresh`＋`session`）、第 1 項（跨 agent）、第 9 項（回應的 `session`）。PMO 11-27 對「設計 vs sidecar 現況」的裁定見 A.9；「明示不記」待本人（Q-5）。
 
-**和 `462-v1` 的關係**：`462-v1` §12.2 第 3 步（拋棄式 agent 用 `remember: false`）與 §12.7 V-1c 的「`role:$C` 再搜是空的」，是舊版 sidecar 的結果；**`remember:false` 的現況以本附錄 M-3 為準**（照樣帶 `role:<id>`，要照 A.3 第 5 步摘掉）。
+**和 `462-v1` 的關係**：`462-v1` §12.2 第 3 步（拋棄式 agent 用 `remember: false`）與 §12.7 V-1c 的「`role:$C` 再搜是空的」，是舊版 sidecar 的結果；**`remember:false` 的現況以本附錄 M-3 為準**（照樣帶 `role:<id>`，要照 A.3 第 5 步摘掉）。另外兩處也以本附錄為準：
+
+- §12.2 第 6 步的「**不明指也可以**：T 是 fork 出來的，已經有 `role:R`」：照本附錄，T 在 fork 時不帶 `role:R`，探針判「對」之後才加（A.3 第 3、7′ 步）；切換一律明指 `session: T`。
+- §12.5 回退 1 的「之後」摘 T 的 `role:R`：改成 PM `exited` 之後、開 S 之前（A.3 第 10 步）。
 
 ### A.0 結論（給本人的一頁）
 
@@ -529,7 +532,7 @@ U-1、U-2、U-3、U-9、U-11、U-13 已裁定或隨之定案，下面的 R-3 只
 
 **本 repo 和 MLP 回覆都查不到的**：
 - `session_select` 單獨使用時的語意。
-- MyPMO `dispatch.py` 開 tui PM 時吃不吃 `--session`（X-1，`462-compaction-ab-experiment.md:715`）。
+- MyPMO 開 tui PM 的工具吃不吃 `--session`（X-1，`462-compaction-ab-experiment.md:715`）。
 
 ### A.2 優先序（回答第 1 題）
 
@@ -614,7 +617,7 @@ U-1、U-2、U-3、U-9、U-11、U-13 已裁定或隨之定案，下面的 R-3 只
 | R-20 | **(a)** 帶 `session` 的 open：claude、opencode（含 tui）都接受；不支援的種類回 400，不准把 `session` 默默丟掉。**(b)** 回應和 `GET /agents/<id>` 的 `session` 是這次接續的 agora id。agora 把工作另存成新 id 時（被刪救援），要讓呼叫方看得到新的 id 或一行警告，不能一直報舊的 id。**(c)** 崩潰後的自動重開（PM、操作員都一樣），沿用原本接上的那個 Session，不重新跑召回 | (a) 已做（M-5）。(b) 平常的情況已做到，是照抄出來的；救援另存那種情況沒做（M-4），而孿生的步驟用 L-7 避開它，所以**低優先，要不要開單看 Q-8**。(c) `waiting-quota` 已做（M-7），崩潰重開沒寫 | A.2；A.3 的 H-2′、H-5、第 8 步 |
 | R-21 | `session` 和其他欄位一起給時，照 A.2：`session` 優先、不查找；`session`＋`fresh:true`，或 `session`＋`session_select` → 400；`session`＋`remember`（不管真假）→ 接 `session`，`remember` 被忽略，寫回時照樣帶 `role:<開的 id>`。`session_select` 單獨給時，要解出一個 id，再照順位 1 處理 | 除了 `session_select` 單獨給的語意，都已做到（M-1～M-3） | A.2 |
 
-R-21 就是把現況固定成契約。孿生這邊配合它（H-3 的摘 tag），不要求 sidecar 恢復「`remember:false` 不加 tag」。要不要補回「明示不記」，待本人（Q-5）；如果補回了，H-3 的摘 tag 就可以省掉。
+R-21 就是把現況固定成契約。孿生這邊配合它（H-3 的摘 tag），不要求 sidecar 恢復「`remember:false` 不加 tag」。要不要補回「明示不記」，待本人（Q-5）；如果補回了，H-3 的摘 tag 要能省掉，**前提是 R-21 同步改**（`$C` 一律明指 `session: T`；見 Q-5 (b) 的「補回的成本」）。
 
 **對 PMO 開 PM 的工具（不屬 sidecar；X-1，Q-7）**：轉送 open 的工具（包括 PMO 開 PM 的工具）不准丟掉 `session`；不支援就報錯，不准默默改走預設召回。這不是對 MLP 的要求，由 PMO 排；驗法見 S-21 的最後一步。
 
@@ -622,16 +625,18 @@ R-21 就是把現況固定成契約。孿生這邊配合它（H-3 的摘 tag）�
 
 **sidecar 側**（MLP／PMO 在真的 sidecar 上驗）：
 
+**S-20 的前提**：Q-3、Q-4 已落地（`atelier` 的 T-9 與操作員 brief 範本已照本附錄改好）；否則第 3 步不要加 `--header`、預期照 H-6（fork 後 T 就在 `role:R` 底下，第 7′ 步不做）。
+
 | # | 步驟 | 預期 | 停下來的條件 |
 |---|---|---|---|
-| S-20（R-20 (a)(b)；對齊 PMO 11-29 的真 PM 實跑） | 照 A.3 第 1～9 步：<br>警示 → 提醒 → PM 回「已暫停」<br>→ Close SOP，等到 `exited`<br>→ 記下 S 的 `updated_at` 與 raw md5（寫回完成、`locked` 不是 true 之後才取）<br>→ fork 出 T（`--agent` 用 PM 的種類、`--header` 不帶 `role:R`，exit 0）<br>→ `$C`（同一種 agent，`session: T`）壓縮、關掉<br>→ 第 5 步的 `edit`（摘 `role:<$C>`、加 `twin:`）<br>→ 探針 P（`--header` 只留 `twin-probe:`），問完；**刪 P 之前先核對搜尋**；刪掉<br>→ 第 7′ 步：`edit --add-tag role:R`<br>→ 開 R 帶 `session: T`<br>→ **核對回應的 `session` 是 T**<br>→ T-5<br>→ **PM 第一次寫回之後，核對搜尋的第一列** | 回應和 `GET /agents/<id>` 的 `session` 都是 T。<br>T 的 `relation` 是 fork，`parents` 是 `[S]`。<br>第 4 步之後，`$C` 有寫回時 T 的 tags 有 `role:<$C>`（H-3 的前提，只在寫回時成立）。<br>第 5 步之後，T 的 tags 有 `twin:<S>`，沒有 `role:<$C>`，也還沒有 `role:R`。<br>**第 6 步 fork 出 P 之後、刪 P 之前**，`search --filter tags=role:R --strict --sort updated --json` 的第一列不是 P（是 S），P 的 `tags` 只有 `twin-probe:…`。<br>第 7′ 步之後，第一列是 T。<br>PM 第一次寫回之後，第一列仍是 T。<br>S 的 `updated_at` 和 md5 都沒變。<br>T-5 是「對」 | 回應的 `session` 不是 T → 照 Close SOP 關掉，不做 T-5，回報；**不准改用預設召回再試**。<br>寫回之後第一列不是 T → 停，回報（可能是 M-4 的另存，或 H-4）。<br>刪 P 之前第一列是 P → 停，P 或 T 的 `--header` 沒生效，回報。<br>其他照 v9 第 4 步 |
+| S-20（R-20 (a)(b)；對齊 PMO 11-29 的真 PM 實跑） | 照 A.3 第 1～9 步：<br>警示 → 提醒 → PM 回「已暫停」<br>→ Close SOP，等到 `exited`<br>→ 記下 S 的 `updated_at` 與 raw md5（寫回完成、`locked` 不是 true 之後才取）<br>→ fork 出 T（`--agent` 用 PM 的種類、`--header` 不帶 `role:R`，exit 0）<br>→ `$C`（同一種 agent，`session: T`）壓縮、關掉<br>→ 第 5 步的 `edit`（摘 `role:<$C>`、加 `twin:`）<br>→ 探針 P（`--header` 只留 `twin-probe:`），問完；**刪 P 之前先核對搜尋**；刪掉<br>→ 第 7′ 步：`edit --add-tag role:R`<br>→ 開 R 帶 `session: T`<br>→ **核對回應的 `session` 是 T**<br>→ T-5<br>→ **PM 第一次寫回之後，核對搜尋的第一列** | 回應和 `GET /agents/<id>` 的 `session` 都是 T。<br>T 的 `relation` 是 fork，`parents` 是 `[S]`。<br>第 4 步之後，`$C` 有寫回時 T 的 tags 有 `role:<$C>`（H-3 的前提，只在寫回時成立）。<br>第 5 步之後，T 的 tags 有 `twin:<S>`，沒有 `role:<$C>`，也還沒有 `role:R`。<br>**第 6 步 fork 出 P 之後、刪 P 之前**，**主斷言**：P 的 `tags` 只有 `twin-probe:…`（這才驗到 P 的 `--header`）；輔助：`search --filter tags=role:R --strict --sort updated --json` 的第一列不是 P（是 S；T 沒有 `role:R` 時，不論 `--header` 有沒有生效都成立）。<br>第 7′ 步之後，第一列是 T。<br>PM 第一次寫回之後，第一列仍是 T。<br>S 的 `updated_at` 和 md5 都沒變。<br>T-5 是「對」 | 回應的 `session` 不是 T → 照 Close SOP 關掉，不做 T-5，回報；**不准改用預設召回再試**。<br>寫回之後第一列不是 T → 停，回報（可能是 M-4 的另存，或 H-4）。<br>第 5 步之後 T 已經有 `role:R` → 停，T 的 `--header` 沒生效，回報。<br>P 的 `tags` 不是只有 `twin-probe:…`，或刪 P 之前第一列是 P → 停，P 或 T 的 `--header` 沒生效，回報。<br>其他照 v9 第 4 步 |
 | S-21（R-20 (a)；X-1 的工具要求） | 用合成內容，準備兩個 `role:$T` 的 Session：X 較舊，Y 最新，兩個是同一種 agent。<br>claude（tui）、opencode 各做一次：開 `$T` 帶 `session: X`。<br>再開一次，帶一個不存在的 agora id。<br>PMO 開 PM 的工具在範圍內的話，用它再開一次 `session: X` | 第一次：回應的 `session` 是 X；第一個畫面看得到 X 的標記字串，看不到 Y 的。<br>不存在的 id：回錯誤，沒有起 agent。<br>PMO 的工具：同第一次，或者明確報錯 | 回 200，接的卻是 Y 或新開的 → R-20 (a)（或 X-1 的工具要求）不成立 |
 | S-22（R-21） | 同一套合成夾具：<br>(i) `session: X`＋`remember:false`，**讓它產生一則新內容再關**<br>(ii) `session: X`＋`fresh:true`<br>(iii) `session: X`＋`session_select`<br>(iv) 同一台機器上，X 正被另一個 agent 接續時，開 `session: X` | (i) 200，接 X。**寫回之後 X 的 tags 多了 `role:<這個 id>`**：這是現況，也是 H-3 的前提（沒有新內容就不存、tag 也不加，F-4，那不算不符）。<br>(ii)、(iii) 400，沒有起 agent。<br>(iv) 409，沒有改接 Y，也沒有開新的 | 任何一項回了 200，卻接了別的 |
 | S-23（R-20 (c)、H-2） | 合成：X（較舊）、Y（最新，帶 `role:$T`）。<br>開 `$T` 帶 `session: X`，還沒有新內容就關掉。之後：<br>(i) 先照 H-2 摘掉 Y 的 `role:$T`，再不帶 `session` 開；<br>(ii) 對照組：不摘，直接不帶 `session` 開。<br>(iii) 能安全地讓它崩潰的話：開 `session: X`，還沒有新內容就讓它崩潰，等自動重開 | (i) 接 X。<br>(ii) 接 Y：這就是 H-2，證明要摘 tag。<br>(iii) 重開之後，回應的 `session` 仍是 X | (i) 不是 X → 回報。<br>(iii) 不是 X → R-20 (c) 不成立。<br>誘發不了崩潰，就在 sidecar 的測試裡用假的 agora 驗，標成「真機未驗」 |
 
 S-21～S-23 只用合成內容和沒用過的序號，和 V-1c 一樣，不碰真的 PM。S-20 就是 PMO 11-29 的實跑；它碰的是真的 PM，授權照 v9 第 9 步。
 
-**S-20 的對照**：在真的 PM 上不做「不加 `--header`」的對照（本附錄的第 3 步讓 T 本來就沒有 `role:R`，真 PM 上做不出對照，也不該做）。對照放在 agora 側：既有的 C-12a 已經證明「不加 `--header` 的 fork 是第一列」（fork 後 `[T, S]`），C-16 (a) 證明加了就不在。兩者合起來，S-20 的「刪 P 之前第一列不是 P」才不是自我確認。
+**S-20 的對照**：在真的 PM 上不做「不加 `--header`」的對照（本附錄的第 3 步讓 T 本來就沒有 `role:R`，真 PM 上做不出對照，也不該做）。對照放在 agora 側：既有的 C-12a 已經證明「不加 `--header` 的 fork 是第一列」（fork 後 `[T, S]`），C-16 (a) 證明加了就不在。兩者合起來，才不是自我確認；在真 PM 上，驗到 `--header` 的是「P 的 `tags` 只有 `twin-probe:…`」與「第 5 步之後 T 還沒有 `role:R`」，「第一列不是 P」只是輔助。
 
 **agora 側**（本 repo。放在 `tests/unit/test_twin_contract.py`；用假 agent、假 rclone、`isolated_home`；**每一步之前把 `AGORA_NOW` 往前推**，照 C-12a 的寫法，否則同秒時 ULID 較大者先（F-4），快的機器上順序會翻。開一張 d 單，只加測試）：
 
@@ -671,15 +676,15 @@ S-21～S-23 只用合成內容和沒用過的序號，和 V-1c 一樣，不碰�
 |---|---|---|---|
 | Q-3 | v9 的 T-9 要不要加「回退時摘掉 T 的 `role:R`」（`462-v1` §12.5 的「回退 1」有寫，T-9 沒有），**順序是 PM `exited` 之後、開 S 之前**（A.3 第 10 步） | PMO（atelier 照 harness 流程改） | **加**。可以關掉 H-2。`462-v1` §12.5 寫的是開 S「之後」摘，以本附錄的順序為準。atelier 的改動不在本 repo 的設計 PR 裡 |
 | Q-4 | 兩次 fork 的 `--header`：(a) 探針 P 用 `--header` 只留 `twin-probe:`；(b) T 用 `--header` 不帶 `role:R`，探針判「對」之後才 `edit --add-tag role:R`（第 3、7′ 步） | PMO | **兩個都要**。用的是現有的旗標；(a) 關掉 H-1，(b) 關掉 H-6（理由與代價見上面「H-6 的處置」）。「用完就刪」照舊 |
-| Q-5 | H-3 與「明示不記」：(a) 在操作步驟裡摘掉 `role:<$C>`（A.3 第 5 步）；(b) 要不要補回「明示不記」（**待本人**，見下面四行） | PMO（a）；**本人**（b，經 PMO） | **11-29 先用 (a)**，不用等任何人改程式。(b) 照下面四行由本人決定；補回了，就可以拿掉 (a) |
+| Q-5 | H-3 與「明示不記」：(a) 在操作步驟裡摘掉 `role:<$C>`（A.3 第 5 步）；(b) 要不要補回「明示不記」（**待本人**，見下面四行） | PMO（a）；**本人**（b，經 PMO） | **11-29 先用 (a)**，不用等任何人改程式。(b) 照下面四行由本人決定；補回了而且 R-21 同步改，才可以拿掉 (a) |
 | Q-6 | C-14～C-16 的 d 單誰開、什麼時候做 | PM | 和 11-29 的實跑無關，隨時可以做 |
-| Q-7 | X-1（PMO 開 PM 的工具不吃 `session`）要在 11-29 之前修，還是先靠核對 | PMO | 11-29 先做 S-20 的兩個核對（回應的 `session`、寫回之後的第一列）。工具照 A.5 末的要求另外排 |
+| Q-7 | X-1（PMO 開 PM 的工具不吃 `session`）要在 11-29 之前修，還是先靠核對 | PMO | 11-29 先做 S-20 的兩個核對（回應的 `session`、寫回之後的第一列）。工具照 A.5 末的要求另外排。**Q-3、Q-4 要在 11-29 之前落地**（S-20 的前提，見 A.6） |
 | Q-8 | R-20 (b)（另存新 id 時要看得到）、(c)（崩潰重開沿用 Session）要不要在 MLP 開單 | PM → MLP | (c) **可以開、不急**：照 A.3 第 10 步的順序摘 tag，H-2′ 就關掉了；只有摘 tag 漏做時才用得到（H-5 也已由探針擋下）。(b) 先不開：孿生步驟用 L-7 避開了，沒有其他用途再說 |
 
 **Q-5 (b)「明示不記」（待本人；PMO 會連同本附錄問本人）**：
-- **現況**：MyLinuxPool#1513 之後，`remember:false`＝`fresh:true`，仍存回並帶 `role:<id>`；沒有任何請求可以「明示不記」（sidecar 內部的總開關只給測試用）。
+- **現況**：MyLinuxPool#1513 之後，`remember:false`＝`fresh:true`，仍存回並帶 `role:<id>`；沒有任何請求可以「明示不記」。
 - **原決定**：本人 2026-11-10「召回不分角色、預設記、啟動方每次可明示不記」（R-1 (3)）。
-- **補回的成本**：sidecar 加一個值（例如「不帶 `session` 的 `remember:false`」＝不查找、不 import、不加 tag）＋測試＋文件，是 MLP 的一張小單（#1513 取消它的理由我們不知道，這裡不猜）。對孿生：操作員 `$C` 可以真正不留 `role:<$C>`，H-3 的摘 tag 步驟可以省掉。
+- **補回的成本**：sidecar 加一個值（例如「不帶 `session` 的 `remember:false`」＝不查找、不 import、不加 tag）＋測試＋文件，大小由 MLP 估（#1513 取消它的理由我們不知道，這裡不猜）。對孿生：`$C` 一律明指 `session: T`，上面那個例子管不到它；要同時涵蓋帶 `session` 的 open，R-21 也要改（`session`＋不記時仍要把壓縮寫回 T，只是不加 role tag）；否則 H-3 的摘 tag 步驟仍要保留。
 - **不補的影響**：「一單一開、不想污染」的 agent 只能用 `fresh:true`（仍存回、帶 role tag；序號重用或不明指重開時可能被接到）；孿生的操作員和探針要多一步摘 tag（H-3）；一次性 agent 的 Session 也會上 Drive。
 
 ### A.8 架構清單（附錄 A）
@@ -688,7 +693,7 @@ S-21～S-23 只用合成內容和沒用過的序號，和 V-1c 一樣，不碰�
   - agora：儲存、tag、搜尋、接續、鎖。
   - sidecar：決定接哪一個。
   - atelier（PMO 的步驟）與 PMO 開 PM 的工具：什麼時候切換、做哪些衛生、把 `session` 轉送給 sidecar。
-  - 本附錄的改動：在 atelier 加三個摘 tag 的動作、一個晚加 tag 的動作（第 7′ 步），加上「`$C` 和 PM 同一種 agent」的條件（Q-3～Q-5）；對 sidecar 把現況固定成契約（R-21），只補兩個缺口（R-20 (c)，(b) 低優先）；對 PMO 開 PM 的工具一條要求（A.5 末，X-1）。
+  - 本附錄的改動：在 atelier 加拿掉 tag 的動作（T、P 的 fork 各用 `--header`；T 摘 `role:<$C>`；回退摘 `role:R`）、一個晚加 tag 的動作（第 7′ 步），加上「`$C` 和 PM 同一種 agent」的條件（Q-3～Q-5）；對 sidecar 把現況固定成契約（R-21），只補兩個缺口（R-20 (c)，(b) 低優先）；對 PMO 開 PM 的工具一條要求（A.5 末，X-1）。
 - **介面**：
   - agora 側沒有新的指令或旗標：`--fork`、`--header`、`edit --header`、`edit --add-tag` 都已經有。
   - sidecar 的 open 沒有新欄位，只把現有欄位之間的優先序和衝突寫清楚（A.2）。
