@@ -213,6 +213,42 @@ PM_V9_KEY_SENTENCES = tuple(s for s in PM_V8_KEY_SENTENCES if s != PM_V8_T8_SENT
     + PM_V9_NEW_SENTENCES
 #: The v8 sentences v9 still carries: all of `PM_V8_NEW_SENTENCES` but the T-8 one.
 PM_V8_NEW_SENTENCES_KEPT_IN_V9 = tuple(s for s in PM_V8_NEW_SENTENCES if s != PM_V8_T8_SENTENCE)
+#: The v9 T-9 line (item 7) that v10 replaces, verbatim. The pmo pm v9 file carries
+#: the same line. v10 must not keep it (see `REPLACED_SENTENCES`).
+T9_V9_SENTENCE = (
+    "7. **衛生（T-9）**：T 帶 tag `twin:<S 的 ULID>`；探針用的 fork 用完就刪；"
+    "回退一律明指 `session`，不調 `updated_at`；切換後的 T 不刪（等本人看過結果）。"
+)
+#: The body of the v8／v9 T-9 line (after `7. **衛生（T-9）**：`). It is a key sentence
+#: of worker-team pm v8 and v9 and of pmo pm v9, so each of those gates stops at v9
+#: (`pm_version_8_or_9`, `pmo_version_9_only`); v10 drops it.
+T9_OLD_FRAGMENT = (
+    "T 帶 tag `twin:<S 的 ULID>`；探針用的 fork 用完就刪；回退一律明指 `session`，不調 `updated_at`；"
+    "切換後的 T 不刪（等本人看過結果）。"
+)
+#: v8's sentences as v10 carries them: `PM_V8_NEW_SENTENCES_KEPT_IN_V9` minus the T-9 body.
+PM_V8_NEW_SENTENCES_KEPT_IN_V10 = tuple(s for s in PM_V8_NEW_SENTENCES_KEPT_IN_V9 if s != T9_OLD_FRAGMENT)
+#: What worker-team pm `v10` (PMO 2026-11-27 轉達本人的決定；依 439 附錄 A.3) adds: the T-9
+#: hygiene order, written as one item 7 whose fragments are each a key sentence, so
+#: deleting or rewording one goes red. The v9 T-9 line is replaced, not kept.
+#: The step order ①～⑥ is checked separately (`T9_STEP_MARKERS`).
+PM_V10_NEW_SENTENCES = (
+    "**衛生（T-9）**（PMO 2026-11-27 轉達本人的決定，依 `439-role-session-recall.md` 附錄 A.3）：",
+    "這是 PMO 與操作員的操作順序（你不自己做，只在前後；你要知道它才能核對）",
+    "全程明指 session",
+    "從 S fork 出 T 時用 `--agent <PM 的種類>` 與 `--header` 重寫 tags，**不帶 `role:<PM 的 id>`**",
+    "操作員要和 PM 同一種 agent",
+    "把 T 的 `role:<操作員的 id>`（有的話）拿掉、加上 `twin:<S 的 ULID>`",
+    "探針的 fork 用 `--header 'tags=[twin-probe:<T 的 ULID>]'`，探針結束後刪",
+    "探針判「對」、探針的 fork 刪掉之後，才對 T 加 `role:<PM 的 id>`，判「錯」就不加、不切換",
+    "重開 PM 用 `session: T`，核對回應的 `session` 是 T，PM 第一次寫回後確認 `role:` 搜尋的第一列是 T",
+    "回退照順序：Close SOP 等到 `exited` → 摘掉 T 的 `role:<PM 的 id>` → 開 PM 帶 `session: S`（同種類）",
+    "回退一律明指 `session`，不調 `updated_at`；S 永遠不刪，切換後的 T 不刪（等本人看過結果）",
+)
+PM_V10_KEY_SENTENCES = tuple(s for s in PM_V9_KEY_SENTENCES if s != T9_OLD_FRAGMENT) \
+    + PM_V10_NEW_SENTENCES
+#: The T-9 steps of item 7 (pm and pmo v10), in the order they must appear (F-4).
+T9_STEP_MARKERS = ("①", "②", "③", "④", "⑤", "⑥")
 #: The sentence v6:162 (`dont`) keeps and v7 must not weaken: teammates never
 #: dispatch workflows. Only the PM's own `ci.yml` exception above is new.
 PM_V6_TEAMMATE_DISPATCH_SENTENCE = (
@@ -489,6 +525,28 @@ PMO_V9_NEW_SENTENCES = (
     "K-1 超過 N 且在安全點才提出；探針「錯」、正在跑長指令、同一角色一天已 2 次，都不切，停下回報。",
 )
 PMO_V9_KEY_SENTENCES = PMO_V8_KEY_SENTENCES + PMO_V9_NEW_SENTENCES
+#: v9's pmo sentences as v10 carries them: `PMO_V9_NEW_SENTENCES` minus the T-9 body.
+PMO_V9_NEW_SENTENCES_KEPT_IN_V10 = tuple(s for s in PMO_V9_NEW_SENTENCES if s != T9_OLD_FRAGMENT)
+#: What pmo pm `v10` (PMO 2026-11-27 轉達本人的決定；依 439 附錄 A.3) adds: the same T-9
+#: hygiene order as worker-team pm v10, with `<該角色的 id>` for the role tag (the
+#: PMO is a role too) and "該角色" wording throughout item 7 (no bare "PM", see
+#: `test_pmo_v10_item7_says_the_role_not_pm`). Each fragment is a key sentence; the v9
+#: T-9 line is replaced. The step order ①～⑥ is checked separately (`T9_STEP_MARKERS`).
+PMO_V10_NEW_SENTENCES = (
+    "**衛生（T-9）**（PMO 2026-11-27 轉達本人的決定，依 `439-role-session-recall.md` 附錄 A.3）：",
+    "這是操作員與執行者的操作順序（你不自己做）",
+    "全程明指 session",
+    "從 S fork 出 T 時用 `--agent <該角色的種類>` 與 `--header` 重寫 tags，**不帶 `role:<該角色的 id>`**",
+    "操作員要和該角色同一種 agent",
+    "把 T 的 `role:<操作員的 id>`（有的話）拿掉、加上 `twin:<S 的 ULID>`",
+    "探針的 fork 用 `--header 'tags=[twin-probe:<T 的 ULID>]'`，探針結束後刪",
+    "探針判「對」、探針的 fork 刪掉之後，才對 T 加 `role:<該角色的 id>`，判「錯」就不加、不切換",
+    "該角色重開用 `session: T`，核對回應的 `session` 是 T，該角色第一次寫回後確認 `role:` 搜尋的第一列是 T",
+    "回退照順序：Close SOP 等到 `exited` → 摘掉 T 的 `role:<該角色的 id>` → 開該角色帶 `session: S`（同種類）",
+    "回退一律明指 `session`，不調 `updated_at`；S 永遠不刪，切換後的 T 不刪（等本人看過結果）",
+)
+PMO_V10_KEY_SENTENCES = tuple(s for s in PMO_V9_KEY_SENTENCES if s != T9_OLD_FRAGMENT) \
+    + PMO_V10_NEW_SENTENCES
 #: The v6:101 line the v7 rewrite must not keep whole (design §6): its「停太久」
 #: and「必要時」are replaced by the O-1／O-2 threshold and action. Compared after the
 #: bold markers are stripped, like the `pm` v5 guard.
@@ -614,6 +672,7 @@ PM_V6_REL = "atelier/worker-team/pm/v6.md"
 PM_V7_REL = "atelier/worker-team/pm/v7.md"
 PM_V8_REL = "atelier/worker-team/pm/v8.md"
 PM_V9_REL = "atelier/worker-team/pm/v9.md"
+PM_V10_REL = "atelier/worker-team/pm/v10.md"
 IMPL_V2_REL = "atelier/worker-team/impl/v2.md"
 REV_V2_REL = "atelier/worker-team/rev/v2.md"
 IMPL_V3_REL = "atelier/worker-team/impl/v3.md"
@@ -625,6 +684,7 @@ PMO_V6_REL = "atelier/pmo/pm/v6.md"
 PMO_V7_REL = "atelier/pmo/pm/v7.md"
 PMO_V8_REL = "atelier/pmo/pm/v8.md"
 PMO_V9_REL = "atelier/pmo/pm/v9.md"
+PMO_V10_REL = "atelier/pmo/pm/v10.md"
 ARCH_REL = "atelier/worker-team/arch/v1.md"
 ARCH_V2_REL = "atelier/worker-team/arch/v2.md"
 ARCH_V3_REL = "atelier/worker-team/arch/v3.md"
@@ -834,9 +894,16 @@ def findings_for(path: str, text: str) -> Findings:
     # `pm` v8's T-8 sentence is replaced by v9, so only v8 itself must carry it.
     pm_version_8_only = team == "worker-team" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) == 8
+    # `pm` v8 and v9 carry the T-9 body (`T9_OLD_FRAGMENT`); v10 replaces it.
+    pm_version_8_or_9 = team == "worker-team" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) in (8, 9)
     # `pm` v9 splits the T-8 record between PMO and PM; v8 and earlier are not bound.
     pm_version_9_or_later = team == "worker-team" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 9
+    # `pm` v10 replaces the T-9 hygiene line (item 7) with the 439 A.3 order; v9
+    # and earlier are not bound by it.
+    pm_version_10_or_later = team == "worker-team" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) >= 10
     pmo_version_4_or_later = team == "pmo" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 4
     # The H4 trigger sentence is version-bound (see its list above): v3 and v4
@@ -862,6 +929,12 @@ def findings_for(path: str, text: str) -> Findings:
     # append-only and not bound by it.
     pmo_version_9_or_later = team == "pmo" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 9
+    # `pmo` v9 alone carries the T-9 body (`T9_OLD_FRAGMENT`); v10 replaces it.
+    pmo_version_9_only = team == "pmo" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) == 9
+    # `pmo` v10 replaces the T-9 hygiene line (item 7) with the 439 A.3 order.
+    pmo_version_10_or_later = team == "pmo" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) >= 10
     # `arch` is version-bound per file (#403): v1 keeps the「長期常駐」sentence,
     # v2 replaces it with「按需開」, so each list applies only to its own version.
     # `comm` (#236, #432): worker-team pm v4+, impl v2+, rev v2+, arch v3+
@@ -895,14 +968,18 @@ def findings_for(path: str, text: str) -> Findings:
             (pm_version_6_or_later, PM_V6_NEW_SENTENCES, "v6 起的 worker-team pm"),
             (pm_version_7_or_later, PM_V7_NEW_SENTENCES, "v7 起的 worker-team pm"),
             (pm_version_8_only, (PM_V8_T8_SENTENCE,), "v8 的 worker-team pm"),
-            (pm_version_8_or_later, PM_V8_NEW_SENTENCES_KEPT_IN_V9, "v8 起的 worker-team pm"),
+            (pm_version_8_or_later, PM_V8_NEW_SENTENCES_KEPT_IN_V10, "v8 起的 worker-team pm"),
+            (pm_version_8_or_9, (T9_OLD_FRAGMENT,), "v8、v9 的 worker-team pm"),
             (pm_version_9_or_later, PM_V9_NEW_SENTENCES, "v9 起的 worker-team pm"),
+            (pm_version_10_or_later, PM_V10_NEW_SENTENCES, "v10 起的 worker-team pm"),
             (pmo_version_4_or_later, PMO_V4_KEY_SENTENCES, "v4 起的 pmo pm"),
             (pmo_version_5, PMO_V5_KEY_SENTENCES, "v5 的 pmo pm"),
             (pmo_version_6_or_later, PMO_V6_KEY_SENTENCES, "v6 起的 pmo pm"),
             (pmo_version_7_or_later, PMO_V7_NEW_SENTENCES, "v7 起的 pmo pm"),
             (pmo_version_8_or_later, PMO_V8_NEW_SENTENCES, "v8 起的 pmo pm"),
-            (pmo_version_9_or_later, PMO_V9_NEW_SENTENCES, "v9 起的 pmo pm"),
+            (pmo_version_9_or_later, PMO_V9_NEW_SENTENCES_KEPT_IN_V10, "v9 起的 pmo pm"),
+            (pmo_version_9_only, (T9_OLD_FRAGMENT,), "v9 的 pmo pm"),
+            (pmo_version_10_or_later, PMO_V10_NEW_SENTENCES, "v10 起的 pmo pm"),
             (role == "impl" and is_v1_or_later, IMPL_KEY_SENTENCES, "v1 起的 impl"),
             (comm_required, (COMM_SENTENCE,), "宣告 comm 的版本（pm v4／impl v2／rev v2／arch v3／pmo v7 起）"),
             (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev"),
@@ -1206,6 +1283,8 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     + [(PM_V7_REL, sentence, "關鍵句") for sentence in PM_V7_KEY_SENTENCES]
     + [(PM_V8_REL, sentence, "關鍵句") for sentence in PM_V8_KEY_SENTENCES]
     + [(PM_V9_REL, sentence, "關鍵句") for sentence in PM_V9_KEY_SENTENCES]
+    + [(PM_V10_REL, sentence, "關鍵句") for sentence in PM_V10_KEY_SENTENCES]
+    + [(PMO_V10_REL, sentence, "關鍵句") for sentence in PMO_V10_KEY_SENTENCES]
     + [(PMO_V8_REL, sentence, "關鍵句") for sentence in PMO_V8_KEY_SENTENCES]
     + [(IMPL_V2_REL, sentence, "關鍵句") for sentence in IMPL_V2_KEY_SENTENCES]
     + [(REV_V2_REL, sentence, "關鍵句") for sentence in REV_V2_KEY_SENTENCES]
@@ -1899,9 +1978,7 @@ def test_pmo_v8_has_matching_version_flags():
     assert not findings_for(PMO_V8_REL, text).errors
 
 
-def test_pmo_v9_is_latest_and_has_matching_version_flags():
-    paths = list((HARNESS_ROOT / "pmo/pm").glob("v*.md"))
-    assert max(paths, key=lambda p: int(p.stem[1:])).name == "v9.md"
+def test_pmo_v9_has_matching_version_flags():
     text = (REPO / PMO_V9_REL).read_text(encoding="utf-8")
     assert "id: atelier:pmo-pm@v9\n" in text
     assert "version: v9\n" in text
@@ -1922,6 +1999,90 @@ def test_pmo_v9_without_a_v8_sentence_is_flagged(sentence):
     """pmo v9 必須保留 v8 的每一句；刪掉任一句就紅。"""
     text = (REPO / PMO_V9_REL).read_text(encoding="utf-8")
     assert findings_for(PMO_V9_REL, text.replace(sentence, "")).errors
+
+
+def test_pmo_v10_is_latest_and_has_matching_version_flags():
+    paths = list((HARNESS_ROOT / "pmo/pm").glob("v*.md"))
+    assert max(paths, key=lambda p: int(p.stem[1:])).name == "v10.md"
+    text = (REPO / PMO_V10_REL).read_text(encoding="utf-8")
+    assert "id: atelier:pmo-pm@v10\n" in text
+    assert "version: v10\n" in text
+    assert "# PMO（v10）\n" in text
+    assert not findings_for(PMO_V10_REL, text).errors
+
+
+@pytest.mark.parametrize("sentence", PMO_V10_NEW_SENTENCES)
+def test_pmo_v10_without_a_new_sentence_is_flagged(sentence):
+    """v10 的 T-9 衛生順序每一段刪掉或改掉就紅（負向測試）。"""
+    text = (REPO / PMO_V10_REL).read_text(encoding="utf-8")
+    assert sentence in text
+    assert findings_for(PMO_V10_REL, text.replace(sentence, "", 1)).errors
+
+
+@pytest.mark.parametrize("sentence", [s for s in PMO_V9_KEY_SENTENCES if s != T9_OLD_FRAGMENT])
+def test_pmo_v10_without_a_v9_sentence_is_flagged(sentence):
+    """pmo v10 必須保留 v9 的每一句（T-9 舊句除外，它被 v10 取代）；刪掉任一句就紅。"""
+    text = (REPO / PMO_V10_REL).read_text(encoding="utf-8")
+    assert findings_for(PMO_V10_REL, text.replace(sentence, "")).errors
+
+
+def test_pmo_v10_drops_the_v9_t9_sentence():
+    """v9 的 T-9 舊句不得留在 pmo v10（同一衛生順序取代它）。"""
+    assert T9_V9_SENTENCE in (REPO / PMO_V9_REL).read_text(encoding="utf-8")
+    text = (REPO / PMO_V10_REL).read_text(encoding="utf-8")
+    assert T9_V9_SENTENCE not in text, "pmo v10 還留著 v9 的 T-9 舊句"
+    assert T9_OLD_FRAGMENT not in text, "pmo v10 還留著 v9 的 T-9 舊句的正文"
+
+
+def _t9_item(text):
+    """The one line of item 7 (T-9) in a harness file."""
+    lines = [line for line in text.splitlines() if line.startswith("7. **衛生（T-9）**")]
+    assert len(lines) == 1, "item 7 (T-9) must be exactly one line"
+    return lines[0]
+
+
+@pytest.mark.parametrize("rel", [PM_V10_REL, PMO_V10_REL])
+def test_t9_steps_appear_once_each_and_in_order(rel):
+    """T-9 的 ①～⑥ 在 item 7 裡各出現一次且依序；對調任兩步就紅（A.3 的順序是規矩）。"""
+    item = _t9_item((REPO / rel).read_text(encoding="utf-8"))
+    for marker in T9_STEP_MARKERS:
+        assert item.count(marker) == 1, f"{marker} 應出現一次"
+    positions = [item.index(marker) for marker in T9_STEP_MARKERS]
+    assert positions == sorted(positions), "T-9 ①～⑥ 的順序不對"
+
+
+@pytest.mark.parametrize("phrase", ["重開 PM", "PM 第一次寫回", "開 PM 帶", "和 PM 同一種"])
+def test_pmo_v10_item7_says_the_role_not_pm(phrase):
+    """pmo v10 的 T-9 句用「該角色」；PMO 自己也是一個角色，寫死「PM」會讓它讀成只對 PM。"""
+    item = _t9_item((REPO / PMO_V10_REL).read_text(encoding="utf-8"))
+    assert phrase not in item
+
+
+def test_pmo_v9_is_not_bound_by_the_v10_sentences():
+    """pmo v10 的新句只約束 pmo pm v10 起；v9 沒有它們時仍無錯。"""
+    text = (REPO / PMO_V9_REL).read_text(encoding="utf-8")
+    for sentence in PMO_V10_NEW_SENTENCES:
+        assert sentence not in text, f"pmo v9 不該有 v10 的句子：「{sentence}」"
+    assert not findings_for(PMO_V9_REL, text).errors
+
+
+@pytest.mark.parametrize("old,new", [
+    ("你不自己關自己，也不自己執行切換。", "你可以自己關自己。"),
+    ("碰到真機、憑證、被擋的動作的規矩不變，不請別的 session 代做。",
+     "碰到真機、憑證、被擋的動作的規矩不變，可以請別的 session 代做。"),
+])
+def test_pmo_v10_weakening_the_no_self_close_rule_is_flagged(old, new):
+    text = (REPO / PMO_V10_REL).read_text(encoding="utf-8")
+    assert old in text
+    assert findings_for(PMO_V10_REL, text.replace(old, new, 1)).errors
+
+
+@pytest.mark.parametrize("rel,old,new", [
+    (PMO_V10_REL, "@v10", "@v9"), (PMO_V10_REL, "version: v10", "version: v9"),
+])
+def test_a_wrong_version_flag_on_pmo_v10_is_flagged(rel, old, new):
+    text = (REPO / rel).read_text(encoding="utf-8")
+    assert findings_for(rel, text.replace(old, new, 1)).errors
 
 
 @pytest.mark.parametrize("old,new", [
@@ -1979,9 +2140,7 @@ def test_pm_v8_has_matching_version_flags():
     assert not findings_for(PM_V8_REL, text).errors
 
 
-def test_pm_v9_is_latest_and_has_matching_version_flags():
-    paths = list((HARNESS_ROOT / "worker-team/pm").glob("v*.md"))
-    assert max(paths, key=lambda p: int(p.stem[1:])).name == "v9.md"
+def test_pm_v9_has_matching_version_flags():
     text = (REPO / PM_V9_REL).read_text(encoding="utf-8")
     assert "id: atelier:worker-team-pm@v9\n" in text
     assert "version: v9\n" in text
@@ -2002,6 +2161,73 @@ def test_pm_v9_without_a_v8_sentence_is_flagged(sentence):
     """v9 必須保留 v8 的每一句（T-8 舊句除外，它被 v9 取代）；刪掉任一句就紅。"""
     text = (REPO / PM_V9_REL).read_text(encoding="utf-8")
     assert findings_for(PM_V9_REL, text.replace(sentence, "")).errors
+
+
+def test_pm_v10_is_latest_and_has_matching_version_flags():
+    paths = list((HARNESS_ROOT / "worker-team/pm").glob("v*.md"))
+    assert max(paths, key=lambda p: int(p.stem[1:])).name == "v10.md"
+    text = (REPO / PM_V10_REL).read_text(encoding="utf-8")
+    assert "id: atelier:worker-team-pm@v10\n" in text
+    assert "version: v10\n" in text
+    assert "# PM（v10）\n" in text
+    assert not findings_for(PM_V10_REL, text).errors
+
+
+@pytest.mark.parametrize("sentence", PM_V10_NEW_SENTENCES)
+def test_pm_v10_without_a_new_sentence_is_flagged(sentence):
+    """v10 的 T-9 衛生順序每一段刪掉或改掉就紅（負向測試）。"""
+    text = (REPO / PM_V10_REL).read_text(encoding="utf-8")
+    assert sentence in text
+    assert findings_for(PM_V10_REL, text.replace(sentence, "", 1)).errors
+
+
+@pytest.mark.parametrize("sentence", [s for s in PM_V9_KEY_SENTENCES if s != T9_OLD_FRAGMENT])
+def test_pm_v10_without_a_v9_sentence_is_flagged(sentence):
+    """v10 必須保留 v9 的每一句（T-9 舊句除外，它被 v10 取代）；刪掉任一句就紅。"""
+    text = (REPO / PM_V10_REL).read_text(encoding="utf-8")
+    assert findings_for(PM_V10_REL, text.replace(sentence, "")).errors
+
+
+def test_pm_v10_drops_the_v9_t9_sentence():
+    """v9 的 T-9 舊句不得留在 v10（PMO 2026-11-27 轉達本人決定的衛生順序取代它）。"""
+    assert T9_V9_SENTENCE in (REPO / PM_V9_REL).read_text(encoding="utf-8")
+    text = (REPO / PM_V10_REL).read_text(encoding="utf-8")
+    assert T9_V9_SENTENCE not in text, "v10 還留著 v9 的 T-9 舊句"
+    assert T9_OLD_FRAGMENT not in text, "v10 還留著 v9 的 T-9 舊句的正文"
+
+
+def test_pm_v9_is_not_bound_by_the_v10_sentences():
+    """v10 的新句只約束 worker-team pm v10 起；v9 沒有它們時仍無錯。"""
+    text = (REPO / PM_V9_REL).read_text(encoding="utf-8")
+    for sentence in PM_V10_NEW_SENTENCES:
+        assert sentence not in text, f"v9 不該有 v10 的句子：「{sentence}」"
+    assert not findings_for(PM_V9_REL, text).errors
+
+
+def test_pm_v10_allowing_the_role_tag_on_the_fork_is_flagged():
+    """T-9 ①：T 還沒驗，fork 時不能帶 `role:<PM 的 id>`；放寬成「帶」就紅。"""
+    text = (REPO / PM_V10_REL).read_text(encoding="utf-8")
+    old = "**不帶 `role:<PM 的 id>`**"
+    assert old in text
+    assert findings_for(PM_V10_REL, text.replace(old, "**帶 `role:<PM 的 id>`**", 1)).errors
+
+
+@pytest.mark.parametrize("old,new", [
+    ("你不能自己關自己，也不自己動 PM 層。", "你可以自己關自己。"),
+    ("PM 不自己關自己、不請別的 session 代做。", "PM 可以請別的 session 代做。"),
+])
+def test_pm_v10_weakening_the_no_self_close_rule_is_flagged(old, new):
+    text = (REPO / PM_V10_REL).read_text(encoding="utf-8")
+    assert old in text
+    assert findings_for(PM_V10_REL, text.replace(old, new, 1)).errors
+
+
+@pytest.mark.parametrize("rel,old,new", [
+    (PM_V10_REL, "@v10", "@v9"), (PM_V10_REL, "version: v10", "version: v9"),
+])
+def test_a_wrong_version_flag_on_pm_v10_is_flagged(rel, old, new):
+    text = (REPO / rel).read_text(encoding="utf-8")
+    assert findings_for(rel, text.replace(old, new, 1)).errors
 
 
 def test_pm_v9_drops_the_v8_t8_sentence():
@@ -2143,6 +2369,14 @@ REPLACED_SENTENCES: dict[tuple[str, int, int], dict[str, str]] = {
         "8. **記錄（T-8）**：每次切換記 S、T、K-1p／K-1c／K-1r、探針結果、有沒有回退、停機時間。":
             "PMO 11-22 21:47Z 決定的 T-8 分工：PMO 記切換與交 twin-switches.jsonl，PM 只回報 K-1r 與 T-5 自評",
     },
+    ("worker-team/pm", 9, 10): {
+        T9_V9_SENTENCE:
+            "PMO 2026-11-27 轉達本人決定的 T-9 衛生順序（依 439 附錄 A.3）取代 v9 的這一行",
+    },
+    ("pmo/pm", 9, 10): {
+        T9_V9_SENTENCE:
+            "PMO 2026-11-27 轉達本人決定的 T-9 衛生順序（依 439 附錄 A.3）取代 v9 的這一行（pmo 版的角色 id 寫法見 v10）",
+    },
 }
 
 #: The version gate per `<team>/<role>`: a pair (vN, vN+1) is checked only when
@@ -2220,9 +2454,9 @@ GATED_REAL_PAIRS = [(o, n) for o, n in REAL_PAIRS if is_gated(n)]
 UNGATED_REAL_PAIRS = [(o, n) for o, n in REAL_PAIRS if not is_gated(n)]
 
 
-def test_the_gated_real_pairs_include_the_five_known_ones():
+def test_the_gated_real_pairs_include_the_known_ones():
     newer = {n for _, n in GATED_REAL_PAIRS}
-    assert {PM_V9_REL, PMO_V8_REL, IMPL_V3_REL, REV_V3_REL, ARCH_V4_REL} <= newer
+    assert {PM_V9_REL, PM_V10_REL, PMO_V8_REL, PMO_V10_REL, IMPL_V3_REL, REV_V3_REL, ARCH_V4_REL} <= newer
 
 
 @pytest.mark.parametrize("older,newer", GATED_REAL_PAIRS)
@@ -2241,7 +2475,7 @@ def test_an_ungated_real_pair_is_not_checked(older, newer):
     assert pair_violations(newer, old, new) is None
 
 
-@pytest.mark.parametrize("rel", [IMPL_V3_REL, REV_V3_REL, ARCH_V4_REL])
+@pytest.mark.parametrize("rel", [IMPL_V3_REL, REV_V3_REL, ARCH_V4_REL, PM_V10_REL, PMO_V10_REL])
 def test_a_listed_replacement_needs_its_own_pair(rel):
     """白名單精準到版本組：拿掉白名單，那一對版本就紅（替換句確實被用到）。"""
     old = (REPO / _older(rel)).read_text(encoding="utf-8")
