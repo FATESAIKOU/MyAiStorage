@@ -19,6 +19,7 @@ from angareion.backend import (
     Cursor,
     PageBackend,
     RateLimitError,
+    WriteRefusedError,
     page_level,
 )
 from angareion.fake_backend import FakeBackend
@@ -254,6 +255,40 @@ def test_c2_the_github_message_is_one_line_short_and_token_free():
     assert "***" in text
     assert "line one line two" in text
     assert len(text) < 300
+
+
+# 11-26 real sample: a page at 2500 refused a write with HTTP 403 (design 542 §4.1, §10 item 1).
+# The text is the GitHub message as observed; it names no repo and no issue.
+REAL_2500_MESSAGE = "Commenting is disabled on issues with more than 2500 comments"
+
+
+def test_c2_the_real_2500_sample_is_a_full_channel():
+    transport = Transport()
+    _refused_post(transport, status=403, message=REAL_2500_MESSAGE, comments=2500)
+    with pytest.raises(ChannelFullError) as excinfo:
+        _github(transport).send(GENERAL, _msg())
+    err = excinfo.value
+    assert err.presumed is False and err.count == 2500
+    assert "is full" in str(err) and "looks full" not in str(err)
+    assert "HTTP 403" in str(err)
+    assert not re.search(r"#\d+", str(err))
+    assert OWNER_REPO not in str(err)
+
+
+def test_c2_the_same_message_at_a_low_count_follows_the_current_rule():
+    transport = Transport()
+    _refused_post(transport, status=403, message=REAL_2500_MESSAGE, comments=2450)
+    with pytest.raises(ChannelFullError) as excinfo:
+        _github(transport).send(GENERAL, _msg())
+    assert excinfo.value.presumed is True and excinfo.value.count == 2450
+    assert "looks full (or the token was refused)" in str(excinfo.value)
+
+    transport = Transport()
+    _refused_post(transport, status=403, message=REAL_2500_MESSAGE, comments=100)
+    with pytest.raises(WriteRefusedError) as excinfo:
+        _github(transport).send(GENERAL, _msg())
+    assert not isinstance(excinfo.value, ChannelFullError)
+    assert "HTTP 403" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------- C-3
