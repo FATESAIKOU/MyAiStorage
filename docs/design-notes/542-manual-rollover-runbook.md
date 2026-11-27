@@ -38,6 +38,8 @@
 
    舊版不認得這個旗標，會印用法錯誤、exit 不是 0。只認「exit 0 而且含 `paged-read`」，不看非 0 的值是多少。
 
+   `paged-write` 只有要執行 `angareion channel rollover` 的那一台需要（通常是 PMO 的機器）；沒有它只代表那一台不能用指令換頁，要改用第 4 節。`paged-read` 仍是每一份安裝的必要條件。
+
 2. **設定拉取間隔**：angareion 設定檔的 `config_pull_interval` 在 (0, 21600] 秒之間（大於 0、不超過 6 小時）。設定檔沒有這個鍵時是預設值 900。
 
    ```bash
@@ -84,7 +86,47 @@
 
 3. 確認註冊簿上沒有別人正在換這個頻道：看註冊簿最近的留言，沒有 `"channel": "<頻道名>"` 的 `rollover` 還沒落地。
 
-## 3. 開新頁並驗證
+## 3. 主要步驟：`angareion channel rollover`
+
+用 `angareion channel rollover` 一次做完開新頁、登記、等落地。它**不看則數**，所以只在 PMO 決定要換頁時才跑；同一頁上再跑一次，會再開一張新頁。第 2 節的前置確認（channels.json 與則數）仍照做，但 `from` 不必手填，指令自己會強制 fetch。
+
+1. 執行（用本人的 `gh`／token，不要用 bot token，見文件開頭）：
+
+   ```bash
+   angareion channel rollover <頻道名>; echo "exit=$?"
+   # 期待：stdout 印出 <頻道名>；exit=0
+   ```
+
+   它依序做：
+
+   - 先強制 fetch 註冊簿（不用定期拉的那一份），在 `<頻道 repo>` 開一張新 issue（標題＝頻道名），再在註冊簿貼一則 `rollover` 留言（`from` 是 channels.json 的現頁）。
+   - 等本機設定落地，上限 2 分鐘。逾時只印一行 `Notice: …`，exit 仍是 0；之後照第 5 節第 2 步用 `git fetch` 確認 main。
+   - 成功時 stdout 印出頻道名。
+
+   exit 碼：
+
+   | exit | 意思 | 換頁了嗎 |
+   |---|---|---|
+   | 0 | 換頁完成（逾時的 `Notice` 也是 0） | 是 |
+   | 1 | 頻道未註冊，或頻道名不合法 | 否 |
+   | 2 | 失敗（開 issue、貼留言等）；stderr 有原因 | 否 |
+
+   前提：`angareion --capabilities` 的輸出含 `paged-write`；沒有這個指令或這一項，改用第 4 節。
+
+2. 驗證：
+
+   ```bash
+   angareion channel status <頻道名>; echo "exit=$?"
+   # 期待：pages 比換頁前多 1；新頁上 count 從 0 開始
+   ```
+
+   其餘驗證照第 6 節。新頁的編號與 `rollover` 留言本文，可以用第 4 節的 `gh` 指令再看一次，不需要重貼。
+
+## 4. 備案：angareion 不能用時的手動步驟
+
+只有 `angareion channel rollover` 跑不了（找不到指令、沒有 `paged-write`，或它 exit 2 而且查不出原因）才用這一節。以下是原本的 gh 手動做法，步驟與格式不變。
+
+### 4.1 開新頁並驗證
 
 1. 在 `<頻道 repo>` 開一張 issue，標題就是頻道名：
 
@@ -110,7 +152,7 @@
    - 重建不會查 issue 的標題或是否存在（它只驗留言本身），所以這一步只有你能擋。尤其不能把 `<新頁>` 填成別的頻道的頁：GitHub 後端讀一頁時不依訊息的 `channel` 篩選，填錯會讓這個頻道的讀者收到別的頻道的訊息。
    - 標題不對就改標題，或關掉這張再開一張。不要貼 `rollover`。
 
-## 4. 貼 `rollover` 留言
+### 4.2 貼 `rollover` 留言
 
 留言本文恰好是一行 JSON，格式與 `registry.rollover_comment(channel, backend, issue, from_issue)` 的輸出相同（鍵的順序是 `schema, action, channel, backend, issue, from`；分隔是 `", "` 與 `": "`）：
 
