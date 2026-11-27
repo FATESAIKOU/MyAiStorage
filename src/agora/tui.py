@@ -68,6 +68,9 @@ KEYS = {
 
 # --- what each tab lists -------------------------------------------------------
 
+View = tuple[str | None, int, int]       # (cursor key, cursor row, cursor row - scroll_y)
+
+
 @dataclass
 class Row:
     key: str                     # "agora:<ULID>", or "<agent>:<session id>" on the import tab
@@ -109,8 +112,24 @@ def agora_rows(index: store.Index, filters: list, paths: store.Paths | None = No
     return rows
 
 
-def import_rows(index: store.Index, agents: list, paths: store.Paths | None = None) -> list[Row]:
-    """Agent sessions not in agora yet (or talked to since), newest first, leaving out agora's own copies (T5)."""
+def list_agent_sessions(agents: list) -> dict[str, list]:
+    """{agent.name: agent.list_sessions()}; an agent that raises gets [] and leaves the others alone (review U1)."""
+    listed = {}
+    for agent in agents:
+        try:
+            listed[agent.name] = agent.list_sessions()
+        except Exception as e:
+            print(f"[agora] {agent.name} 的 session 清單讀不到：{e}", file=sys.stderr)
+            listed[agent.name] = []
+    return listed
+
+
+def import_rows(index: store.Index, agents: list, paths: store.Paths | None = None,
+                listed: dict[str, list] | None = None) -> list[Row]:
+    """Agent sessions not in agora yet (or talked to since), newest first, leaving out agora's own copies (T5).
+
+    `listed` is what `list_agent_sessions` already read; given, no agent is asked again.
+    """
     skip, own = set(), None
     if paths is not None:
         own = str(paths.state)
@@ -122,13 +141,10 @@ def import_rows(index: store.Index, agents: list, paths: store.Paths | None = No
         skip.update(h.agora_of(hdr).get("previous_sources") or [])
     found = []
     imported_by_source = index.sources()    # one pass, not one scan per listed session (#486)
+    if listed is None:
+        listed = list_agent_sessions(agents)
     for agent in agents:
-        try:
-            listed = agent.list_sessions()
-        except Exception as e:   # one adapter failing leaves the other's list (review U1)
-            print(f"[agora] {agent.name} 的 session 清單讀不到：{e}", file=sys.stderr)
-            listed = []
-        for s in listed:
+        for s in listed.get(agent.name, []):
             key = f"{agent.name}:{s.session_id}"
             if key in skip or (own and (s.dir or "").startswith(own)):
                 continue
@@ -140,6 +156,46 @@ def import_rows(index: store.Index, agents: list, paths: store.Paths | None = No
                 key, [s.session_id[-8:], _short(mark + (s.title or "")), agent.name, _when(s.updated_at), _home(s.dir)],
                 f"{s.session_id} {agent.name} {s.dir or ''} {s.title or ''}", agent.name, s.dir, s.updated_at)))
     return [row for _stamp, row in sorted(found, key=lambda pair: pair[0], reverse=True)]
+
+
+def build_rows(paths: store.Paths, listed: dict[str, list], agents: list) -> dict[str, list[Row]]:
+    """Both tabs, built on the calling thread with its own index (no connection is shared across threads)."""
+    index = store.Index(paths)
+    try:
+        return {"agora": agora_rows(index, [], paths), "import": import_rows(index, agents, paths, listed)}
+    finally:
+        index.db.close()
+
+
+@dataclass(frozen=True)
+class RowChanges:
+    added: int
+    changed: int
+    removed: int
+
+
+def row_changes(old: list[Row], new: list[Row]) -> RowChanges:
+    """Compare two lists by key: added is only in new, removed only in old, changed in both but not equal."""
+    before = {row.key: row for row in old}
+    after = {row.key: row for row in new}
+    return RowChanges(
+        added=sum(1 for key in after if key not in before),
+        changed=sum(1 for key in after if key in before and before[key] != after[key]),
+        removed=sum(1 for key in before if key not in after))
+
+
+def sync_note(changes: RowChanges, dropped_marks: int, *, done: bool, error: str = "") -> str:
+    """The message line after a background sync: what changed on the list, and marks that went with it."""
+    if not (changes.added or changes.changed or changes.removed or dropped_marks):
+        return ""
+    parts = [f"{label} {n}" for label, n in
+             (("新增", changes.added), ("更新", changes.changed), ("移除", changes.removed)) if n]
+    body = "同步完成" if done else "本機清單有更新"
+    if parts:
+        body += "：" + "、".join(parts)
+    if dropped_marks:
+        body += f"；{dropped_marks} 個勾選的列已不在"
+    return f"{error}（{body}）" if error else body
 
 
 def _short(title: str) -> str:
@@ -1118,6 +1174,8 @@ class AgoraApp(App):
         self.agents = agents if agents is not None else [cli.load_agent(name) for name in cli.AGENTS]
         self.index = store.Index(paths)
         self.rows: dict[str, list[Row]] = {"agora": [], "import": []}
+        self._listed: dict[str, list] = {}      # what the agents listed at the last reload
+        self._quiet_key: str | None = None      # a redraw without preview: the row it left under the cursor
         self.tab, self.text, self.content = "agora", "", False      # content: search the conversations
         self.matches: dict[str, set[str] | None] = {"agora": None, "import": None}
         self._filter_timer = None      # the debounce for the content search (T7 P1)
@@ -1231,8 +1289,9 @@ class AgoraApp(App):
 
     def reload(self, keep_marked: bool = False) -> None:
         self.index = store.Index(self.paths)       # local only; no full sync after every action (T6)
+        self._listed = list_agent_sessions(self.agents)
         self.rows = {"agora": agora_rows(self.index, [], self.paths),
-                     "import": import_rows(self.index, self.agents, self.paths)}
+                     "import": import_rows(self.index, self.agents, self.paths, self._listed)}
         if not keep_marked:
             self.marked.clear()
         else:
@@ -1246,8 +1305,19 @@ class AgoraApp(App):
     def shown(self) -> list[Row]:
         return filtered(self.rows[self.tab], "" if self.content else self.text, self.matches[self.tab])
 
-    def show(self, keep: str | None = None) -> None:
-        """Fill the table for the current tab, keeping the cursor on `keep` if it is still there."""
+    def capture_view(self) -> View:
+        """Where the cursor is: which row, which line on the screen - to put it back the same after a redraw."""
+        table = self.query_one("#table", DataTable)
+        row = self.current()
+        return (row.key if row else None, table.cursor_row, int(table.cursor_row - table.scroll_y))
+
+    def show(self, keep: str | None = None, *, preview: bool = True, view: View | None = None) -> None:
+        """Fill the table for the current tab, keeping the cursor on `keep` if it is still there.
+
+        `view` (from `capture_view`) wins over `keep`: the cursor goes to its row if that is still
+        listed, else to the same number (or the last row), and the screen line it was on stays the same.
+        `preview=False` leaves the preview alone - for a redraw that changed no row under the cursor.
+        """
         table = self.query_one("#table", DataTable)
         table.clear(columns=True)
         table.add_column("", key="gutter", width=1)
@@ -1258,13 +1328,31 @@ class AgoraApp(App):
         for row in rows:
             cells = [Text(c, style=AGENT_STYLE.get(c, "")) for c in row.cells]
             table.add_row(Text("▌", style="#585858"), self.tick(row), *cells, key=row.key)
-        if keep and keep in {r.key for r in rows}:
+        if view is not None:
+            key, cursor, line = view
+            keys = [r.key for r in rows]
+            if rows:
+                target = keys.index(key) if key in keys else min(cursor, len(rows) - 1)
+                table.move_cursor(row=target)
+                self.call_after_refresh(lambda: table.scroll_to(y=max(0, target - line), animate=False))
+        elif keep and keep in {r.key for r in rows}:
             table.move_cursor(row=[r.key for r in rows].index(keep))
         self.track_row()                    # the rows are new: another row, another session
         self.paint_bar()
         self.paint_keys()
         self.gutter()
-        self.preview()
+        if preview:
+            self._quiet_key = None
+            self.preview()
+        else:
+            row = self.current()
+            self._quiet_key = row.key if row else ""   # the highlight this redraw causes must not preview again
+
+    def rows_by_keys(self, keys: list[str]) -> list[Row] | None:
+        """The rows for these keys, in screen order; None if any of them is not on screen (filtered or gone)."""
+        wanted = set(keys)
+        picked = [row for row in self.shown() if row.key in wanted]
+        return picked if len(picked) == len(wanted) else None
 
     def tick(self, row: Row) -> Text:
         return Text("✓", style="bold #ffd75f") if row.key in self.marked else Text(" ")
@@ -1674,6 +1762,10 @@ class AgoraApp(App):
     def moved(self) -> None:
         self.gutter()
         self.track_row()
+        row = self.current()
+        if self._quiet_key is not None and row and row.key == self._quiet_key:
+            return                  # a redraw without preview left this row under the cursor
+        self._quiet_key = None
         self.preview()
 
     def on_resize(self, event) -> None:
