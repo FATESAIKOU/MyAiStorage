@@ -502,3 +502,64 @@ def test_sources_answers_every_by_source_in_one_pass():  # #486 F1
     assert groups[("opencode", "")] == [g] == index.by_source("opencode", "")   # empty is a value
     assert (None, None) not in groups and index.by_source(None, None) == []
     assert sum(len(ulids) for ulids in groups.values()) == 5    # only f (NULL) is in none
+
+
+# ---- #491 PR-1: the throttle decision as its own question (C-1) and the offline line (C-2) ----
+
+def _stamp(text=None):
+    """The last-sync file in the isolated state dir; `text` None leaves it missing."""
+    paths = store.Paths.from_env()
+    paths.state.mkdir(parents=True, exist_ok=True)
+    stamp = paths.state / "last-sync"
+    if text is not None:
+        stamp.write_text(text)
+    return stamp
+
+
+def test_c1_sync_due_missing_stamp_is_due(monkeypatch):
+    monkeypatch.setenv("AGORA_NOW", "1000000")
+    assert store.sync_due(store.Paths.from_env()) is True
+
+
+@pytest.mark.parametrize("text", ["", "abc", "nan", "inf", "-inf"])
+def test_c1_sync_due_unreadable_stamp_is_due(monkeypatch, text):
+    monkeypatch.setenv("AGORA_NOW", "1000000")
+    _stamp(text)
+    assert store.sync_due(store.Paths.from_env()) is True
+
+
+def test_c1_sync_due_stamp_is_a_directory_is_due(monkeypatch):
+    monkeypatch.setenv("AGORA_NOW", "1000000")
+    _stamp().mkdir()                                  # read_text raises IsADirectoryError
+    assert store.sync_due(store.Paths.from_env()) is True
+
+
+def test_c1_sync_due_boundary_is_300_seconds(monkeypatch):
+    monkeypatch.setenv("AGORA_NOW", "1000000")
+    _stamp(str(1000000 - 299))
+    assert store.sync_due(store.Paths.from_env()) is False      # 299 s old: throttled
+    _stamp(str(1000000 - 300))
+    assert store.sync_due(store.Paths.from_env()) is True       # exactly 300 s: due
+
+
+def test_c1_throttled_sync_does_not_list_drive(remote, monkeypatch):
+    monkeypatch.setenv("AGORA_NOW", "1000000")
+    _stamp(str(1000000 - 10))
+    store.sync(store.Paths.from_env(), throttle=True)
+    assert not [c for c in calls(remote) if "lsjson" in c]
+
+
+def test_c1_bad_stamp_still_syncs_and_is_rewritten(remote):
+    _stamp("abc")                                     # used to be a ValueError here
+    store.sync(store.Paths.from_env(), throttle=True)
+    assert [c for c in calls(remote) if "lsjson" in c]
+    assert float(_stamp().read_text()) > 0
+
+
+def test_c2_offline_note_and_line_are_unchanged(remote, monkeypatch):
+    assert store.OFFLINE_NOTE == "連不上 Drive"
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "lsjson")
+    lines = []
+    store.sync(store.Paths.from_env(), warn=lines.append)
+    offline = [m for m in lines if m.startswith("連不上 Drive，改查本機索引：")]
+    assert len(offline) == 1

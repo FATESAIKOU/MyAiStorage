@@ -76,6 +76,12 @@ FAKE_RCLONE_CLEAN_AFTER=<file>: another machine's ordinary cleanup of an old fil
 needle finishes its own work, then those files go and those appear - one shot.
 A test can put「刪掉舊 raw、放上別台的新 raw」exactly between the raws copy and
 the session.md copy (#155, 非阻擋 1).
+
+FAKE_RCLONE_HOLD=<path>: the sync's listing (`lsjson -R`) waits at the gate. The call
+first touches `<path>.waiting`, then polls every 0.02 s until `<path>` exists and only
+then goes on (and is logged). Still missing after 30 s, it says so on stderr and exits 1.
+Other calls are not held. A test that wants a sync to sit at its listing, and not
+merely for a while, uses it (#491 PR-1).
 """
 
 import hashlib
@@ -114,6 +120,16 @@ if os.environ.get("FAKE_RCLONE_DELAY"):     # let a test watch a slow upload hap
                     pass
                 break
     time.sleep(float(os.environ["FAKE_RCLONE_DELAY"]))
+
+if os.environ.get("FAKE_RCLONE_HOLD") and "lsjson" in sys.argv[1:] and "-R" in sys.argv[1:]:
+    import time
+    _gate = Path(os.environ["FAKE_RCLONE_HOLD"])
+    Path(f"{_gate}.waiting").touch()
+    _deadline = time.monotonic() + 30
+    while not _gate.exists():
+        if time.monotonic() > _deadline:
+            fail("FAKE_RCLONE_HOLD timed out")
+        time.sleep(0.02)
 
 args = sys.argv[1:]
 with open(log, "a") as f:
