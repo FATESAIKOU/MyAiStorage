@@ -19,6 +19,8 @@
 | `background.py` | 143 | 背景上傳器 |
 | `cache.py` | 455 | 預覽、快取 |
 | `tui.py` | 2278 | 互動介面 |
+| `sync_child.py`（#491，設計中） | 約 60 | 互動介面背景同步的子行程本體（`python -m agora.sync_child`） |
+| `tui_sync.py`（#491，設計中） | 約 150 | 背景同步子行程的起、讀、停與結果解讀（`BackgroundSync`、`SyncOutcome`、`parse_outcome`）；不 import Textual |
 | `migrate.py` | 495 | 舊格式盤點與遷移 |
 | `orphan_guard.py` | 298 | agora 被 `kill -9` 時不讓 agent 變成孤兒 |
 | `private_tmp.py` | 259 | agora 自己 state 底下的私有暫存目錄與殘留清掃 |
@@ -45,6 +47,9 @@ background      → store
 cache           → header, store, agents.base
 migrate         → header, store；lazy: agents.base, agents.claude, agents.agy_store, agents.opencode
 tui             → cache, header, store, agents.agy；lazy: agents.base, cli（為了避開循環）
+                  ＋ tui_sync                                          [#491 設計中]
+sync_child      → store                                                [#491 設計中]
+tui_sync        → （標準函式庫）                                       [#491 設計中；不得 import tui、textual、cli、store]
 continue_shell  → header, store, errors, agents.base                   [#341；不得 import cli／round_child／start_child]
 cli             → header, orphan_guard, private_tmp, store, agents.agy, agents.opencode, agents.base,
                   continue_shell[#341], errors[#341]
@@ -195,3 +200,13 @@ schema／I/O：_io → errors；_jsonutil → errors；_lock → errors；paths 
   - `decision_cli → {backend, config, decision, log_cache, messages}`；`channel_cli → {backend, channel_config, client, config, messages, registry, registry_rules}`。
   - `cli → {backend, channel_cli, channel_config, client, config, decision_cli, github, log_cache, log_query, messages, registry, state}`。
   - 沒有環；`registry_rules` 不 import `backend`、`channel_config`、`registry_rebuild`；`channel_cli`、`decision_cli` 不 import `cli`。PR-3 要加的邊（`fake_backend → {backend, messages}`（3-0）、`rollover → {backend, messages, registry, registry_rules}`（3b）、`client → rollover`、`channel_cli → rollover`（3c））見設計 §8.2 與 §6.4，各子 PR 合上時再搬進本節。
+
+## agora TUI 背景同步（#491；設計中，PR-1～PR-3）
+
+設計：`docs/design-notes/491-tui-background-sync.md`；決策 D-38。
+
+- 啟動順序是 `setup → reload → 起背景同步`；背景同步是子行程 `python -m agora.sync_child`，由 `tui_sync.BackgroundSync` 起、讀、停，不經 `cli.main`（與 `background`、`round_child` 同一做法）。`tui` 不 import `sync_child`，只用 `tui_sync.child_argv()`。
+- 子行程協議：stdout 的 warn 行以 `[agora] ` 開頭；最後一行 `AGORA-SYNC {"offline": bool}`（exit 0）或 `AGORA-SYNC-ERROR <型別>: <訊息>`（exit 2）；中斷是 exit 130。解讀只在 `tui_sync.parse_outcome`。
+- `store` 新增的公開介面：`sync_due(paths)`（節流的唯一判斷，`sync` 也用它）、`OFFLINE_NOTE`。
+- 執行緒規則：UI 只在主執行緒更新；執行緒只經 `call_from_thread`；執行緒裡算列（`tui.build_rows`）用自己的 `Index`，不碰 `self.index` 與 widget。
+
