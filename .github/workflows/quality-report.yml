@@ -21,9 +21,9 @@ jobs:
     if: github.event_name == 'push' || github.event.schedule == '17 3 * * 1' || (github.event_name == 'workflow_dispatch' && inputs.tickets == '')
     permissions:
       contents: read
-    uses: FATESAIKOU/MyCodeQuality/.github/workflows/code-quality-report.yml@524cd44bb0286edf5082c7cdc16b2bb8bde262ad
+    uses: FATESAIKOU/MyCodeQuality/.github/workflows/code-quality-report.yml@9e6deb4dbf71f9ff5429b743b6ce7cddf1329fe3
     with:
-      qmetrics-ref: 524cd44bb0286edf5082c7cdc16b2bb8bde262ad
+      qmetrics-ref: 9e6deb4dbf71f9ff5429b743b6ce7cddf1329fe3
       rev: ${{ inputs.rev }}
       src: src
       tests: tests
@@ -34,8 +34,8 @@ jobs:
       issues: read
       pull-requests: read
       actions: read
-    uses: FATESAIKOU/MyCodeQuality/.github/workflows/task-quality-report.yml@524cd44bb0286edf5082c7cdc16b2bb8bde262ad
+    uses: FATESAIKOU/MyCodeQuality/.github/workflows/task-quality-report.yml@9e6deb4dbf71f9ff5429b743b6ce7cddf1329fe3
     with:
-      qmetrics-ref: 524cd44bb0286edf5082c7cdc16b2bb8bde262ad
+      qmetrics-ref: 9e6deb4dbf71f9ff5429b743b6ce7cddf1329fe3
       tickets: ${{ inputs.tickets }}
       config: .github/taskquality.json
