@@ -102,7 +102,13 @@
     },
     "team-mypmo-m1": {
       "backend": "aicompany-channel",
-      "issue": 22
+      "issue": 42,
+      "retired": [
+        {
+          "issue": 22,
+          "until": "2026-11-27T01:35:56Z"
+        }
+      ]
     },
     "team-mypmo-m1-b": {
       "backend": "aicompany-channel",
