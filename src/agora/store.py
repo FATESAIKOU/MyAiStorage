@@ -21,6 +21,7 @@ import copy
 import hashlib
 from datetime import datetime, timezone
 import json
+import math
 import re
 import os
 import shutil
@@ -36,6 +37,8 @@ from pathlib import Path
 from agora import header as h
 
 SYNC_THROTTLE_S = 300
+#: The words sync's offline line starts with; the interactive mode tells "offline" by them (#491).
+OFFLINE_NOTE = "連不上 Drive"
 #: #364: bulk downloads of changed session.md. At or above this many still-needed
 #: sessions, one list-style `copy --include "*/session.md"` beats one rclone run that
 #: resolves each path (`--files-from --no-traverse`, about 0.64 s a file in the
@@ -3002,6 +3005,21 @@ def _folder_files(remote: dict, ulid: str) -> dict:
     return remote.get(ulid) or {}
 
 
+def sync_due(paths: Paths) -> bool:
+    """Whether a throttled sync would talk to Drive now (#491 C-1).
+
+    True when <state>/last-sync is missing, unreadable, not a number, or at least
+    SYNC_THROTTLE_S old; False otherwise. Reads one file, never Drive.
+    """
+    try:
+        last = float((paths.state / "last-sync").read_text())
+    except (OSError, ValueError):
+        return True
+    if not math.isfinite(last):         # "nan" and "inf" parse, but are no time
+        return True
+    return now() - last >= SYNC_THROTTLE_S
+
+
 def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
          kick: bool = True, strict: bool = False, strict_missing: bool = False,
          warn=warn) -> Index:
@@ -3031,7 +3049,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
     index = Index(paths)   # a bumped index is already back from the mirror
     index_pending(paths, index, say)    # local only: before the throttle and offline returns (#222)
     stamp = paths.state / "last-sync"
-    if throttle and stamp.exists() and now() - float(stamp.read_text()) < SYNC_THROTTLE_S:
+    if throttle and not sync_due(paths):
         return index
     drive = drive or Drive(paths)
     if kick:
@@ -3039,7 +3057,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
     try:
         remote = drive.list_sessions()
     except StoreError as e:
-        say(f"連不上 Drive，改查本機索引：{e}")
+        say(f"{OFFLINE_NOTE}，改查本機索引：{e}")
         if strict:
             raise
         return index
