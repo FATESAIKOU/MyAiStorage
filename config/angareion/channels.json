@@ -28,6 +28,10 @@
       "backend": "aicompany-channel",
       "issue": 47
     },
+    "role-myaistorage-pm": {
+      "backend": "aicompany-channel",
+      "issue": 49
+    },
     "secretary-pmo": {
       "backend": "aicompany-channel",
       "issue": 9
