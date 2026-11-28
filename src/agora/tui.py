@@ -10,6 +10,7 @@ tests.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
@@ -38,7 +39,7 @@ from textual.widgets.text_area import Edit, EditResult, LanguageDoesNotExist, Se
 
 from agora import cache
 from agora import header as h
-from agora import store
+from agora import store, tui_sync
 from agora.agents import agy
 
 WIDE = 100                       # columns from which the preview goes to the right
@@ -49,6 +50,10 @@ COLUMNS = {"agora": ("id", "標題", "agent", "更新", "雲端"),
 CLOUD_YES, CLOUD_NO, CLOUD_NEW = "✓", "✗", "未上傳"
 TITLE_MAX = 36                   # the title column is cut here, so the others stay on screen
 AGENT_STYLE = {"opencode": "cyan", "claude": "#ff8700", "agy": "#5fafff", "codex": "magenta", "merge": "green"}
+SYNC_APPLY_RETRY = 0.5           # a deferred new list is tried again this often (seconds); tests make it 0.01 (#491)
+SYNC_TICK = 1.0                  # the title's "同步 Drive 中（N 秒）" is redrawn this often
+EMPTY_HINT = "Agora 還沒有 Session：按 ] 到「未匯入」，空白鍵勾選後按 Enter 匯入"
+SYNC_WAITING = "正在同步 Drive，清單稍後出現"
 #: The key bar, per tab and side (spec「按鍵」): what a key does here, and only here.
 KEYS = {
     "list": {
@@ -978,9 +983,9 @@ class Busy(ModalScreen):
     """Run `work_(say)` in a thread while a window says so; dismiss (value, lines, error).
 
     The work is handed a `say` instead of the thread redirecting the program's
-    stdout, which took every other thread's output with it (review K3). Only the
-    first-run sync and rclone's own authorization still run this way - an action
-    is a child process now - and both say what they have to say through `say`.
+    stdout, which took every other thread's output with it (review K3). Only
+    rclone's own authorization still runs this way (#491: the sync is a child
+    process now, and an action is one too) - it says what it has to say through `say`.
     """
 
     SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -1016,6 +1021,38 @@ class Busy(ModalScreen):
         except Exception as e:   # shown in the result window, never a traceback over the screen
             error = e
         self.app.call_from_thread(self.dismiss, (value, "\n".join(self.lines), error))
+
+
+class WaitSync(ModalScreen):
+    """An action waits here for the background sync (#491 §5). Dismisses True (go on) or False (Esc).
+
+    No choice but Esc: the sync finishes by itself, and the action goes on when it has.
+    """
+
+    BINDINGS = [Binding("escape", "dismiss(False)", "取消這個動作")]
+
+    def __init__(self, sync: tui_sync.BackgroundSync, idle: asyncio.Event, *, shown: bool):
+        super().__init__()
+        self.sync, self.idle, self.shown = sync, idle, shown
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="box"):
+            yield Static("背景同步還沒完成" if self.shown else "正在整理本機索引", classes="box-title")
+            yield Static("", id="spin")
+            yield Static("同步結束就會繼續；Esc 取消這個動作", classes="hint")
+
+    def on_mount(self) -> None:
+        self.set_interval(0.12, self.tick)
+        self.run_worker(self.watch(), exclusive=True)
+
+    def tick(self) -> None:
+        spent = self.sync.elapsed()
+        self.query_one("#spin", Static).update(
+            f"{Busy.SPIN[int(spent * 8) % len(Busy.SPIN)]} 執行中…（{int(spent)} 秒）")
+
+    async def watch(self) -> None:
+        await self.idle.wait()
+        self.dismiss(True)
 
 
 class Confirm(ModalScreen):
@@ -1145,7 +1182,7 @@ class AgoraApp(App):
     #msg.failed { color: #ff5f5f; }
     .box { width: 70; height: auto; max-height: 80%; padding: 0 1; border: round #00afaf; background: #1c1c1c; }
     .box.failed { border: round #ff5f5f; }
-    Choose, AskText, Busy, Run, Tell { align: center middle; }
+    Choose, AskText, Busy, Run, Tell, WaitSync { align: center middle; }
     .box-title { text-style: bold; color: #00d7d7; }
     .note, .hint { color: #8a8a8a; }
     OptionList { height: auto; max-height: 8; background: transparent; border: none; }
@@ -1168,9 +1205,20 @@ class AgoraApp(App):
         Binding("q", "quit", "離開"),
     ]
 
-    def __init__(self, paths: store.Paths, cli, agents: list | None = None, check_setup: bool = True):
+    def __init__(self, paths: store.Paths, cli, agents: list | None = None, check_setup: bool = True,
+                 sync_on_start: bool | None = None):
         super().__init__()
         self.paths, self.cli, self.check_setup = paths, cli, check_setup
+        # The background sync runs where the first-run sync ran (check_setup); tests that do not
+        # want it pass check_setup=False and leave this alone (#491).
+        self.sync_on_start = check_setup if sync_on_start is None else sync_on_start
+        self.sync = tui_sync.BackgroundSync(spawn=lambda: self.spawn_sync(), post=self.call_from_thread,
+                                            on_done=self.sync_done)
+        self._sync_shown = False                 # this sync shows its indicator (it was due when it started)
+        self._sync_outcome: tui_sync.SyncOutcome | None = None
+        self._pending_rows: dict[str, list[Row]] | None = None   # a new list that cannot be shown yet
+        self._sync_tick_timer = None
+        self._apply_timer = None
         self.agents = agents if agents is not None else [cli.load_agent(name) for name in cli.AGENTS]
         self.index = store.Index(paths)
         self.rows: dict[str, list[Row]] = {"agora": [], "import": []}
@@ -1221,6 +1269,10 @@ class AgoraApp(App):
     # -- setup and data ------------------------------------------------------
 
     def on_mount(self) -> None:
+        # Made on the app's own loop. Set: nothing is syncing yet.
+        self._sync_idle = asyncio.Event()
+        self._sync_idle.set()
+        self.sync_settled = asyncio.Event()     # a test's hook: the last sync's list is settled (#491)
         self.start()
 
     @work
@@ -1228,14 +1280,172 @@ class AgoraApp(App):
         if self.check_setup and not await self.setup():
             self.exit()
             return
-        if self.check_setup:
-            _, out, _ = await self.push_screen_wait(
-                Busy("同步 Drive", lambda say: store.sync(self.paths, throttle=True, warn=say)))
-            self.status = "離線：只有本機資料" if "連不上 Drive" in (out or "") else ""
-        self.reload()
+        self.reload()                           # the local list first; Drive after it (#491 §0.2)
         if not self.rows["agora"]:
-            self.say("Agora 還沒有 Session：按 ] 到「未匯入」，空白鍵勾選後按 Enter 匯入")
+            self.say(SYNC_WAITING if self.sync_on_start else EMPTY_HINT)
         self.query_one("#table").focus()
+        if self.sync_on_start:
+            self.begin_sync()
+
+    def spawn_sync(self):
+        """The background sync's child process; a test replaces this (#491 C-12)."""
+        return tui_sync.spawn_child(tui_sync.child_argv(),
+                                    tui_sync.child_env(self.paths.config, self.paths.cache, self.paths.state))
+
+    def begin_sync(self) -> bool:
+        """Start the background sync unless one is running or its list is still being built (#491 §4.1).
+
+        The order matters: `_sync_idle` is cleared before the child starts, so whichever way the
+        sync ends, `_sync_rows_ready` runs and sets it again.
+        """
+        if not self._sync_idle.is_set():
+            return False
+        self._sync_shown = store.sync_due(self.paths)
+        self._sync_idle.clear()
+        self.sync_settled.clear()
+        try:
+            started = self.sync.start()
+        except Exception as e:                  # no child at all: says so here, on this thread (C-12′)
+            self._sync_shown = False
+            self.sync_done(tui_sync.SyncOutcome(tui_sync.FAILED, f"叫不起同步子行程：{e}"[:200]))
+            return True
+        if not started:                         # cannot happen after the checks above
+            return False
+        if self._sync_shown:
+            self._sync_tick_timer = self.set_interval(SYNC_TICK, self.paint_bar)
+        self.paint_bar()
+        return True
+
+    def sync_done(self, outcome: tui_sync.SyncOutcome) -> None:
+        """The child has ended (on this thread): the bar says how it went; the list is built next (§5)."""
+        self._sync_outcome = outcome
+        if self._sync_tick_timer is not None:
+            self._sync_tick_timer.stop()
+            self._sync_tick_timer = None
+        if outcome.state == tui_sync.OFFLINE:
+            self.status = "離線：只有本機資料"
+        elif outcome.state == tui_sync.FAILED:
+            self.status = "同步失敗：只有本機資料"
+            self.say(outcome.detail, failed=True)
+        else:
+            self.status = ""
+        self.paint_bar()
+        self.compute_sync_rows()
+
+    @work(thread=True, exclusive=True, group="sync-rows")
+    def compute_sync_rows(self) -> None:
+        """The new list, built off the screen's thread with its own index (C-9, §4.1)."""
+        try:
+            rows = build_rows(self.paths, dict(self._listed), self.agents)
+        except Exception:                       # the list cannot be read; _sync_rows_ready says so
+            rows = None
+        try:
+            self.call_from_thread(self._sync_rows_ready, rows)
+        except Exception:                       # the app is gone; nobody is waiting for the list
+            pass
+
+    def _sync_rows_ready(self, rows: dict[str, list[Row]] | None) -> None:
+        """The new list is built: show it now, or keep it until the screen allows (§4.2, §4.3).
+
+        Every way out sets `_sync_idle` (the gate waits for it), so this is try/finally.
+        """
+        try:
+            if rows is None:
+                self.say("同步後讀不到本機清單，請重開", failed=True)
+            elif rows == self.rows:
+                self._empty_note()
+            else:
+                self._pending_rows = rows
+                if not self._try_apply_sync() and self._apply_timer is None:
+                    self._apply_timer = self.set_interval(SYNC_APPLY_RETRY, self._try_apply_sync)
+        finally:
+            self._sync_idle.set()
+            if self._pending_rows is None:
+                self.sync_settled.set()
+
+    def can_apply_sync(self) -> bool:
+        """Nothing is on top of the list and no box is being typed in (§4.3)."""
+        return self.screen is self.default_screen and getattr(self.focused, "id", None) not in ("filter", "search")
+
+    def _try_apply_sync(self) -> bool:
+        if self._pending_rows is None:
+            return True
+        if not self.can_apply_sync():
+            return False
+        rows, self._pending_rows = self._pending_rows, None
+        if self._apply_timer is not None:
+            self._apply_timer.stop()
+            self._apply_timer = None
+        self._apply_rows(rows)
+        self.sync_settled.set()
+        return True
+
+    def _apply_rows(self, rows: dict[str, list[Row]]) -> None:
+        """Put the new list on the screen, keeping what §4.4 says to keep."""
+        before = self.current()                 # what was under the cursor, before anything moves
+        old_agora = list(self.rows["agora"])
+        view = self.capture_view()
+        marked_before = len(self.marked)
+        self.index = store.Index(self.paths)    # the connection is this thread's; the data is the sync's
+        self.rows = rows
+        keys = {r.key for tab in TABS for r in rows[tab]}
+        self.marked &= keys
+        dropped = marked_before - len(self.marked)
+        self.cache = {k: v for k, v in self.cache.items() if k in keys and not v.is_stale()}
+        if self.text and self.content:          # the matches of the new list (C-17); import's are kept
+            self.matches["agora"] = {f"agora:{u}" for u, _h, _s in self.index.search([((h.TEXT_KEY,), "~=", self.text)])}
+        self.show(view=view, preview=False)     # preview decided below
+        after = self.current()
+        keep_preview = (before is not None and after is not None and after.key == before.key
+                        and self.shown_preview is not None and not self.shown_preview.is_stale()
+                        and (self.tab == "agora" or after == before))
+        if not keep_preview:
+            if self.query:
+                self.pending_note = "內容已更新"
+            self._quiet_key = None              # the pane is to be read again: the cursor moving is a read
+            self.preview()
+        outcome = self._sync_outcome
+        failed = outcome is not None and outcome.state == tui_sync.FAILED
+        note = sync_note(row_changes(old_agora, rows["agora"]), dropped,
+                         done=outcome is not None and outcome.state == tui_sync.DONE,
+                         error=outcome.detail if failed else "")
+        if note:
+            self.say(note, failed=failed)
+        else:
+            self._empty_note()
+
+    def _empty_note(self) -> None:
+        """Still no session after a sync that did not fail: say how to get one (§4.5)."""
+        outcome = self._sync_outcome
+        if not self.rows["agora"] and not (outcome is not None and outcome.state == tui_sync.FAILED):
+            self.say(EMPTY_HINT)
+
+    async def wait_for_sync(self) -> bool:
+        """Before a write: wait for the sync and its list (§3.2). False when the action is given up (Esc).
+
+        Judged by `_sync_idle`, not by the child: between the child's end and the list being built
+        the list is still the old one, and an action must not start on it.
+        """
+        if self._sync_idle.is_set():
+            self._try_apply_sync()
+            return True
+        ok = await self.push_screen_wait(WaitSync(self.sync, self._sync_idle, shown=self._sync_shown))
+        if not ok:
+            return False
+        self._try_apply_sync()
+        return True
+
+    async def gate(self, keys: list[str]) -> list[Row] | None:
+        """The rows to act on, as they are after the sync; None means stop here (§3.2 steps 3-4).
+
+        Esc says nothing. A row that is gone or filtered out says so and stops the action.
+        """
+        if not await self.wait_for_sync():
+            return None
+        rows = self.rows_by_keys(keys)
+        if rows is None:
+            self.say("同步後清單變了：有列已不在或被篩選掉，動作取消，請再確認", failed=True)
+        return rows
 
     async def setup(self) -> bool:
         """Guide a first run: rclone missing, or Drive not authorized yet (design 5.9)."""
@@ -1288,6 +1498,10 @@ class AgoraApp(App):
         return True
 
     def reload(self, keep_marked: bool = False) -> None:
+        self._pending_rows = None                  # what it reads now already includes any sync (§4.3)
+        if self._apply_timer is not None:
+            self._apply_timer.stop()
+            self._apply_timer = None
         self.index = store.Index(self.paths)       # local only; no full sync after every action (T6)
         self._listed = list_agent_sessions(self.agents)
         self.rows = {"agora": agora_rows(self.index, [], self.paths),
@@ -1388,6 +1602,8 @@ class AgoraApp(App):
         hidden = self.hidden_marked()
         if hidden:
             bar.append(f" 另有 {hidden} 個勾選被篩選掉", style="#ffd75f")
+        if self.sync.running and self._sync_shown:
+            bar.append(f" ⟳ 同步 Drive 中（{int(self.sync.elapsed())} 秒）", style="#8a8a8a")
         if self.status:
             bar.append(f"  {self.status}", style="#ff5f5f")
         self.query_one("#bar", Static).update(bar)
@@ -1409,6 +1625,9 @@ class AgoraApp(App):
     def on_unmount(self) -> None:
         if self._timer is not None:
             self._timer.stop()          # a pending preview must not fire into a dead app
+        for timer in (self._sync_tick_timer, self._apply_timer):
+            if timer is not None:
+                timer.stop()            # the sync child itself is not stopped: it runs to its end (Q-3)
 
     def preview(self) -> None:
         """Read the tail for the row under the cursor - and only once it has come to rest.
@@ -1599,11 +1818,13 @@ class AgoraApp(App):
         self.search_open = False
         self.query_one("#search", Input).value = ""
         self.paint_count()
+        self._try_apply_sync()
 
     def close_preview_search(self) -> None:
         """Enter or Esc in the box: it goes and the pane takes the focus back."""
         self.hide_preview_search()
-        self.query_one("#right").focus()
+        self.set_focus(self.query_one("#right"))
+        self._try_apply_sync()
 
     def clear_preview_search(self) -> None:
         """No word, no highlight, no count - and the cursor stays where it is."""
@@ -1826,7 +2047,8 @@ class AgoraApp(App):
         if getattr(self.focused, "id", None) == "search":
             self.hide_preview_search()
         target = "#table" if self.side() == "preview" else "#right"
-        self.query_one(target).focus()
+        self.set_focus(self.query_one(target))
+        self._try_apply_sync()
 
     def _change_tab(self, step: int) -> None:
         """[ and ] change page on the list side (spec「按鍵」)."""
@@ -1907,9 +2129,10 @@ class AgoraApp(App):
             self._filter_timer.stop()
             self._filter_timer = None
         self.query_one("#filterbar").remove_class("on")
-        self.query_one("#table").focus()
+        self.set_focus(self.query_one("#table"))
         if text != self.text:          # the keystroke before this one already searched
             self.search(text)
+        self._try_apply_sync()
 
     def on_key(self, event) -> None:
         if event.key != "escape":
@@ -1921,8 +2144,9 @@ class AgoraApp(App):
             self._pending_filter = ""
             self.query_one("#filter", Input).value = ""
             self.query_one("#filterbar").remove_class("on")
-            self.query_one("#table").focus()
+            self.set_focus(self.query_one("#table"))
             self.search("")
+            self._try_apply_sync()
         elif self.search_open:
             self.close_preview_search()       # Esc in the box: the box goes (spec「預覽區搜尋」)
         elif self.side() == "preview" and self.query:
@@ -2158,6 +2382,9 @@ class AgoraApp(App):
             self._nothing_to_do("先選要處理的 Session")
             return
         if self.tab == "import":
+            rows = await self.gate([r.key for r in rows])      # the sync gate (#491 §3.2)
+            if rows is None:
+                return
             # One command per agent: they are separate stores, and each of them gets
             # its own k/N progress in the window (V6).
             for agent in dict.fromkeys(r.agent for r in rows):
@@ -2167,7 +2394,13 @@ class AgoraApp(App):
                                   sent=[r.key for r in mine]):
                     break      # Esc means stop this action, not half of it (review M2)
             return
-        row = self.current()
+        row = self.current()                   # the cursor's row, not chosen_rows(): a mark elsewhere is not it
+        if row is None:
+            return
+        found = await self.gate([row.key])
+        if found is None:
+            return
+        row = found[0]
         if await self._refuse(row, "接續"):
             return
         # Imported here to avoid a circular import with cli.
@@ -2246,6 +2479,9 @@ class AgoraApp(App):
         if len(rows) < 2:
             self.say("合併要先用空白鍵勾選至少兩個", failed=True)
             return
+        rows = await self.gate([r.key for r in rows])
+        if rows is None:
+            return
         pick = await self.push_screen_wait(Choose(f"合併 {len(rows)} 個：由誰寫要約？", ["opencode", "claude"],
                                                   "每個來源叫一次 AI；內容會送到那個 agent 的模型供應商"))
         if pick is not None:
@@ -2286,6 +2522,10 @@ class AgoraApp(App):
         row = self.current()
         if not row:
             return
+        found = await self.gate([row.key])
+        if found is None:
+            return
+        row = found[0]
         if await self._refuse(row, "改標頭"):
             return
         code = self.outside(argv_for("edit", [row], None, None)[0])   # the editor needs the terminal
@@ -2313,6 +2553,9 @@ class AgoraApp(App):
         if not rows:
             self._nothing_to_do("先選要拉下來的 Session")
             return
+        rows = await self.gate([r.key for r in rows])
+        if rows is None:
+            return
         argv = argv_for("pull", rows, None, None)[0]
         answer = await self.push_screen_wait(Confirm(
             f"把 {len(rows)} 個拉到本機？", ["取消", "確定"], "雲端沒有的：印一行提醒，本機的不動",
@@ -2327,6 +2570,9 @@ class AgoraApp(App):
         rows = self.chosen_rows()
         if not rows:
             self._nothing_to_do("先選要寫回的 Session")
+            return
+        rows = await self.gate([r.key for r in rows])
+        if rows is None:
             return
         argv = argv_for("push", rows, None, None)[0]
         answer = await self.push_screen_wait(Confirm(
@@ -2346,6 +2592,9 @@ class AgoraApp(App):
         rows = self.chosen_rows()            # every marked row, or the one under the cursor
         if not rows:
             self._nothing_to_do("先選要刪除的 Session")
+            return
+        rows = await self.gate([r.key for r in rows])
+        if rows is None:
             return
         listed = "\n".join(f"{r.key}「{r.cells[1]}」" for r in rows[:6]) + ("\n…" if len(rows) > 6 else "")
         if await self.push_screen_wait(Choose(f"把 {len(rows)} 個移到 Drive 垃圾桶？", ["取消", "確定"], listed)) == 1:
