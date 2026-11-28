@@ -86,7 +86,15 @@ def rnd(n: int, alphabet: str = ALNUM) -> str:
 
 
 def gh_token() -> str:
-    return "gh" + "p_" + rnd(36)
+    """A GitHub-shaped token whose body always has an upper-case letter and a digit.
+
+    The test asserts kinds=4 (lower, upper, digit, other); a plain draw from ALNUM
+    lacks a digit about 1 time in 560, which made the test flaky. So the first two
+    body characters are one upper-case letter and one digit, and rnd fills the rest.
+    The head can't complete a _RULE_LITERALS entry: the only literal with a digit is
+    "1//0", which needs "/", and neither the head nor ALNUM produces one.
+    """
+    return "gh" + "p_" + _RANDOM.choice(string.ascii_uppercase) + _RANDOM.choice(string.digits) + rnd(34)
 
 
 def google_refresh() -> str:
@@ -176,6 +184,19 @@ def test_output_never_contains_value_or_context(tmp_path):
     assert secret not in out and secret[4:12] not in out
     assert "CONTEXT" not in out
     assert "len=40" in out and "kinds=4" in out and "sha256=" in out
+
+
+def test_gh_token_always_reports_four_kinds(monkeypatch):
+    """The kinds=4 assertion above depends on this: every draw has all four character kinds."""
+    with monkeypatch.context() as patch:
+        patch.setattr(_RANDOM, "choice", lambda candidates: candidates[0])
+        token = gh_token()
+        assert not any(literal in token[4:] for literal in _RULE_LITERALS)
+        hits = credscan.scan_text(token)
+        assert [(name, length, kinds) for name, length, kinds, _ in hits] == [("github-token", 40, 4)]
+    for _ in range(500):
+        hits = credscan.scan_text(gh_token())
+        assert [(name, length, kinds) for name, length, kinds, _ in hits] == [("github-token", 40, 4)]
 
 
 def test_same_value_has_same_hash(tmp_path):
