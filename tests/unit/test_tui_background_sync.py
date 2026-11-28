@@ -359,6 +359,46 @@ def test_c15_typing_in_the_filter_holds_the_list_and_leaving_it_shows_the_list(m
     run_app(app, body)
 
 
+def test_c15_tab_out_of_filter_applies_the_new_list(monkeypatch):
+    monkeypatch.setattr(tui, "SYNC_APPLY_RETRY", 0.01)
+    app, _ = make_app()
+
+    async def body(pilot):
+        assert await until(lambda: app.sync.running, pilot)
+        await pilot.press("slash")
+        await pilot.pause()
+        assert app.focused.id == "filter"
+        _index(session(C, "第三個"))
+        app.proc.release(DONE_LINES)
+        assert await until(lambda: app._pending_rows is not None, pilot)
+        assert app.query_one("#table").row_count == 2
+        await pilot.press("tab")                    # tab switches focus to right pane and applies
+        assert await until(lambda: app._pending_rows is None, pilot)
+        assert app.query_one("#table").row_count == 3
+        assert app.focused.id != "filter"
+    run_app(app, body)
+
+
+def test_c15_closing_preview_search_applies_the_new_list(monkeypatch):
+    monkeypatch.setattr(tui, "SYNC_APPLY_RETRY", 0.01)
+    app, _ = make_app()
+
+    async def body(pilot):
+        assert await until(lambda: app.sync.running, pilot)
+        app.open_preview_search()
+        await pilot.pause()
+        assert app.focused.id == "search" and app.search_open is True
+        _index(session(C, "第三個"))
+        app.proc.release(DONE_LINES)
+        assert await until(lambda: app._pending_rows is not None, pilot)
+        assert app.query_one("#table").row_count == 2
+        await pilot.press("escape")                 # close preview search
+        assert await until(lambda: app._pending_rows is None, pilot)
+        assert app.query_one("#table").row_count == 3
+        assert app.search_open is False
+    run_app(app, body)
+
+
 def test_c15_the_filter_text_survives_the_new_list(monkeypatch):
     app, _ = make_app()
 
@@ -378,6 +418,7 @@ def test_c15_the_filter_text_survives_the_new_list(monkeypatch):
 
 def test_c16_same_row_same_file_leaves_the_preview_alone(monkeypatch):
     monkeypatch.setattr(tui, "SYNC_APPLY_RETRY", 0.01)
+    monkeypatch.setattr(tui, "PREVIEW_IDLE", 0.01)
     app, _ = make_app()
 
     async def body(pilot):
@@ -397,6 +438,7 @@ def test_c16_same_row_same_file_leaves_the_preview_alone(monkeypatch):
 
 
 def test_c16_only_the_cloud_column_changed_does_not_read_the_preview_again(monkeypatch):
+    monkeypatch.setattr(tui, "PREVIEW_IDLE", 0.01)
     app, _ = make_app()
 
     async def body(pilot):
@@ -413,6 +455,31 @@ def test_c16_only_the_cloud_column_changed_does_not_read_the_preview_again(monke
         await pilot.pause()
         assert puts == [] and app.shown_preview is before
         assert msg(app).startswith("同步完成：更新 1")
+    run_app(app, body)
+
+
+def test_c16_import_tab_row_changed_reads_the_preview_again(monkeypatch):
+    monkeypatch.setattr(tui, "PREVIEW_IDLE", 0.01)
+    agent = _claude_agent()
+    app, _ = make_app(agents=[agent])
+
+    async def body(pilot):
+        assert await until(lambda: app.sync.running, pilot)
+        await pilot.press("]")
+        assert await until(lambda: app.tab == "import", pilot)
+        assert await until(lambda: app.shown_preview is not None, pilot)
+
+        app._listed["claude"] = [Listed("s1", "/tmp/p", "未匯入的", "2026-10-03T00:00:00Z")]
+
+        puts: list = []
+        real_put = app.put_preview
+        put_done = asyncio.Event()
+        monkeypatch.setattr(app, "put_preview", lambda p: (puts.append(p), put_done.set(), real_put(p)))
+
+        app.proc.release(DONE_LINES)
+        await settled(app, pilot)
+        await asyncio.wait_for(put_done.wait(), 5)
+        assert len(puts) >= 1
     run_app(app, body)
 
 
