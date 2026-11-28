@@ -493,3 +493,364 @@ def render(report: Report) -> str:
     lines.append(f"not droppable ({len(blocked)}):")
     lines += [f"  {s['ulid']}  {s['class']}  {s['not_droppable_reason']}" for s in blocked]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# `agora migrate copy-headers`: the user's fields of an old Session onto its re-import
+# ---------------------------------------------------------------------------
+
+#: Never copied: the id, the system block, and what the re-import generated from its own source.
+NOT_COPIED = ("id", "agora", "sources", "generated", "type")
+#: Lists of refs (`agora:<old>` in them is turned into the new id, or the element goes) and the one ref.
+REF_LISTS = ("refs", "verified")
+_SUPERSEDED = "superseded-by-"
+
+
+@dataclass
+class CopyItem:
+    """One line of the plan. `kind`: `copy` (a pair), `na` (expected: nothing to copy and nothing is
+    lost by deleting it), `broken` (it should have been paired, or the report cannot be trusted)."""
+    new: str | None                       # ULID of the chunks/1 re-import (None: the report has none for it)
+    old: str | None                       # ULID of the old Session it takes fields from (None: not copied)
+    kind: str = "copy"
+    status: str = "todo"                  # copy: todo / done / attention
+    reason: str | None = None             # why it is na or broken
+    fields: dict = field(default_factory=dict)    # {name: value} that are to be on the new header
+    changes: list[str] = field(default_factory=list)   # names of the fields that differ now
+    dropped: list[str] = field(default_factory=list)   # tags left out on purpose (superseded-by-*, naming an old id)
+    lost: list[str] = field(default_factory=list)      # "refs: <element>" that named an old Session with no new one
+    review: list[str] = field(default_factory=list)    # fields that name an old Session and need a person
+    others: list[str] = field(default_factory=list)    # the other old Sessions (listed only)
+
+    @property
+    def blocking(self) -> bool:
+        """Something was lost or needs a person: not "consistent", whatever the header reads now."""
+        return bool(self.lost or self.review)
+
+
+def _headers(db: sqlite3.Connection, ulids) -> dict[str, dict]:
+    """The whole header of each ULID, read from the read-only index (and nothing is printed)."""
+    out = {}
+    for u in ulids:
+        row = db.execute("SELECT header FROM sessions WHERE ulid=?", (u,)).fetchone()
+        if row:
+            try:
+                out[u] = h.upgrade(json.loads(row[0]))
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def _mentions(value, ulid: str) -> bool:
+    return ulid in json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _superseded(hdr: dict) -> bool:
+    tags = hdr.get("tags") or []
+    return any(isinstance(t, str) and t.startswith(_SUPERSEDED) for t in (tags if isinstance(tags, list) else [tags]))
+
+
+def _tags(hdr: dict) -> list:
+    tags = hdr.get("tags") or []
+    return list(tags) if isinstance(tags, list) else [tags]
+
+
+def _rewrite(text, ids: set, new_of: dict, new_ulid: str, *, need_prefix: bool = True):
+    """(text, state): `keep` (names no old Session), `replaced` (`agora:<old>` became `agora:<its new id>`),
+    `self` (it would point at this very Session: dropped, nothing lost) or `lost` (an old Session with no new
+    id, or a shape this does not rewrite). The caller drops the element on `self` and `lost`."""
+    if not isinstance(text, str):
+        return (None, "lost") if any(_mentions(text, u) for u in ids) else (text, "keep")
+    hit = [u for u in ids if u in text]
+    if not hit:
+        return text, "keep"
+    target = {u: (new_ulid if u == new_ulid else new_of.get(u)) for u in hit}
+    if need_prefix and not text.startswith("agora:"):
+        return None, "lost"
+    if any(t is None for t in target.values()):
+        return None, "lost"
+    if any(t == new_ulid for t in target.values()):
+        return None, "self"
+    out = text
+    for u in hit:
+        out = out.replace(u, target[u])
+    return out, "replaced"
+
+
+def wanted(old: dict, new: dict, old_ulid: str, new_ulid: str, all_old=frozenset(), new_of=None) -> dict:
+    """What the new header should have, as {fields, dropped, lost, review}.
+
+    The user's own fields of `old` go over `new`'s. `refs`, `verified` and `case` are handled element by
+    element: `agora:<old>` becomes the new id when the pairing table has one, any other element that names an
+    old Session (any one: `all_old`) or the new one is left out and listed in `lost`. Every other field that
+    names one is not guessed at: it is not copied and goes to `review` (a person decides). Tags: the new
+    Session's own, then the old ones that are new to it, plus `migrated-from-<old>`; a tag naming an old id is
+    treated like a ref (replaced by the new id, or `lost`); `superseded-by-*` alone is left out on purpose
+    (`dropped`) and is not a loss. A ref that would point at the new Session itself is dropped, not lost."""
+    new_of = new_of or {}
+    ids = set(all_old) | {old_ulid, new_ulid}
+    out: dict = {}
+    lost: list[str] = []
+    review: list[str] = []
+    for key, value in old.items():
+        if key in NOT_COPIED or key == "tags" or value is None or value == [] or value == {}:
+            continue
+        if key in REF_LISTS and isinstance(value, list):
+            kept = []
+            for el in value:
+                text, state = _rewrite(el, ids, new_of, new_ulid)
+                if state == "lost":
+                    lost.append(f"{key}: {el}")
+                elif text is not None:
+                    kept.append(text)
+            if kept:
+                out[key] = kept
+        elif key == "case" and isinstance(value, str):
+            text, state = _rewrite(value, ids, new_of, new_ulid)
+            if state == "lost":
+                lost.append(f"{key}: {value}")
+            elif text is not None:
+                out[key] = text
+        elif any(_mentions(value, u) for u in ids):
+            review.append(key)
+        else:
+            out[key] = value
+    tags = _tags(new)
+    dropped: list[str] = []
+    for tag in _tags(old):
+        if isinstance(tag, str) and tag.startswith(_SUPERSEDED):
+            dropped.append(tag)               # on purpose, and not a loss: it says something about the old Session
+            continue
+        text, state = _rewrite(tag, ids, new_of, new_ulid, need_prefix=False)
+        if state == "lost":
+            lost.append(f"tags: {tag}")
+            continue
+        if text is None:
+            continue
+        if text not in tags:
+            tags.append(text)
+    mark = f"migrated-from-{old_ulid}"
+    if mark not in tags:
+        tags.append(mark)
+    out["tags"] = tags
+    return {"fields": out, "dropped": sorted(set(dropped)), "lost": lost, "review": sorted(review)}
+
+
+def check_report(report) -> list[dict]:
+    """The `sessions` of an `inventory --json` output, or MigrateError: a list of objects with a string `ulid`."""
+    sessions = report.get("sessions") if isinstance(report, dict) else None
+    if (not isinstance(sessions, list) or not all(isinstance(s, dict) for s in sessions)
+            or not all(isinstance(s.get("ulid"), str) for s in sessions)):
+        raise MigrateError("inventory 輸出的格式不對：要有 sessions 清單，每一筆有 ulid（migrate inventory --json 的輸出）")
+    return sessions
+
+
+def plan_copy(paths: store.Paths, report: dict) -> list[CopyItem]:
+    """Which old Session's fields go to which new one, and everything else the report says about old ones.
+
+    The pairs come from `inventory`'s `replacement`, each checked again against the index (same source,
+    chunks/1, `import`, neither gone from Drive). Every old-format Session of the report is an item: a
+    pair (`copy`), expected to have none (`na`: not `local-present` and not in `drop_list`) or `broken`.
+    So is every old-format Session of the *index* the report does not name (`missing-from-inventory`): the
+    file is not trusted. Which old one to copy is decided over all the old-format Sessions of that source
+    in the index, not over the ones the report happens to name."""
+    entries = check_report(report)
+    drop = {u for u in (report.get("drop_list") or []) if isinstance(u, str)}
+    db = open_index(paths)
+    try:
+        rows, missing, _children = read_rows(db)
+        by_ulid = {r.ulid: r for r in rows}
+        old_rows = [r for r in rows if layout_of(r.raw) != store.RAW_LAYOUT]
+        # every old Session there is: in the index, or only named by the report (a Drive-only one has no row)
+        all_old = {r.ulid for r in old_rows} | {s["ulid"] for s in entries if s.get("class") != "new-format"}
+        live_old: dict[tuple, list[str]] = {}
+        for r in old_rows:
+            if r.ulid not in missing and r.agent in AGENT_NAMES and r.source_id:
+                live_old.setdefault((r.agent, r.source_id), []).append(r.ulid)
+        groups: dict[str, set[str]] = {}       # new ulid -> old ulids the report pairs with it
+        items: list[CopyItem] = []
+        seen: set[str] = set()
+        for s in entries:
+            old = s["ulid"]
+            if s.get("class") in ("new-format", "drive-only") or old in seen:
+                continue
+            seen.add(old)
+            rep = s.get("replacement")
+            new = rep.get("ulid") if isinstance(rep, dict) else None
+            o, n = by_ulid.get(old), by_ulid.get(new) if isinstance(new, str) else None
+            expected = False
+            if not isinstance(new, str):
+                why = "no-replacement"
+                expected = s.get("class") != "local-present" and old not in drop
+            elif o is None:
+                why = "old-not-in-index"
+            elif n is None:
+                why = "replacement-not-in-index"
+            elif old in missing:
+                why, expected = "old-gone-from-drive", old not in drop
+            elif new in missing:
+                why = "replacement-gone-from-drive"
+            elif layout_of(o.raw) == store.RAW_LAYOUT:
+                why = "old-is-already-chunks"
+            elif layout_of(n.raw) != store.RAW_LAYOUT or n.relation != "import":
+                why = "replacement-is-not-a-chunks-import"
+            elif not o.source_id or (o.agent, o.source_id) != (n.agent, n.source_id):
+                why = "replacement-is-of-another-source"
+            else:
+                groups.setdefault(new, set()).add(old)
+                continue
+            items.append(CopyItem(new if isinstance(new, str) else None, None, "na" if expected else "broken",
+                                  "skipped", why, others=[old]))
+        for r in old_rows:
+            if r.ulid not in seen and r.ulid not in missing:
+                items.append(CopyItem(None, None, "broken", "skipped", "missing-from-inventory", others=[r.ulid]))
+        new_of: dict[str, str] = {}
+        for new in groups:
+            key = (by_ulid[new].agent, by_ulid[new].source_id)
+            for o in set(live_old.get(key, [])) | groups[new]:
+                new_of[o] = new
+        headers = _headers(db, {u for k, v in groups.items() for u in
+                                [k, *live_old.get((by_ulid[k].agent, by_ulid[k].source_id), []), *v]})
+    finally:
+        db.close()
+
+    for new in sorted(groups):
+        key = (by_ulid[new].agent, by_ulid[new].source_id)
+        olds = sorted(set(live_old.get(key, [])) | groups[new])
+        if new not in headers or any(o not in headers for o in olds):
+            items.append(CopyItem(new, None, "broken", "skipped", "header-unreadable", others=olds))
+            continue
+        pick = olds
+        if len(olds) > 1:
+            pick = [o for o in olds if not _superseded(headers[o])]
+            if len(pick) != 1:
+                items.append(CopyItem(new, None, "broken", "skipped",
+                                      "several-old-all-superseded" if not pick else "several-old-none-or-many-not-superseded",
+                                      others=olds))
+                continue
+        old = pick[0]
+        w = wanted(headers[old], headers[new], old, new, all_old, new_of)
+        for k, v in list(w["fields"].items()):
+            have = headers[new].get(k)
+            if isinstance(v, list) and isinstance(have, list):
+                # what a person added to the new Session stays: the target is what it has plus what is missing
+                w["fields"][k] = list(have) + [e for e in v if e not in have]
+        changes = [k for k, v in w["fields"].items() if headers[new].get(k) != v]
+        item = CopyItem(new, old, "copy", "todo" if changes else "done", None, w["fields"], changes,
+                        w["dropped"], w["lost"], w["review"], [o for o in olds if o != old])
+        if not changes and item.blocking:
+            item.status = "attention"
+        items.append(item)
+    items.sort(key=lambda i: (i.new or "", i.others))
+    return items
+
+
+@dataclass
+class Summary:
+    counts: dict
+    blocking: int                         # pairs with something lost or waiting for a person, not accepted
+    accepted: list[str]                   # new ULIDs whose lost/review a person has accepted (`--accept`)
+    uncovered: list[str]                  # in the report's drop_list, and not an old Session that is consistent
+    pre_reimport: bool                    # a local-present old Session, and none of them has a replacement
+
+    @property
+    def clean(self) -> bool:
+        """The condition for deleting: nothing to write, nothing broken, nothing lost or waiting for a person
+        (unless accepted), and every Session of `drop_list` is covered by a consistent pair."""
+        c = self.counts
+        return not (c["todo"] or self.blocking or c["broken"] or self.uncovered)
+
+
+_ULID_LINE = re.compile(rf"(?:agora:)?({_ULID})")
+
+
+def read_accept(path: str, items: list[CopyItem]) -> set[str]:
+    """The new ULIDs in an accept file (one per line, `#` comments and blank lines ignored), or MigrateError.
+
+    Fail-closed like the must-keep list: a file that cannot be read, a line that is not a ULID, or a ULID that
+    is not the new Session of any pair in this plan (a typo) is an error. The message holds line numbers only."""
+    try:
+        text = Path(path).read_bytes().decode("utf-8")
+    except OSError as e:
+        raise MigrateError(f"accept 檔 {path} 讀不到（{e.strerror or type(e).__name__}）") from None
+    except UnicodeDecodeError:
+        raise MigrateError(f"accept 檔 {path} 不是 UTF-8") from None
+    known = {i.new for i in items if i.kind == "copy"}
+    ids: set[str] = set()
+    bad: list[int] = []
+    for n, line in enumerate(text.removeprefix("\ufeff").splitlines(), 1):
+        line = line.split("#", 1)[0].strip(" \t")
+        if not line:
+            continue
+        m = _ULID_LINE.fullmatch(line)
+        if not m or m.group(1) not in known:
+            bad.append(n)
+        else:
+            ids.add(m.group(1))
+    if bad:
+        raise MigrateError(f"accept 檔 {path} 第 {', '.join(map(str, bad))} 行不是這次計畫裡某一對的新 ULID；全部不採用")
+    return ids
+
+
+def summarize(items: list[CopyItem], report: dict, accept: "set[str] | frozenset[str]" = frozenset()) -> Summary:
+    sessions = check_report(report)
+    drop = {u for u in (report.get("drop_list") or []) if isinstance(u, str)}
+    covered = set()
+    accepted: list[str] = []
+    blocking = 0
+    for i in items:
+        if i.kind != "copy":
+            continue
+        ok = i.status == "done" or (i.status == "attention" and i.new in accept)
+        if i.blocking and i.new in accept and i.status != "todo":
+            accepted.append(i.new)
+        elif i.blocking:
+            blocking += 1
+        if ok:
+            covered.add(i.old)
+            covered.update(i.others)          # the superseded ones: listed only, on purpose
+    counts = {"todo": 0, "done": 0, "attention": 0, "na": 0, "broken": 0}
+    for i in items:
+        if i.kind != "copy":
+            counts[i.kind] += 1
+            continue
+        counts["todo" if i.status == "todo" else "done" if i.status == "done" else "attention"] += 1
+    local = [s for s in sessions if s.get("class") == "local-present"]
+    return Summary(counts, blocking, sorted(accepted), sorted(drop - covered),
+                   bool(local) and all(not s.get("replacement") for s in local))
+
+
+def current_matches(paths: store.Paths, item: CopyItem) -> list[str]:
+    """Names of the fields whose value on the new header is not what the plan says (read again, read-only)."""
+    db = open_index(paths)
+    try:
+        hdr = _headers(db, [item.new]).get(item.new)
+    finally:
+        db.close()
+    if hdr is None:
+        return sorted(item.fields)
+    return sorted(k for k, v in item.fields.items() if hdr.get(k) != v)
+
+
+def describe(item: CopyItem) -> str:
+    """One line: lengths for the free text, values for case/refs/tags. Never a title or a description."""
+    if item.old is None:
+        olds = "、".join(item.others)
+        label = "預期不適用" if item.kind == "na" else "不抄"
+        if item.new is None:
+            return f"agora:{olds} {label}：{item.reason}"
+        return f"agora:{item.new} {label}：{item.reason}（舊的：{olds}）"
+    parts = []
+    for k in item.changes:
+        v = item.fields[k]
+        if k in ("case", "refs", "tags", "verified"):
+            parts.append(f"{k}={json.dumps(v, ensure_ascii=False)}")
+        else:
+            parts.append(f"{k}(長度 {len(json.dumps(v, ensure_ascii=False))})")
+    head = f"agora:{item.new} ← agora:{item.old}："
+    body = ("已一致" if item.status == "done" else "會改 " + "、".join(parts) if item.changes else "欄位已寫入，但有東西要人處理")
+    extra = f"；沒抄（刻意）：{'、'.join(item.dropped)}" if item.dropped else ""
+    extra += f"；丟掉了（指向舊 id、沒有新 id）：{'；'.join(item.lost)}" if item.lost else ""
+    extra += f"；需人決定（欄位提到舊 id，不猜）：{'、'.join(item.review)}" if item.review else ""
+    extra += f"；同來源另有舊的：{'、'.join(item.others)}（只列出）" if item.others else ""
+    return head + body + extra
