@@ -175,7 +175,6 @@ async def one_rep(root: Path, remote_src: Path, ulids: list[str], locals_per_age
         AGENTS = ()
 
     app = tui.AgoraApp(paths, _Cli(), agents=agents, check_setup=False, sync_on_start=with_sync)
-    ticks: list[float] = []
     out: dict = {}
     t0 = time.perf_counter()
     async with app.run_test(size=(120, 40)) as pilot:
@@ -193,12 +192,18 @@ async def one_rep(root: Path, remote_src: Path, ulids: list[str], locals_per_age
             return out
         # Keys while the child runs: press, then wait for the cursor to move (the latency).
         worst_key = 0.0
-        last = time.perf_counter()
+        ticks: list[float] = []
+        last_tick = time.perf_counter()
+
+        def record_tick():
+            nonlocal last_tick
+            now = time.perf_counter()
+            ticks.append(now - last_tick)
+            last_tick = now
+
+        timer = app.set_interval(0.01, record_tick)
         key_name = "down"
         while not app.sync_settled.is_set():
-            now = time.perf_counter()
-            ticks.append(now - last)
-            last = now
             before = table.cursor_row
             pressed = time.perf_counter()
             await pilot.press(key_name)
@@ -211,6 +216,7 @@ async def one_rep(root: Path, remote_src: Path, ulids: list[str], locals_per_age
             key_name = "up" if key_name == "down" else "down"
             await asyncio.sleep(0.2)
         await asyncio.wait_for(app.sync_settled.wait(), 600)
+        timer.stop()
         await pilot.pause()
         out["sync_s"] = time.perf_counter() - t0
         out["key_s"] = worst_key

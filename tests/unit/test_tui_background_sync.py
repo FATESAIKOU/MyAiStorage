@@ -158,12 +158,13 @@ def test_c12_the_list_is_usable_while_the_sync_child_is_still_running():
 
     def spawn_sync():
         seen["rows"] = len(app.rows["agora"])        # reload has come first (C-12: after reload)
+        seen["idle"] = app._sync_idle.is_set()
         return real()
     app.spawn_sync = spawn_sync
 
     async def body(pilot):
         assert await until(lambda: app.sync.running, pilot), "the sync child never started"
-        assert seen == {"rows": 2}
+        assert seen == {"rows": 2, "idle": False}
         table = app.query_one("#table")
         assert table.row_count == 2 and table.has_focus
         assert not app._sync_idle.is_set()
@@ -172,12 +173,16 @@ def test_c12_the_list_is_usable_while_the_sync_child_is_still_running():
     run_app(app, body)
 
 
-def test_c12_begin_sync_is_refused_while_one_is_running():
+def test_c12_begin_sync_is_refused_while_one_is_running(monkeypatch):
     app, _ = make_app()
 
     async def body(pilot):
         assert await until(lambda: app.sync.running, pilot)
+        starts = []
+        monkeypatch.setattr(app.sync, "start", lambda: (starts.append(1), False)[1])
         assert app.begin_sync() is False
+        assert not app._sync_idle.is_set()
+        assert starts == []
         assert app.sync_started == [1]
     run_app(app, body)
 
@@ -237,6 +242,23 @@ def test_c13_the_bar_stays_quiet_when_the_sync_was_throttled(monkeypatch):
         assert "同步 Drive 中" not in bar(app)
         app.proc.release(DONE_LINES)
         await settled(app, pilot)
+    run_app(app, body)
+
+
+def test_c13_bar_repaints_on_sync_tick(monkeypatch):
+    monkeypatch.setattr(tui, "SYNC_TICK", 0.01)
+    app, _ = make_app()
+    ticks: list = []
+    real_paint = app.paint_bar
+    monkeypatch.setattr(app, "paint_bar", lambda: (ticks.append(1), real_paint()))
+
+    async def body(pilot):
+        assert await until(lambda: app.sync.running, pilot)
+        assert await until(lambda: len(ticks) >= 3, pilot)
+        assert app._sync_tick_timer is not None
+        app.proc.release(DONE_LINES)
+        await settled(app, pilot)
+        assert app._sync_tick_timer is None
     run_app(app, body)
 
 
@@ -341,46 +363,27 @@ def test_c15_a_box_on_top_keeps_the_new_list_back_until_it_closes(monkeypatch):
     run_app(app, body)
 
 
-def test_c15_typing_in_the_filter_holds_the_list_and_leaving_it_shows_the_list(monkeypatch):
+def test_c15_hide_preview_search_applies_immediately(monkeypatch):
+    monkeypatch.setattr(tui, "SYNC_APPLY_RETRY", 3600)
     app, _ = make_app()
 
     async def body(pilot):
         assert await until(lambda: app.sync.running, pilot)
-        await pilot.press("slash")
+        app.open_preview_search()
         await pilot.pause()
-        assert app.focused.id == "filter"
         _index(session(C, "第三個"))
         app.proc.release(DONE_LINES)
         assert await until(lambda: app._pending_rows is not None, pilot)
-        assert app.query_one("#table").row_count == 2
-        await pilot.press("escape")                 # the filter goes: the list may come now
-        assert await until(lambda: app._pending_rows is None, pilot)
+        app.set_focus(app.query_one("#table"))
+        app.hide_preview_search()
+        await pilot.pause()
+        assert app._pending_rows is None
         assert app.query_one("#table").row_count == 3
     run_app(app, body)
 
 
-def test_c15_tab_out_of_filter_applies_the_new_list(monkeypatch):
-    monkeypatch.setattr(tui, "SYNC_APPLY_RETRY", 0.01)
-    app, _ = make_app()
-
-    async def body(pilot):
-        assert await until(lambda: app.sync.running, pilot)
-        await pilot.press("slash")
-        await pilot.pause()
-        assert app.focused.id == "filter"
-        _index(session(C, "第三個"))
-        app.proc.release(DONE_LINES)
-        assert await until(lambda: app._pending_rows is not None, pilot)
-        assert app.query_one("#table").row_count == 2
-        await pilot.press("tab")                    # tab switches focus to right pane and applies
-        assert await until(lambda: app._pending_rows is None, pilot)
-        assert app.query_one("#table").row_count == 3
-        assert app.focused.id != "filter"
-    run_app(app, body)
-
-
-def test_c15_closing_preview_search_applies_the_new_list(monkeypatch):
-    monkeypatch.setattr(tui, "SYNC_APPLY_RETRY", 0.01)
+def test_c15_close_preview_search_applies_immediately(monkeypatch):
+    monkeypatch.setattr(tui, "SYNC_APPLY_RETRY", 3600)
     app, _ = make_app()
 
     async def body(pilot):
@@ -391,11 +394,72 @@ def test_c15_closing_preview_search_applies_the_new_list(monkeypatch):
         _index(session(C, "第三個"))
         app.proc.release(DONE_LINES)
         assert await until(lambda: app._pending_rows is not None, pilot)
-        assert app.query_one("#table").row_count == 2
-        await pilot.press("escape")                 # close preview search
-        assert await until(lambda: app._pending_rows is None, pilot)
+        app.close_preview_search()
+        await pilot.pause()
+        assert app._pending_rows is None
         assert app.query_one("#table").row_count == 3
         assert app.search_open is False
+    run_app(app, body)
+
+
+def test_c15_toggle_focus_applies_immediately(monkeypatch):
+    monkeypatch.setattr(tui, "SYNC_APPLY_RETRY", 3600)
+    app, _ = make_app()
+
+    async def body(pilot):
+        assert await until(lambda: app.sync.running, pilot)
+        await pilot.press("slash")
+        await pilot.pause()
+        assert app.focused.id == "filter"
+        _index(session(C, "第三個"))
+        app.proc.release(DONE_LINES)
+        assert await until(lambda: app._pending_rows is not None, pilot)
+        assert app.query_one("#table").row_count == 2
+        await pilot.press("tab")
+        await pilot.pause()
+        assert app._pending_rows is None
+        assert app.query_one("#table").row_count == 3
+        assert app.focused.id != "filter"
+    run_app(app, body)
+
+
+def test_c15_filter_done_applies_immediately(monkeypatch):
+    monkeypatch.setattr(tui, "SYNC_APPLY_RETRY", 3600)
+    app, _ = make_app()
+
+    async def body(pilot):
+        assert await until(lambda: app.sync.running, pilot)
+        await pilot.press("slash")
+        await pilot.pause()
+        assert app.focused.id == "filter"
+        _index(session(C, "第三個"))
+        app.proc.release(DONE_LINES)
+        assert await until(lambda: app._pending_rows is not None, pilot)
+        assert app.query_one("#table").row_count == 2
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app._pending_rows is None
+        assert app.query_one("#table").row_count == 3
+    run_app(app, body)
+
+
+def test_c15_escape_filter_applies_immediately(monkeypatch):
+    monkeypatch.setattr(tui, "SYNC_APPLY_RETRY", 3600)
+    app, _ = make_app()
+
+    async def body(pilot):
+        assert await until(lambda: app.sync.running, pilot)
+        await pilot.press("slash")
+        await pilot.pause()
+        assert app.focused.id == "filter"
+        _index(session(C, "第三個"))
+        app.proc.release(DONE_LINES)
+        assert await until(lambda: app._pending_rows is not None, pilot)
+        assert app.query_one("#table").row_count == 2
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app._pending_rows is None
+        assert app.query_one("#table").row_count == 3
     run_app(app, body)
 
 
@@ -793,3 +857,24 @@ def test_reload_drops_a_list_that_has_not_been_shown(monkeypatch):
         app.reload()
         assert app._pending_rows is None
     run_app(app, body)
+
+
+def test_compute_sync_rows_failure_settles_and_opens_gate(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(tui, "build_rows", boom)
+    app, _ = make_app()
+
+    async def body(pilot):
+        assert await until(lambda: app.sync.running, pilot)
+        app.proc.release(DONE_LINES)
+        await asyncio.wait_for(app.sync_settled.wait(), 5)
+        assert "讀不到本機清單" in msg(app)
+        await pilot.press("d")
+        await pilot.pause()
+        assert not any(isinstance(s, tui.WaitSync) for s in app.screen_stack)
+    run_app(app, body)
+
+
+def test_wait_sync_bindings_only_escape():
+    assert [b.key for b in tui.WaitSync.BINDINGS] == ["escape"]

@@ -1309,9 +1309,7 @@ class AgoraApp(App):
             self._sync_shown = False
             self.sync_done(tui_sync.SyncOutcome(tui_sync.FAILED, f"叫不起同步子行程：{e}"[:200]))
             return True
-        if not started:                         # cannot happen after the checks above; keep the gate honest
-            self._sync_idle.set()
-            self.sync_settled.set()
+        if not started:                         # cannot happen after the checks above
             return False
         if self._sync_shown:
             self._sync_tick_timer = self.set_interval(SYNC_TICK, self.paint_bar)
@@ -1825,7 +1823,7 @@ class AgoraApp(App):
     def close_preview_search(self) -> None:
         """Enter or Esc in the box: it goes and the pane takes the focus back."""
         self.hide_preview_search()
-        self.query_one("#right").focus()
+        self.set_focus(self.query_one("#right"))
         self._try_apply_sync()
 
     def clear_preview_search(self) -> None:
@@ -2049,7 +2047,7 @@ class AgoraApp(App):
         if getattr(self.focused, "id", None) == "search":
             self.hide_preview_search()
         target = "#table" if self.side() == "preview" else "#right"
-        self.query_one(target).focus()
+        self.set_focus(self.query_one(target))
         self._try_apply_sync()
 
     def _change_tab(self, step: int) -> None:
@@ -2131,7 +2129,7 @@ class AgoraApp(App):
             self._filter_timer.stop()
             self._filter_timer = None
         self.query_one("#filterbar").remove_class("on")
-        self.query_one("#table").focus()
+        self.set_focus(self.query_one("#table"))
         if text != self.text:          # the keystroke before this one already searched
             self.search(text)
         self._try_apply_sync()
@@ -2146,7 +2144,7 @@ class AgoraApp(App):
             self._pending_filter = ""
             self.query_one("#filter", Input).value = ""
             self.query_one("#filterbar").remove_class("on")
-            self.query_one("#table").focus()
+            self.set_focus(self.query_one("#table"))
             self.search("")
             self._try_apply_sync()
         elif self.search_open:
