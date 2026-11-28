@@ -60,6 +60,10 @@
       "backend": "aicompany-channel",
       "issue": 55
     },
+    "role-mypmo-arch": {
+      "backend": "aicompany-channel",
+      "issue": 58
+    },
     "role-mypmo-pm": {
       "backend": "aicompany-channel",
       "issue": 57
