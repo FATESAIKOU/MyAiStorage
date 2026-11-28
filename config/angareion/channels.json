@@ -36,6 +36,10 @@
       "backend": "aicompany-channel",
       "issue": 49
     },
+    "role-mycodequality-pm": {
+      "backend": "aicompany-channel",
+      "issue": 51
+    },
     "secretary-pmo": {
       "backend": "aicompany-channel",
       "issue": 9
