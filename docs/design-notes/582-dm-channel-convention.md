@@ -52,8 +52,8 @@
    - 每頁上限 `PAGE_COMMENT_LIMIT = 2500`，`PageWriter` 於 `PAGE_ROLLOVER_AT = 2400` 自動開下一頁並寫入 `rollover` 註冊簿留言（`PAGE_WARN_AT = 2000`、`PAGE_FILL_LIMIT = 2490`）；PR-3c 已合併至 `main`，既有團隊頻道（`team-mypmo-m1`、`team-mylinuxpool-w2`、`w3`）已經換過頁。
 7. **本人的設計偏好**：
    - **本人 11-28 偏好不新增實體（見 MyAiStorage#581 結論留言）**，明確反對為每個小單元增殖 GitHub issue 實體的設計方向。
-8. **本人全域「@你」收件匣與既有找本人慣例（`skills/aicomm/SKILL.md`）**：
-   - MyAiEntry App 的「@你」收件匣預設是**跨頻道的**（掃描所有頻道裡 `to == myaientry-secretary-p1` 或 `myaientry-secretary-p1 in mentions`）；AI 找本人的既有慣例是在**自己的團隊頻道**用 `--to myaientry-secretary-p1`（或 `--mention`）。因此新增 `dm-secretary` 後須於契約明確切分 DM 與團隊「@你」（見 §4 C-7、C-8）。
+8. **本人全域「@你」收件匣與既有找本人慣例**：
+   - 依 `Angareion.read` 不帶 `--channel` 遍歷全頻道（`src/angareion/client.py`），MyAiEntry App 的「@你」收件匣預設掃描所有頻道裡 `to == myaientry-secretary-p1` 或 `myaientry-secretary-p1 in mentions`（`skills/aicomm/SKILL.md`）；AI 找本人的**既有實務**是在自己的團隊頻道用 `--to myaientry-secretary-p1`（或 `--mention`），而本人只跟 PMO 說話的規矩見 `skills/aicomm/SKILL.md`。因此新增 `dm-secretary` 後須於契約明確切分 DM 與團隊「@你」（見 §4 C-7、C-8）。
 
 ---
 
@@ -183,9 +183,9 @@
   ```
   （本人不在 sidecar 上，`stderr` 回 `wake: myaientry-secretary-p1 not-woken ...` 但 `exit 0` 已送達，屬正常預期。）
 - **本人在團隊頻道 `@AI`／`--to` 的舊慣例完整保留**：若本人在 `team-*` 公開發言並點名某 AI，該 AI 照舊回在同一條 `team-*` 頻道（總原則為「**回同一頻道**」）。
-- **AI 主動找本人時用哪個頻道**：
-  - 團隊工作回報、結案、驗收或團隊共知事項：保留既有慣例，在**所屬 `team-*` 頻道**用 `--to myaientry-secretary-p1`（或 `--mention`），進入本人「@你」收件匣（須本人決定之事仍依 SKILL 經 PMO）。
-  - 延續 `dm-secretary` 一對一對話，或無對應 `team-*` 頻道之一對一追問：送往 `dm-secretary`（`--channel dm-secretary --to myaientry-secretary-p1`）。
+- **AI 對本人發話的頻道邊界（不放寬主動找本人）**：
+  - 團隊工作回報、結案、驗收或團隊共知事項：保留既有實務，在**所屬 `team-*` 頻道**用 `--to myaientry-secretary-p1`（或 `--mention`），進入本人「@你」收件匣（須本人決定之事仍依 `skills/aicomm/SKILL.md` 經 PMO）。
+  - **僅限回應本人先開的 DM**：延續本人先開的 `dm-secretary` 一對一對話時送往 `dm-secretary`（`--channel dm-secretary --to myaientry-secretary-p1`）；AI 不主動在 `dm-secretary` 開問本人；要本人決定的事仍依 `skills/aicomm/SKILL.md` 經 PMO。
 
 ---
 
@@ -205,7 +205,7 @@
 於 repo 根目錄以 `uv run python` 執行（本單只 commit 設計文件，故驗證腳本不放進 `tests/`；審查者可直接執行團隊工作目錄的 `verify-582/verify_dm_fake.py`，或依下列等價步驟重現）：
 1. **隔離環境變數**：建暫存根目錄 `<暫存目錄>`，先清除 `XDG_DATA_HOME`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`XDG_CACHE_HOME`、`CLAUDE_CONFIG_DIR`、`OPENCODE_CONFIG_CONTENT`、`CODEX_HOME`、`ANGAREION_IDENTITY`。將 `HOME`、`TMPDIR`、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`AGORA_CODEX_HOME`、`ANGAREION_CONFIG`、`ANGAREION_STATE_DIR`、`ANGAREION_TOKEN_FILE` 全數指向 `<暫存目錄>` 內各自子目錄，並於**同一行程**斷言 `agora.store.Paths.from_env()` 與 `angareion.config` 的 `get_config_path()`、`get_state_dir()`、`get_default_token_path()` 均位於 `<暫存目錄>` 底下。
 2. **設定檔與假夾具**：於 `<暫存目錄>` 寫入 `0600` 假 token 與 `Config(identity="mypmo-pm-m1", registry_repo="owner/MyAiStorage", registry_issue=47, ...)`；以 `tests/unit/_angareion_fakes.py` 的 `FakeGit`（預載 `team-mypmo-m1 -> ("aicompany-channel", 42)` 與 `aicompany-channel -> ("github", "owner/AiCompany-channel")`）建 `ChannelStore`；建 `FakeBackend(store, start_entity_id=100, clock=<由 2026-11-28T02:00:00Z 起每次 +2s>)` 並 `add_entity("team-mypmo-m1", number=42, repo="owner/AiCompany-channel")`；建套用 `angareion.registry_rules.rebuild_channels` 的 `FakeRegistryClient(post_association="OWNER", post_user_type="User")` 並預留 `team-mypmo-m1` 的註冊留言。
-3. **執行指令序列**：切換 `ANGAREION_IDENTITY`，依序呼叫 `angareion.cli.main(argv, backend=..., store=..., registry=...)` 執行下方原樣輸出中的 13 個指令。
+3. **執行指令序列**：切換 `ANGAREION_IDENTITY`，依序呼叫 `angareion.cli.main(argv, backend=..., store=..., registry=...)` 執行下方原樣輸出中的 15 個指令。
 4. **時鐘欄位說明**：輸出 JSON 內的 `at` 由 `angareion.messages.Message` 依系統即時 UTC 時鐘產生，而 `received_at` 來自 `FakeBackend` 注入的合成遞增時鐘（`2026-11-28T02:00:04Z` 起 `+2s`）；兩者約數十分鐘的差值為假時鐘設計所致，並非傳輸延遲。
 
 ### 5.3 原樣輸出
@@ -433,4 +433,4 @@ ALL CHECKS PASSED
 - **Q-1（本人／PM 裁定）**：DM 頻道架構採 **(C) 單一專用 DM 頻道 `dm-secretary`**（架構師建議）、**(B) 每對一頻道 `dm_<a>_<b>`**，還是 **(A) 不新增實體（既有頻道雙人視圖，若要區分需另開單加 `--datatype dm`）**？
 - **Q-2（PM 決定）**：註冊簿與 `channels.json` 是否維持**零改碼**（靠固定頻道名 `dm-secretary` 或 `dm_` 前綴辨識），還是另開單在註冊簿與 `channels.json` 加 `kind` 欄？建議維持零改碼。
 - **Q-3（PMO／本人決定）**：在 `dm-secretary` 傳給 `mypmo-pm-m1` 的高 urgency 訊息，是否維持現狀只當 `叫人`（`is_call`），急件仍走 `secretary-pmo`（`pmo.inbox.should_poke` 僅認 `dispatch_channel`）？建議維持現狀。
-- **Q-4（PM／本人執行）**：若 Q-1 採 (C)，誰在上線前執行一次 `angareion channel create dm-secretary --backend aicompany-channel`（建議由 PMO 或本人執行），並同步將使用規則（含回同一頻道、AI 主動找本人何時用 `team-*` vs `dm-secretary`、嚴禁省略 `--to`）補進 `skills/aicomm/SKILL.md` 與 `skills/angareion/SKILL.md`（另案或交接給檔案維護者）。
+- **Q-4（PM／本人執行）**：若 Q-1 採 (C)，誰在上線前執行一次 `angareion channel create dm-secretary --backend aicompany-channel`（建議由 PMO 或本人執行），並同步將使用規則（含回同一頻道、僅限回應本人先開的 DM／AI 不主動在 `dm-secretary` 開問本人、嚴禁省略 `--to`，以及 `dm-secretary` 排除在 App 全域「@你」之外）補進 `skills/aicomm/SKILL.md` 與 `skills/angareion/SKILL.md`（另案或交接給檔案維護者）；**是否放寬為 AI 可主動 DM 本人：待本人（預設不放寬）**。
