@@ -12,6 +12,10 @@
       "backend": "aicompany-channel",
       "issue": 43
     },
+    "role-llmgateway-arch": {
+      "backend": "aicompany-channel",
+      "issue": 46
+    },
     "role-llmgateway-pm": {
       "backend": "aicompany-channel",
       "issue": 45
