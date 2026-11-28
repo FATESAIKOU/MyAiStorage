@@ -13,11 +13,8 @@ from pathlib import Path
 import tempfile
 from urllib.parse import parse_qs, urlsplit
 
-ROOT = Path('/home/worker/work/MyAiStorage-team')
-
-
 def main():
-    with tempfile.TemporaryDirectory(prefix='probe-590-', dir=ROOT) as tmp:
+    with tempfile.TemporaryDirectory(prefix='probe-590-') as tmp:
         root = Path(tmp).resolve()
         for key in list(os.environ):
             if key.startswith('XDG_') or key in {'CLAUDE_CONFIG_DIR', 'OPENCODE_CONFIG_CONTENT', 'CODEX_HOME', 'ANGAREION_IDENTITY'}:
@@ -115,7 +112,6 @@ def main():
         row('channel verify issue', lambda: app.verify_channel('general', BackendRef('main','github','example/repo'), 10))
         row('channel list local resolver', lambda: store.entities())
         print('Scope: fake transport only; git fetch, CLI setup, decision writes and full tick are not measured.')
-
 
 if __name__ == '__main__':
     main()
