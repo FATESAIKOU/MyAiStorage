@@ -52,6 +52,10 @@
       "backend": "aicompany-channel",
       "issue": 53
     },
+    "role-mylinuxpool-arch": {
+      "backend": "aicompany-channel",
+      "issue": 56
+    },
     "role-mylinuxpool-pm": {
       "backend": "aicompany-channel",
       "issue": 55
