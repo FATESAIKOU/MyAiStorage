@@ -186,8 +186,14 @@ def test_output_never_contains_value_or_context(tmp_path):
     assert "len=40" in out and "kinds=4" in out and "sha256=" in out
 
 
-def test_gh_token_always_reports_four_kinds():
+def test_gh_token_always_reports_four_kinds(monkeypatch):
     """The kinds=4 assertion above depends on this: every draw has all four character kinds."""
+    with monkeypatch.context() as patch:
+        patch.setattr(_RANDOM, "choice", lambda candidates: candidates[0])
+        token = gh_token()
+        assert not any(literal in token[4:] for literal in _RULE_LITERALS)
+        hits = credscan.scan_text(token)
+        assert [(name, length, kinds) for name, length, kinds, _ in hits] == [("github-token", 40, 4)]
     for _ in range(500):
         hits = credscan.scan_text(gh_token())
         assert [(name, length, kinds) for name, length, kinds, _ in hits] == [("github-token", 40, 4)]
