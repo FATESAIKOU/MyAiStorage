@@ -402,6 +402,40 @@ def test_c15_close_preview_search_applies_immediately(monkeypatch):
     run_app(app, body)
 
 
+def test_esc_in_the_preview_search_box_closes_it_and_gives_the_focus_back_to_the_pane():
+    app, _ = make_app()
+
+    async def body(pilot):
+        app.open_preview_search()
+        await pilot.pause()
+        assert app.focused.id == "search" and app.search_open is True
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.search_open is False
+        assert app.focused.id == "right"
+    run_app(app, body)
+
+
+def test_esc_in_the_preview_search_box_applies_a_waiting_list_immediately(monkeypatch):
+    monkeypatch.setattr(tui, "SYNC_APPLY_RETRY", 3600)
+    app, _ = make_app()
+
+    async def body(pilot):
+        assert await until(lambda: app.sync.running, pilot)
+        app.open_preview_search()
+        await pilot.pause()
+        assert app.focused.id == "search" and app.search_open is True
+        _index(session(C, "第三個"))
+        app.proc.release(DONE_LINES)
+        assert await until(lambda: app._pending_rows is not None, pilot)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.search_open is False
+        assert app._pending_rows is None
+        assert app.query_one("#table").row_count == 3
+    run_app(app, body)
+
+
 def test_c15_toggle_focus_applies_immediately(monkeypatch):
     monkeypatch.setattr(tui, "SYNC_APPLY_RETRY", 3600)
     app, _ = make_app()
