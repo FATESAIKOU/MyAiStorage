@@ -20,6 +20,10 @@
       "backend": "aicompany-channel",
       "issue": 45
     },
+    "role-myaientry-pm": {
+      "backend": "aicompany-channel",
+      "issue": 47
+    },
     "secretary-pmo": {
       "backend": "aicompany-channel",
       "issue": 9
