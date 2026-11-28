@@ -1,436 +1,297 @@
-# #582 DM 與成員頻道慣例（MyAiEntry N34 依據）
+# #582 專案×角色頻道慣例（MyAiEntry N34 依據）
 
-- 單：#582（MAS，設計文件；App 端 N34 依據本單）。
-- 作者：專案架構師（作者模式，Gemini 4 Hydrogen (High)），2026-11-28。基準：main `38aa2b5`。
-- 範圍：**只寫設計文件，不改程式**。不動 `src/`、`openspec/`、`config/angareion/`。
-- 相關決定：`docs/architecture/decisions.md` D-39（待審查與 PM／本人依 Q-1 定案）。
-- 實測：在本機隔離暫存環境（於執行期自建隔離暫存目錄，不碰真實家目錄、真頻道與真憑證）以 `angareion.cli.main` 接 `FakeBackend`、`ChannelStore(FakeGit)` 與套用 `registry_rules.rebuild_channels` 的 `FakeRegistryClient` 驗證建頻道、`--to` 收發、第三者 `read`/`log --to me` 隔離與負面洩漏案例（真實 GitHub、#542 換頁、`pmo` 與 `aicomm` 包裝未實測）；原樣輸出與重現步驟見 §5。
+- 單：#582；PR #583。作者：專案架構師（作者模式，GPT-6 / Codex），2026-11-28。
+- 基準：`a1daf3c`。只改設計文件；不改程式、主 spec 或頻道設定。
+- **本人 11-28 裁定（經 PMO）**：每個專案×角色共用一個頻道，由 PMO 建立；頻道不帶 team 或席位序號，在頻道內以完整 agent id 點名實際運作的 AI。D-39 同步本模型；命名與先開哪些角色是本設計建議，待重審。
 
----
+## 0. 結論與舊案追溯
 
-## 0. 結論（一頁摘要）
+採 `role-<project>-<role>`，先為現有八個專案各開 PM 與 arch，合計 16 個頻道；同專案的 w1、w2 與不同 arch 序號共用對應角色頻道。這是角色歷史與對話入口，不能再依 `(from, to)` 當成真正雙人 DM，也不能把頻道當成 agent id 或權限邊界。
 
-**建議採 (C) 單一專用 DM 頻道 `dm-secretary`**（全公司只多 **1** 個頻道實體，所有「本人 ↔ 單一 AI」一對一對話共用這條頻道，訊息強制帶 `--to <對方 AI 名>`，App 依 `(from, to)` 拆成各 AI 的對話串）。
+舊 A／B／C 比較**已被本人裁定取代**，僅保留追溯摘要：A 在既有 `team-*` 做雙人視圖，零新增實體但混入團隊歷史且無法區分普通點名；B 每對一頻道 `dm_<a>_<b>`，可區分對話但隨席位換代增殖、增加全員輪詢成本；C 共用 `dm-secretary`，只增一個實體但把所有角色對話聚在一起。前版建議 C 已撤回，不建立這三案的頻道，也不沿用「全域 @你排除 DM」的特殊計數規則。角色頻道仍依正常 `to`／`mentions` 計入 @你，App 若另列角色頻道，避免把同一訊息重複計數即可。
 
-四個核心問題的答案：
+## 1. 命名與註冊簿
 
-1. **命名**：固定頻道名 **`dm-secretary`**（符合 `CHANNEL_NAME_RE = ^[A-Za-z0-9_-]+$`、`channel_slug` 原樣不編碼、不占 `team-*` 前綴）。若 PM／本人選備案 **(B) 每對一頻道**，命名為 **`dm_<a>_<b>`**（`a < b` 字典序，兩者皆合法 `ainame`；不能用單一 `-`，見 §2.2）。
-2. **註冊簿怎麼登記（`kind` 或其他欄）**：**沿用現行 schema 1，不新增 `kind` 欄、零改碼**。`registry.parse_comment` 目前嚴格拒絕未知欄位（`unknown fields`），`channels.json` 也只有 `backend`／`issue`／`retired`；DM 身分由固定頻道名 `dm-secretary`（或備案 (B) 的 `dm_` 前綴）辨識。若未來要加 `kind`，改動清單列於 §6。
-3. **可見性（誰讀得到、會不會混進團隊頻道）**：
-   - **完全不混進團隊頻道**：`team-*` 與 `secretary-pmo` 的 GitHub issue 獨立，DM 不出現在團隊 `read --channel`／`log --channel`，不消耗團隊頻道的 2500 則上限，也不會撞到 `pmo` 在 `secretary-pmo` 的派工樣板檢查。
-   - **一般收信隔離**：DM 訊息**強制帶 `--to <對方 AI 名>`**（嚴禁省略 `--to` 廣播、嚴禁帶第三者 `--mention`；現行屬約定層規範，建議另開單於 `aicomm send` 檢查，見 §4 C-4、§7）。第三者用 `angareion read`（已實測）或 `angareion wait`、`aicomm inbox`（不帶 `--channel`）與 `aicomm log`（預設補 `--to me`，已實測 `angareion log --to me`；其餘依讀碼等價，見 §5 範圍說明）**都讀不到**。
-   - **後端與顯式 `--channel` 邊界**：Angareion 第一期無 ACL（所有通道共用 repo 與 token），任何持有 channel token 的隊員顯式執行 `angareion read --channel dm-secretary`（會印 stderr 警告）、`angareion log`（不帶 `--to me`）或直接看 GitHub issue 仍看得到；故仍適用 `docs/angareion.md`「不貼私人資訊，改參照 MyBrain」的規則。
-4. **DM 的成員是誰**：每則 DM 的兩方由訊息的 `from` 與 `to` 決定（兩者皆為合法 `ainame`、`from != to`；本人端固定為 `myaientry-secretary-p1`，對象端為單一 AI 席位）。不另外在 `channels.json` 存成員名單。
+### 1.1 名稱可逆、與既有命名分離
 
----
+建議 `role-<project>-<role>`：`project`、`role` 取自 `src/ainame/__init__.py` 的 `Name.project`、`Name.role`，角色限 `ROLES = (pm, arch, impl, test, rev, secretary)`。ainame 沒有專案白名單，不能把現有八個專案誤寫成它的 enum。
 
-## 1. 現況與限制（依現行程式碼與規格）
+編碼由合法 ainame 解析後取這兩欄。反解先去掉固定 `role-`，再以最後一個 `-` 切出角色；專案可含 `-` 或角色字，所以不能從左邊找角色字。例如 `pm-tools-impl-w1-1` → `role-pm-tools-impl` → `(pm-tools, impl)`。回驗可用最短合成席位：single role 用 `<project>-<role>-a`，其餘用 `<project>-<role>-a-1`，以 `ainame.parse` 驗證兩欄一致。
 
-1. **頻道名文法與編碼**：
-   - `openspec/specs/angareion/spec.md`、`src/angareion/messages.py`（`CHANNEL_NAME_RE`）與 `src/angareion/registry.py`（`CHANNEL_NAME_RE`）規定 channel 名為 `^[A-Za-z0-9_-]+$`（非空 ASCII 字母、數字、`-`、`_`）。Angareion 本身沒有長度上限；GitHub Issue 標題上限為 256 字元。
-   - `config.channel_slug` 對 `[a-z0-9_-]` 原樣通過（不作 `%XX` 轉義）。
-2. **AI 名文法（`src/ainame/__init__.py`）**：
-   - 格式為 `<project>-<role>-<team>[-<seq>]`，`MAX_LEN = 32`，字元限 `a-z`、`0-9`、`-`（字母開頭、不可 `--`、不可 `-` 結尾、**不含 `_`**）。
-   - `<project>` 允許含 `-` 且允許含角色字（例：`pm-tools-impl-m1-1`）。
-   - `SINGLE_ROLES`（`pm`、`secretary`）不帶 `<seq>`；`arch`、`impl`、`test`、`rev` 必帶 `1..99` 的 `<seq>`。
-   - 本人位址固定為 `myaientry-secretary-p1`（`skills/aicomm/SKILL.md`）。
-3. **送出、讀取與過濾語意（`client.py`、`backend.py`、`cli.py`、`log_query.py`）**：
-   - `angareion send`（`cli.cmd_send`）固定寫入 `datatype: "message"`（沒有 `--datatype` 旗標）；`--to` 走嚴格 `ainame` 檢查，省略 `--to` 即為廣播。
-   - `Angareion.read`／`Angareion.check` 不給 `--channel` 時，**遍歷 `ChannelStore.entities()` 的所有已登記頻道**（`READ_CONCURRENCY = 8` 併發），以 `backend.scope_matches` 過濾：`recipient` 模式收 `to is None or to == me or me in mentions`；`mentioned` 模式收 `to == me or me in mentions`。
-   - `angareion read --channel <ch>` 不過濾 `to`（讀頻道全體，並在 stderr 印 `_CHANNEL_READ_WARNING`）。
-   - `angareion log` 不給 `--to` 時，單／多頻道都列出全部訊息（含寄給別人的）；`aicomm log` 會在使用者未給 `--to`／`--mentioned` 時自動注入 `--to me`。
-   - `log_query.select` 對 `--from` 與 `--to` 取**交集**（AND），沒有單一旗標可直接表達「`(from=A ∧ to=B) ∨ (from=B ∧ to=A)`」。
-4. **註冊簿與重建（`registry.py`、`registry_rules.py`、`channel_config.py`）**：
-   - `registry.parse_comment` 對 `register`／`unregister` 嚴格檢查鍵集合為 `{schema, action, channel, backend, issue}`（`rollover` 動作另必填 `from`）；**出現任何額外欄位（例如 `kind`）即判 `InvalidAction("unknown fields: ...")` 並回報**。
-   - `registry_rules.rebuild_channels` 只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言，產出只有 `{backend, issue, retired?}`。
-   - `config/angareion/channels.json`（現有 25 個頻道，含 `secretary-pmo` 與各 `team-*`）由 GitHub Actions workflow 重建並 commit 到 `main`；建立新頻道從送出 `register` 到落地有時間差（`channel create` 最多等 120 秒）。
-   - 註冊簿 issue（`MyAiStorage#47`）本身也受 GitHub 單一 issue **2500 則留言上限**限制，所有頻道的建立、刪除與換頁共同消耗它（`docs/design-notes/542-channel-rollover.md`）。
-5. **PMO 收信模組的既定行為（`src/pmo/inbox.py`、`src/pmo/round.py`）**：
-   - `pmo` 透過 `angareion read`（無 `--channel`）收信。只要訊息在任何頻道帶 `to: mypmo-pm-m1`（且不是 `secretary-pmo` 上的 `# 工作：` 派工單），`inbox.is_call` 就為真；若寄件者又是 `myaientry-secretary-p1`（`is_secretary`），`pmo` 會**自動**對該頻道送出一則機械 `call` ack（`收到，已收件（叫人 id=...）`，`to=myaientry-secretary-p1`），且 `_claimed_by_secretary` 會將其歸入秘書階段。
-   - 在 `secretary-pmo`（`dispatch_channel`）上，來自 `myaientry-secretary-p1` 且未以 `# 工作：` 開頭、又沒觸發 `is_call` 的訊息會被 `parse_work_message` 判為「收到不合規秘書訊息」警告。
-6. **上限與換頁（#542）**：
-   - 每頁上限 `PAGE_COMMENT_LIMIT = 2500`，`PageWriter` 於 `PAGE_ROLLOVER_AT = 2400` 自動開下一頁並寫入 `rollover` 註冊簿留言（`PAGE_WARN_AT = 2000`、`PAGE_FILL_LIMIT = 2490`）；PR-3c 已合併至 `main`，既有團隊頻道（`team-mypmo-m1`、`team-mylinuxpool-w2`、`w3`）已經換過頁。
-7. **本人的設計偏好**：
-   - **本人 11-28 偏好不新增實體（見 MyAiStorage#581 結論留言）**，明確反對為每個小單元增殖 GitHub issue 實體的設計方向。
-8. **本人全域「@你」收件匣與既有找本人慣例**：
-   - 依 `Angareion.read` 不帶 `--channel` 遍歷全頻道（`src/angareion/client.py`），MyAiEntry App 的「@你」收件匣預設掃描所有頻道裡 `to == myaientry-secretary-p1` 或 `myaientry-secretary-p1 in mentions`（`skills/aicomm/SKILL.md`）；AI 找本人的**既有實務**是在自己的團隊頻道用 `--to myaientry-secretary-p1`（或 `--mention`），而本人只跟 PMO 說話的規矩見 `skills/aicomm/SKILL.md`。因此新增 `dm-secretary` 後須於契約明確切分 DM 與團隊「@你」（見 §4 C-7、C-8）。
+名稱滿足 `messages.py` 與 `registry.py` 的 `CHANNEL_NAME_RE = ^[A-Za-z0-9_-]+$`，`channel_slug` 對此小寫名稱原樣通過。Angareion 頻道驗證沒有另外的長度上限；ainame 的 `MAX_LEN=32` 是完整席位上限，不能直接套給頻道名。從合法席位移除至少 `-a`、加上 `role-`，角色頻道最長 35 字（有序號角色最長 33 字）。目前 PM／arch 的實際清單更短。固定 `role-` 前綴不會與 `team-*` 或 `secretary-pmo` 撞名，也不會把同專案不同 team 變成不同角色頻道。
 
----
+### 1.2 沿用 schema 1，零改碼
 
-## 2. 方案比較
+註冊留言仍為：
 
-### 2.1 (A) 不新增實體：既有頻道內的雙人視圖
+```json
+{"schema":1,"action":"register","channel":"role-myaistorage-pm","backend":"aicompany-channel","issue":123}
+```
 
-- **做法**：不建新頻道；本人與某 AI 的 DM 直接寫進該 AI 所屬既有頻道（例：本人↔PMO 用 `team-mypmo-m1`，本人↔專案隊員用 `team-<project>-<team>`），強制帶 `--to <對方>`，App 端篩選 `(from == me and to == peer) or (from == peer and to == me)` 顯示為 DM 視圖。
-- **優點**：
-  - 0 個新 GitHub issue、0 筆 `channels.json` 增長、0 則註冊簿留言。
-- **缺點與結構問題**：
-  1. **嚴重混進團隊頻道**：DM 留言就落在團隊 issue 上，任何隊員跑 `angareion read --channel <team-*>` 或 `angareion log --channel <team-*>` 都會看見全部 DM；`pmo` 對 `myaientry-secretary-p1` 叫人的機械 ack 也會直接洗進團隊頻道。
-  2. **無法區分「DM」與「團隊公開 `@to`」**：在 `team-mypmo-m1` 或 `team-myaistorage-w1` 裡，原本就存在 `from: myaientry-secretary-p1, to: <AI>` 的正常團隊對話。App 沒有欄位可辨識哪一則是 DM、哪一則是團隊頻道裡點名某人：若在團隊視圖隱藏 `(secretary, peer)` 會吃掉正常團隊回覆；不隱藏則 DM 會出現在團隊視圖。
-  3. **需要新欄位（且現有 CLI 送不出來）**：要消除上一點歧義，必須定義新欄位（例如 `datatype: dm`），但現行 `angareion send` 寫死 `datatype: "message"`，無法不改程式就由 AI／CLI 送出。即使改了，CLI 端的 `read --channel` 與 `log --channel` 仍會把 `datatype: dm` 讀出來（spec 規定不認得的 datatype 照位址遞送）。
-  4. **加速消耗團隊 2500 則額度**：`team-mypmo-m1` 等高流量頻道已經換過頁，塞入一對一聊天只會更快觸發換頁。
-  5. **跨團隊／無隊頻道席位無處落腳**：`myaientry-secretary-p1` 本身沒有 `team-myaientry-p1` 頻道；只掛在 `secretary-pmo` 則會與 PMO 派工規則衝突；部分跨組席位也未必對應單一 `team-*` 頻道。
-- **App 若採 (A) 所需的額外欄位／資料**：`agent -> team_channel` 映射規則、`datatype: dm`（需改 `angareion` CLI 與 TS writer）、以及團隊視圖排除 `datatype == "dm"` 的過濾邏輯。
+`123` 只是結構示例，不是實際 issue。`registry.parse_comment` 嚴格拒絕未知欄位；加 `kind` 目前會得到 `unknown fields`。角色類型由可逆名稱辨識，**不加 `kind`、project、role 或 members 欄**。`registry_rules.rebuild_channels` 依授權的註冊／取消／換頁留言重建 `{backend, issue, retired?}`，workflow 寫回 `config/angareion/channels.json`；`channel_config.ChannelStore` 讀此映射。設定檔是生成物，不手改；PMO 執行建立指令後等映射落地，`channel create` 的等待上限為 120 秒，不能因超時就盲目重建。
 
-### 2.2 (B) 每對一個 DM 頻道（例如 `dm_<a>_<b>`）
+每個角色頻道套用 #542 的換頁，並保留固定邏輯名稱；建頻道與換頁仍消耗共用註冊簿留言、全體 `read` 仍掃描所有已登記頻道。16 個入口有持續輪詢成本，故不先擴張到所有角色。
 
-- **命名規則分析**：
-  - 不可用單一 `-` 當分隔（如 `dm-<a>-<b>`）：因為 `ainame` 的 `<project>` 段允許包含 `-` 與角色字（例：`pm-tools-impl-m1-1`），`dm-foo-pm-m1-bar-impl-w1-1` 無法無歧義切出 `a` 與 `b`。
-  - 應改用 `ainame` 禁用的字元 **`_`**（或 `--`）分隔：**`dm_<a>_<b>`**，其中 `a, b = sorted([p1, p2])`（字典序排列，確保一對只有一個頻道名，`a != b`）。
-  - 合法性與長度：符合 `^[A-Za-z0-9_-]+$`；`channel_slug` 原樣不轉義；`ainame` 上限 32 字，故 `dm_<a>_<b>` 最長 `3 + 32 + 1 + 32 = 68` 字元，遠低於 GitHub Issue 標題上限 256 字元。
-- **註冊簿登記方式**：
-  - 現行 `registry.py` 不允許 `register` 帶額外欄位（如 `kind`），故零改碼做法是只用 `dm_` 前綴辨識，註冊簿留言維持 `{schema: 1, action: "register", channel: "dm_<a>_<b>", backend, issue}`；若要顯式存 `kind: "dm"`，需改動 `registry.py`、`registry_rules.py`、`channel_config.py`、`channel_cli.py` 與 spec（§6）。
-- **誰能建**：受註冊簿授權（`OWNER`／`MEMBER`／`COLLABORATOR`）與 channel token（MyAiStorage + AiCompany-channel 的 `Issues: Read and write`）限制，僅本人或 PMO（或持有相同授權的執行環境）能執行 `channel create`。App 若無該授權或直接建，還須處理最多 2 分鐘的 workflow 落地延遲。
-- **2500 上限與 #542 換頁**：每對獨立一條頻道，各自適用 #542 自動換頁（2400 開新頁）；單對不容易滿，但每次建頻道或換頁都會耗掉共用註冊簿（`MyAiStorage#47`，上限 2500 則）的留言額度。
-- **頻道數量增長的嚴重代價**：
-  1. **直接衝突本人 11-28 偏好不新增實體（見 MyAiStorage#581 結論留言）**：10 個對象就是 10 張 issue，30 個對象就是 30 張 issue。
-  2. **Worker `<seq>` 換代造成大量孤兒頻道**：`impl`／`arch`／`test`／`rev` 的席位帶序號（例如 `myaistorage-arch-w1-34`、`mylinuxpool-impl-w2-5`），席位重開或換號後舊頻道即廢棄，若不持續手動 `channel delete` 清理，歷史殘留實體會不斷累積（即使 delete 仍留下已關閉的 issue）。
-  3. **全公司所有 AI 的輪詢負載 $O(N)$ 放大**：`Angareion.check`（`wait` 每 15 秒一次）、`Angareion.read`（`aicomm inbox`）與無旗標的 `angareion log` **每次都會掃描 `channels.json` 裡的全部頻道**（`READ_CONCURRENCY = 8` 原是依約 15 個頻道估算）。每新增 N 條 DM 頻道，**全公司每一位不相關的 AI** 每次收信與等待都要多查 N 張 GitHub issue（即使有 ETag 304，冷啟動、游標前進、新身分與 `log` 仍會打滿全量請求，逼近 secondary rate limit）。
+## 2. 開哪些角色、成員與 App 名冊
 
-### 2.3 (C) 單一專用 DM 頻道 `dm-secretary`（建議案）
+先開 **PM 與 arch**：PM 是協調入口，arch 保存跨工單的設計脈絡，兩者有持續角色用途。impl／rev／test 多按單短期開立，id 的 team 與 seq 經常換，單有角色頻道仍不知道該 mention 哪一位；預設沿用團隊頻道與工單，需要本人詢問時由 PMO 指路，不為每次換號建立新頻道。secretary 已有專門派工入口，首批不另開角色頻道。日後增開仍用同一命名，由 PMO 按需求建立，不把新席位出現當成自動建頻道條件。
 
-- **做法**：全系統只建立**唯一 1 條** DM 專用頻道 **`dm-secretary`**（對比既有的 `secretary-pmo` 派工頻道），專供「本人（`myaientry-secretary-p1`）↔ 任一單一 AI 席位」的一對一訊息使用。
-  - 所有 DM 訊息一律送往 `--channel dm-secretary`，且**強制帶 `--to <對方 AI 名>`**（嚴禁省略 `--to` 廣播，也不帶第三者 `--mention`）。
-  - AI 端不需任何特殊指令：照現有慣例跑 `angareion read`／`aicomm inbox`（不帶 `--channel`），只會收到 `to` 等於自己的 DM；回覆用 `aicomm send --channel dm-secretary --to myaientry-secretary-p1 --body ...`。
-  - App（N34）讀 `dm-secretary`（例如經 `angareion log --channel dm-secretary --json`），依對方位址 `peer = (to if from == "myaientry-secretary-p1" else from)` 分組，即呈現每位 AI 的獨立一對一對話串。
-- **為什麼 (C) 同時解掉 (A) 與 (B) 的痛點**：
-  - 相對 (A)：**完全不混進團隊頻道**、不吃 `team-*` 的 2500 則額度、不與團隊 `@to` 混淆、不撞 `secretary-pmo` 派工檢查、跨組或新開席位都能直接 DM。
-  - 相對 (B)：**只有 1 個新實體**（不是 $O(N)$ 個），不因 worker `<seq>` 換號產生孤兒頻道（換號後 App 依新 `peer` 開新串、舊串留於原名下不合併），不消耗註冊簿 2500 則額度，全公司輪詢只多 1 條頻道（25 → 26），而且對任何新 AI 開聊**零落地延遲**（不必等 `channel create` workflow 跑 2 分鐘）。
-  - 相對 **(A)＋`datatype: dm`**：**零改碼**，現行 `angareion` CLI 今天就能直接收發（見 §5 驗證範圍）。
-- **代價與邊界**：
-  - 仍新增了 1 個頻道實體（相比 (A) 的 0 個），且所有人的 DM 共用該頻道的 2500 則單頁上限（觸及 2400 時由 #542 PR-3c 自動換頁透明處理，對 App／AI 無感）。
-  - **全體 AI 輪詢的 ETag 失效與本機下載過濾**：頻道數只多 1 條（25 → 26），但 `dm-secretary` 匯流全公司所有 DM 流量。每當有任何新 DM，該頻道的 ETag 即對**全體 AI** 失效；每個 AI 每次執行 `read`／`wait` 都會下載整個 `dm-secretary` 的新留言，再由客戶端 `backend.scope_matches` 在本機過濾丟棄非寄給自己的訊息（不像 (B) 各頻道大多維持 304）。因此所有 DM 內容在傳輸期間都會經過各 AI 機器的客戶端讀取，更須嚴守「不貼私人資訊」規範。
-  - 顯式執行 `angareion read --channel dm-secretary` 或 `angareion log`（不帶 `--to me`）會同時看到本人與其他 AI 的 DM；這與 (A)、(B) 的後端無 ACL 本質相同，靠「AI 一律不帶 `--channel` 收信、`aicomm log` 預設 `--to me`」與「不貼私人資訊」規範守住。
+**註冊簿不存成員**：它描述頻道位置，並沒有加入／退出、訂閱或 ACL。所有持有通道憑證的讀者都可讀頻道歷史；一般收件是訊息位址過濾，不是成員權限。
 
-### 2.4 比較總表
+App 的 @ 選單依期九 v3 使用 App 已有的**各 sidecar `GET /agents`**，按 ainame 的 project／role 篩選，顯示完整 id、team、seq、所在 sidecar 與 state。`idle`、`running` 為目前可 poke 的對象；`starting`、`waiting-quota`、`exited` 不能當成可立即叫醒。名冊只輔助確認角色分工／主責，不是即時存活證據；快照之後仍可能退出，送出與 poke 結果須分開顯示。sidecar 無法連線時標為未知，不能把歷史名冊冒充在跑清單。
 
-| 面向 | (A) 不新增實體（既有頻道篩選） | (B) 每對一個 DM 頻道（`dm_<a>_<b>`） | (C) 單一專用 DM 頻道（`dm-secretary`，**建議**） |
-|---|---|---|---|
-| 新增實體數 | **0** | $O(N)$（每對 1 張 issue＋註冊簿紀錄） | **固定 1**（全系統共用 1 條） |
-| 會不會混進團隊頻道 | **會**（`read/log --channel` 全混、與團隊 `@to` 相撞） | 不會 | **不會** |
-| 第三者一般 `read`／`inbox` 可見性 | 讀不到（有 `--to`） | 讀不到（有 `--to`） | **不輸出他人 DM（有 `--to`）；但因客戶端過濾，有新 DM 時各 AI 機器仍會下載整份新留言再於本機丟棄** |
-| 第三者 `read --channel`／`angareion log` | 看得到（混在團隊頻道裡） | 看得到（需指定該 DM 頻道或無條件 `log`） | 看得到（需指定 `dm-secretary` 或無條件 `log`） |
-| 團隊頻道 2500 額度影響 | **有**（加速 `team-mypmo-m1` 等換頁） | 無 | **無** |
-| 全公司 `wait`／`inbox` 輪詢成本 | +0 | **全體 AI 每輪多掃 N 條（大多 304）** | **頻道數只多 1 條；但匯流所有 DM，有新 DM 時 ETag 失效，每個 AI 都下載整份新留言並在本機過濾** |
-| Worker `<seq>` 換代影響 | 無 | 產生大量廢棄 DM 頻道 | **不新增孤兒頻道實體**；App 依 `peer` 分組自然開新串，**舊串留於原 `<seq>` 名下不自動合併**（成本從頻道實體移至串歸屬） |
-| 新對象開聊延遲 | 0（若對象有對應團隊頻道） | 最多 2 分鐘（建頻道等 workflow 落地） | **0（立即可送）** |
-| 現行 Angareion 指令能否直接收發 | 部分可行，但無法區分 DM 與團隊 `@to` | 可（不加 `kind` 時） | **完全可行（零改碼）** |
-| 與 `pmo` 派工／叫人相容性 | 在 `secretary-pmo` 撞派工；在 `team-*` 洗入 call ack | 相容 | **相容**（不撞 `secretary-pmo`，ack 回在 `dm-secretary`） |
+同 id 出現在多台 sidecar，要顯示重複部署提示，不能把它們誤認為不同位址；訊息仍只有一個 id 位址，aicomm 的跨機查找可能 poke 多台。同一身分只留一個收信讀者的規則不變。App 實際 UI 與 sidecar 名冊整合不在本 repo 實測範圍。
 
----
+## 3. 收件、mention、叫醒與版本前提
 
-## 3. 建議與選案理由
+### 3.1 收件與叫醒是兩件事
 
-1. **首選建議 (C) `dm-secretary`**：在「不讓 GitHub 實體隨對話對象膨脹混亂」與「不污染團隊頻道、零改碼立即可用」之間取得唯一乾淨的平衡點。從架構角度看，它把實體數量從 $O(\text{席位數})$ 壓回 $O(1)$，同時保持 `team-*`、`secretary-pmo`、`dm-secretary` 三種溝通面的職責分離（SRP）。
-2. **若本人堅持 0 新增實體**：不應直接做無標記的 (A)（會把團隊 `@to` 與 DM 混死）；必須先另開單替 `angareion send` 加上 `--datatype dm`（或 `dm` 子指令），並接受 DM 仍會混在團隊 GitHub issue 與 2500 額度內的代價。
-3. **若未來需要「AI 對 AI 私有頻道」或「每對獨立換頁／刪除」**：屆時可再依 §4 備案條文的 **`dm_<a>_<b>`** 擴充，與 `dm-secretary` 並不互斥。
+`backend.recipient_matches`：一般收信條件為 `to is None OR to == me OR me in mentions`；`--mentioned` 只收後兩項。`aicomm inbox` 固定轉成不帶 `--channel` 的 `angareion read`。`read --channel` 則讀該頻道全體，stderr 會警告；`angareion log` 不加位址過濾亦可查他人訊息，`aicomm log` 預設補 `--to me`。沒有後端 ACL，不可放私人資訊。
 
----
+| 送法（本人寄入角色頻道） | 指定 PM 一般 read／inbox | 其他人一般 read／inbox | 其他人 --mentioned | aicomm 叫醒對象 |
+|---|---|---|---|---|
+| 只有 `--mention <pm-id>`、沒有 `--to` | 收到 | 新廣播也收到 | 不收到 | 該 PM |
+| `--to <pm-id>`（可同時 mention 同 id） | 收到 | 收不到，除非另被 mention | 不收到 | 該 PM，一次 |
+| 沒有 to／mention | 新廣播收到 | 新廣播收到 | 不收到 | 無 |
 
-## 4. 慣例條文（定案後供 Angareion 營運、AI 隊員與 MyAiEntry N34 依循）
+第一讀的新身分只收「現在」以後的普通廣播，點名自己的舊信仍從頭收，所以不能用第三者第一次讀空值，宣稱 mention-only 隔離成功。§5 先替兩個 PM 建立游標，再送 mention-only，驗證另一個 PM 也收到。廣播可送到其他專案的一般 inbox，並不限同角色的人。
 
-### C-1 命名慣例
-- **主案 (C)**：DM 專用頻道名固定為 **`dm-secretary`**（全小寫 ASCII、`-`，符合 `CHANNEL_NAME_RE`）。
-- **備案 (B)**（若改採每對一頻道）：頻道名為 **`dm_<a>_<b>`**，其中 `a`、`b` 皆為合法 `ainame`、`a != b` 且依 ASCII 字典序 `a < b`。因 `ainame` 不含 `_`，`name.removeprefix("dm_").split("_")` 必可無歧義還原雙方席位；最大長度 68 字元。
+建議 App 正常點名時同時寫 **`to: <完整 agent id>` 與 `mentions: [<同 id>]`**（只帶 `--to` 亦可遞送）；`from` 是 `myaientry-secretary-p1`，`channel` 是所選 `role-…`，回覆已有訊息時再帶 `in_reply_to`。內文 `@名字` 只是文字。若使用者刻意只 mention 不帶 to，應明示這是廣播，不能宣稱其他人一般收不到。App 仍顯示整個角色頻道歷史，不依收件人把它拆成永久 DM。
 
-### C-2 註冊簿登記
-- 沿用現行 schema 1 註冊格式，**不新增 `kind` 或其他欄位**（`registry.py` 與 `channels.json` 維持不變）：
-  ```json
-  {"schema": 1, "action": "register", "channel": "dm-secretary", "backend": "aicompany-channel", "issue": <N>}
-  ```
-- 重建後 `config/angareion/channels.json` 條目形狀與一般頻道相同：`{"backend": "aicompany-channel", "issue": <N>}`。
+`angareion send` 本身不 poke。`src/aicomm/cli.py::_cmd_send` 合併 `args.to` 與 `args.mention`，去重並排除自己，成功寫入後逐一 `_wake_one`；**wake 不是只看 `--to`**。只帶 mention 也會叫醒；`--no-wake` 則不叫醒。現行 wake 只對 idle／running 發 poke，預設 running 的 poke 可排隊；exit 0 表示送達，不能當作叫醒成功，更不能因 poke 失敗重送。App 若直接寫 Angareion，須沿用其既有 sidecar poke 流程，不能假設有 mentions 欄就自動叫醒；本單不新增 App 實作。
 
-### C-3 建置與權限
-- 由本人（`OWNER`）或 PMO（`COLLABORATOR`/`MEMBER`＋channel token）在部署時執行一次：
-  ```bash
-  angareion channel create dm-secretary --backend aicompany-channel
-  ```
-- 各 team／worker／App **不自行建立**額外 DM 頻道。
+### 3.2 「讀者先升級」限制的來源與現況
 
-### C-4 成員與位址規範
-- DM 只有兩名成員：寄件者 `from` 與收件者 `to`，皆須為合法 `ainame` 且 `from != to`。
-- N34 的使用場景中，本人端固定為 **`myaientry-secretary-p1`**；對象端為目標 AI 的完整席位名（例如 `mypmo-pm-m1`、`myaistorage-arch-w1-34`、`mylinuxpool-impl-w1-1`）。
-- **兩條硬規矩**：
-  1. 在 `dm-secretary` 送訊**必須**指定 `--to <對方 AI 名>`，**嚴禁省略 `--to`**（否則成為廣播，會進入全公司所有 AI 的 `inbox`）。
-  2. 在 `dm-secretary` 送訊**不可帶第三者 `--mention`**（確保一對一可見性；若需多方參與應回團隊頻道）。
-- **目前為約定層規範**：現行 `angareion send` 與 `aicomm send` 均允許省略 `--to` 與帶第三者 `--mention`（無程式檢查阻擋）。建議另開 `d` 單於 `aicomm send --channel dm-secretary` 時強制檢查必帶 `--to` 且拒絕第三者 `--mention`（不在本單範圍）。
+已搜尋 `docs/`（含 `docs/design-notes/`）、`skills/`、`openspec/` 與版本歷史。原限制出自 #209（`1e69b31`，合併 `99db372`）：讀者需能解析 `mentions`，並把自己在 mentions 內的訊息納入 recipient／mentioned 過濾；不是單純新增 sender CLI 旗標，也不是 #542 的換頁能力。
 
-### C-5 可見性與隱私邊界
-- **團隊頻道隔離**：`dm-secretary` 不會混入任何 `team-*` 或 `secretary-pmo`。
-- **一般收信隔離**：第三者執行 `angareion read`、`angareion wait`、`aicomm inbox`（不帶 `--channel`）及 `aicomm log`（預設 `--to me`）皆讀不到他人的 DM。
-- **無後端 ACL（重要）**：Angareion 第一期沒有成員存取控制；任何持有 channel token 的隊員若顯式執行 `angareion read --channel dm-secretary`（stderr 會警告）或 `angareion log`（不帶 `--to me`），或直接讀取 GitHub issue，仍看得到內容。**因此禁止在 DM 內貼私人資訊或憑證，一律改參照 MyBrain 路徑或案件 id。**
+歷史版 `docs/angareion.md` 有「順序：讀者先升級、再送 mentions」；歸檔的 `openspec/changes/archive/2026-10-25-comm-skill/design.md` P7 與升級順序仍保留當時警告。#234 的 `04c1c69`（後合併 `c300ef8`）已把現行文件改為「`--mention` 可以用了」，記載期 4 M2 tasks 2.4 於 **2026-10-25** 完成全讀者升級；目前 `docs/angareion.md`、`skills/angareion/SKILL.md`、`skills/aicomm/SKILL.md` 與 CLI help 一致。故舊的全面禁用限制**已解除**；新加入的讀者種類仍須確認理解 mentions。
 
-### C-6 2500 則上限與 #542 換頁
-- `dm-secretary` 是一般頻道，完全套用 #542 的 `PAGE_WARN_AT`（2000）、`PAGE_ROLLOVER_AT`（2400）、自動換頁與 `retired` 48 小時寬限期讀取；`angareion channel status dm-secretary` 可觀測其現頁則數與頁數。
+`angareion: 1` 訊息格式未升版；套件版本號不能單獨證明能力，文件建議看 `--version` 的來源 commit。此 checkout 的 `--capabilities` 只有 `paged-read paged-write`（`cli.CAPABILITIES`），**沒有 mention 能力旗標**，不能用換頁旗標替代 mention 相容性證明。
 
-### C-7 MyAiEntry App（N34）契約
-1. **送出 DM**：`channel: "dm-secretary"`、`datatype: "message"`、`from: "myaientry-secretary-p1"`、`to: "<target-ai-name>"`，`mentions: []`（序列化省略）。若透過轉發呼叫 `aicomm send`，可同時叫醒在池內 `idle`／`running` 的目標 AI。
-2. **讀取／查詢對話**：以 `angareion log --channel dm-secretary --json`（或讀取該頻道鏡像）取得訊息，依 `(received_at, id)` 排序（同 #510）。
-3. **區分 DM 與團隊頻道、`peer` 分組及 `<seq>` 換代歸屬**：
-   - **唯一分界鍵為 `channel`**：`channel == "dm-secretary"` 歸入一對一 DM 視圖；`channel != "dm-secretary"`（即 `team-*` 與 `secretary-pmo`）即使含 `myaientry-secretary-p1`，仍屬團隊公開對話／派工，不歸入 DM 對話串。
-   - **雙人視圖過濾**：對 `dm-secretary` 每則訊息檢查 `from` 與 `to` 皆非空且其中之一為 `myaientry-secretary-p1`；以 `peer = (m.to if m.from == "myaientry-secretary-p1" else m.from)` 分組顯示各 AI 的一對一對話串。若遇到異常的廣播（`to == null`）或含其他 `mentions` 的訊息，不歸入一對一對話串（可記警告或略過）。
-   - **`<seq>` 換代後舊串的歸屬（明確規則）**：**不處理自動合併，舊串留於原 `<seq>` 名下**。例如 `myaistorage-arch-w1-34` 換代為 `-35` 後，兩者為不同 `peer`，App 自然於 `-35` 名下開新串，舊串留在 `-34` 名下供歷史查閱（因席位生命週期本就對應不同工作期）。
-4. **團隊視圖與本人「@你」收件匣（跨頻道過濾）**：
-   - **各團隊頻道獨立畫面不需改**：`team-*` 與 `secretary-pmo` 本身不含 DM 訊息，正常 `@to`／`@mention` 照原樣顯示。
-   - **跨頻道「@你」清單與未讀 @ 計數須排除 `dm-secretary`**：本人全域「@你」收件匣原本跨所有頻道掃描 `to == myaientry-secretary-p1` 或 `myaientry-secretary-p1 in mentions`（`skills/aicomm/SKILL.md`）。導入 `dm-secretary` 後，App 的全域「@你」清單與未讀 @ 數應過濾 **`channel != "dm-secretary"`**，改由 DM 視圖獨立顯示與計算 DM 未讀數；否則 AI 在 `dm-secretary` 的每則回覆（固定帶 `to: myaientry-secretary-p1`）都會重複灌進全域「@你」清單並干擾團隊點名通知與已讀狀態。
-5. **PMO 自動 `call` ack 相容**：當本人在 `dm-secretary` 發訊給 `mypmo-pm-m1`，現行 `pmo`（`src/pmo/inbox.py`）會將其視為 `叫人`（`is_call`），並自動在 `dm-secretary` 回一則 `收到，已收件（叫人 id=...）`（`to: myaientry-secretary-p1`），接著 PMO 再依需要回覆正式內容。這是既有行為，N34 應正常顯示，勿誤判為異常。
+**部署 pin 已核對、全艦隊實機仍未驗**。唯讀查得共用 worker 的 MyAiStorage pin 為 `1bf38828540bf1616d437cd4f54ca4390b271554`；以 git 確認它包含 #209 合併 `99db372`，並直接核對該 pin 的 `backend.py` 有 `recipient in message.mentions` 與新身分的 mention 收件處理。故該已宣告 pin 滿足 Python 讀者的 mentions 能力，不是依日期猜測。此核對只證明部署設定，沒有逐台比對運行映像，也沒有核對所有非 Python 讀者（含 App）目前版本；**11-28 全艦隊實際部署是否全部滿足仍未驗**。文件支持 10-25 已全讀者升級，推論未回退且沿用該 pin 的 Python 部署可用；PMO 加入新讀者或驗收部署時仍須核對各讀者種類及實際來源版本，未知讀者優先用 `to`，不重新宣告全域禁止 mention。
 
-### C-8 AI 隊員收發與回覆慣例
-- **收信**：照舊跑 `aicomm inbox`（或 `angareion read`，**不加 `--channel`**）；看到來源 `channel: dm-secretary`、`from: myaientry-secretary-p1` 時，即為本人的 DM。
-- **回覆 DM（固定回 `dm-secretary`）**：從 `dm-secretary` 收到的本人 DM，**一律回在 `dm-secretary`**，不可回歪到 `team-*`：
-  ```bash
-  aicomm send --channel dm-secretary --to myaientry-secretary-p1 --in-reply-to <原訊息 id> --body '...'
-  ```
-  （本人不在 sidecar 上，`stderr` 回 `wake: myaientry-secretary-p1 not-woken ...` 但 `exit 0` 已送達，屬正常預期。）
-- **本人在團隊頻道 `@AI`／`--to` 的舊慣例完整保留**：若本人在 `team-*` 公開發言並點名某 AI，該 AI 照舊回在同一條 `team-*` 頻道（總原則為「**回同一頻道**」）。
-- **AI 對本人發話的頻道邊界（不放寬主動找本人）**：
-  - 團隊工作回報、結案、驗收或團隊共知事項：保留既有實務，在**所屬 `team-*` 頻道**用 `--to myaientry-secretary-p1`（或 `--mention`），進入本人「@你」收件匣（須本人決定之事仍依 `skills/aicomm/SKILL.md` 經 PMO）。
-  - **僅限回應本人先開的 DM**：延續本人先開的 `dm-secretary` 一對一對話時送往 `dm-secretary`（`--channel dm-secretary --to myaientry-secretary-p1`）；AI 不主動在 `dm-secretary` 開問本人；要本人決定的事仍依 `skills/aicomm/SKILL.md` 經 PMO。
+## 4. AI 回覆與多席位協調
 
----
+AI 只有收到本人點名（自己的 `to`／`mentions`）才以被詢問者身分回答；一般 read 看到廣播或顯式讀頻道看到別人的話，不代表被指派。回覆**同一個角色頻道**，`--to myaientry-secretary-p1 --in-reply-to <原訊息 id>`，讓 App 的 @你與對話串都能對上；可同時 mention 本人，但不會因此在 sidecar 叫醒本人。
 
-## 5. 驗證方式（隔離暫存環境＋FakeBackend 可重現步驟與原樣輸出）
+```sh
+aicomm send --channel role-myaistorage-pm --to myaientry-secretary-p1 --in-reply-to <原訊息id> --body '目前進度與答案'
+```
 
-### 5.1 驗證涵蓋與未測邊界
-- **本次實際執行範圍**：以獨立 Python 腳本呼叫 `angareion.cli.main`，注入 `FakeBackend`、`ChannelStore(FakeGit)` 與套用 `registry_rules.rebuild_channels` 的 `FakeRegistryClient`，實測以下項目：
-  1. `channel create dm-secretary` 與重建後 `channels.json`；
-  2. `send --channel dm-secretary --to ...` 雙向收發與無 `--channel` 的 `read --json`；
-  3. 第三者（`mylinuxpool-impl-w1-1`）`read --json`、`read --channel team-mypmo-m1 --json`（不混入團隊頻道）與 `log --channel dm-secretary --to me --json` 隔離；
-  4. 無後端 ACL 邊界：`read --channel dm-secretary --json`（帶警告讀出全部）；
-  5. **兩個負面案例**：省略 `--to` 的廣播、帶第三者 `--mention`，兩者皆會進入第三者的 `read --json`；
-  6. 備案 `(B)` 命名 `dm_myaientry-secretary-p1_mypmo-pm-m1` **僅驗到 `channel create`（`exit=0`）**，未續驗重建 `channels.json` 與 `read` 路徑。
-- **未於本腳本實測項目**（依讀碼確認或待實作／部署後驗證）：`angareion wait`、`aicomm inbox`／`aicomm log`／`aicomm send`（含 `wake:` stderr 行）、真實 GitHub 後端 ETag／304 與分頁請求、#542 自動換頁觸發、以及 `pmo` 對 `dm-secretary` 的 `is_call` 自動 ack。
+「AI 不主動找本人、要本人決定的事經 PMO」不變；此入口只允許回應本人先發的詢問，不增加主動請示或派工權限。正式秘書／PMO 派工仍走 `secretary-pmo`，角色頻道的自由文字不轉成派工單。`pmo` 目前仍會對寄給 `mypmo-pm-m1` 的本人訊息觸發既有 call／機械 ack（見 `pmo/inbox.py`、`round.py`），角色頻道不豁免此行為。
 
-### 5.2 可重現的最小步驟
-於 repo 根目錄以 `uv run python` 執行（本單只 commit 設計文件，故驗證腳本不放進 `tests/`；審查者可直接執行團隊工作目錄的 `verify-582/verify_dm_fake.py`，或依下列等價步驟重現）：
-1. **隔離環境變數**：建暫存根目錄 `<暫存目錄>`，先清除 `XDG_DATA_HOME`、`XDG_CONFIG_HOME`、`XDG_STATE_HOME`、`XDG_CACHE_HOME`、`CLAUDE_CONFIG_DIR`、`OPENCODE_CONFIG_CONTENT`、`CODEX_HOME`、`ANGAREION_IDENTITY`。將 `HOME`、`TMPDIR`、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`AGORA_CODEX_HOME`、`ANGAREION_CONFIG`、`ANGAREION_STATE_DIR`、`ANGAREION_TOKEN_FILE` 全數指向 `<暫存目錄>` 內各自子目錄，並於**同一行程**斷言 `agora.store.Paths.from_env()` 與 `angareion.config` 的 `get_config_path()`、`get_state_dir()`、`get_default_token_path()` 均位於 `<暫存目錄>` 底下。
-2. **設定檔與假夾具**：於 `<暫存目錄>` 寫入 `0600` 假 token 與 `Config(identity="mypmo-pm-m1", registry_repo="owner/MyAiStorage", registry_issue=47, ...)`；以 `tests/unit/_angareion_fakes.py` 的 `FakeGit`（預載 `team-mypmo-m1 -> ("aicompany-channel", 42)` 與 `aicompany-channel -> ("github", "owner/AiCompany-channel")`）建 `ChannelStore`；建 `FakeBackend(store, start_entity_id=100, clock=<由 2026-11-28T02:00:00Z 起每次 +2s>)` 並 `add_entity("team-mypmo-m1", number=42, repo="owner/AiCompany-channel")`；建套用 `angareion.registry_rules.rebuild_channels` 的 `FakeRegistryClient(post_association="OWNER", post_user_type="User")` 並預留 `team-mypmo-m1` 的註冊留言。
-3. **執行指令序列**：切換 `ANGAREION_IDENTITY`，依序呼叫 `angareion.cli.main(argv, backend=..., store=..., registry=...)` 執行下方原樣輸出中的 15 個指令。
-4. **時鐘欄位說明**：輸出 JSON 內的 `at` 由 `angareion.messages.Message` 依系統即時 UTC 時鐘產生，而 `received_at` 來自 `FakeBackend` 注入的合成遞增時鐘（`2026-11-28T02:00:04Z` 起 `+2s`）；兩者約數十分鐘的差值為假時鐘設計所致，並非傳輸延遲。
+同角色多位同時在跑時，**被完整 id 點名者回**：例如 w1 與 w2 的 PM 共用 `role-myaistorage-pm`，點名 w1 不讓 w2 代答。若明確點名多位，各自只答自己的部分；要求單一整合答案時由本人指定主答者。沒有指定有效 id 時，不讓所有同角色 AI 搶答，App 提示選人，PMO 協調主責；收件前退出的 AI 亦不由另一位自動冒名接收。頻道與歷史不因席位替換重建，後任要補看舊席位脈絡可顯式查角色頻道（保留其讀全體語意）。
 
-### 5.3 原樣輸出
+## 5. 隔離驗證與可重現輸出
+
+手動驗證腳本放團隊目錄的 `verify-582/verify_role_fake.py`，不放 repo、不存入 agent 資料目錄；執行時只在同一個 `verify-582/` 下建立隔離暫存子目錄並自動清除。腳本在同一行程先設定 HOME、TMPDIR、Agora 與 Angareion 路徑，清掉所有 XDG_* 與規定的外來設定／身分變數，再 assert `Paths.from_env()` config／cache／state、HOME、TMPDIR、Angareion 路徑全部在隔離根下，不符即 `NOT ISOLATED` 中止。只使用 FakeBackend、FakeGit、FakeRegistryClient 重建映射，不啟動 agent、不連真 Drive 或 GitHub。
+
+從 repo 根執行（`<團隊目錄>` 由 PMO 提供）：
+
+```sh
+uv run python <團隊目錄>/verify-582/verify_role_fake.py > <團隊目錄>/verify-582/role-output.txt 2>&1
+```
+
+fake 的兩個 id 模擬正在使用的 PM 位址；**沒有對真實「在跑」agent 或 sidecar 做端到端測試**。實際 angareion CLI 的建頻道、收件、廣播與定向分流均有斷言；aicomm send／inbox 以相同 CLI 接 fake backend，攔截 `_wake_one` 記錄目標，僅證明 mention 會進入叫醒候選，不能證明真 sidecar 已叫醒。App、真 GitHub、全艦隊 pin 與換頁不在本次實測範圍。
+
+以下為成功執行的合併 stdout／stderr 原樣輸出（若有隔離絕對路徑以 `<暫存目錄>` 代換）：
 
 ```text
-ISOLATION OK: root=<暫存目錄> agora_state=<暫存目錄>/agora-state angareion_state=<暫存目錄>/angareion-state HOME=<暫存目錄>/user-home
+ISOLATION OK: HOME, TMPDIR, Paths.config/cache/state and Angareion paths under <暫存目錄>
 
-$ ANGAREION_IDENTITY=mypmo-pm-m1 angareion channel create dm-secretary --backend aicompany-channel
+$ ANGAREION_IDENTITY=mypmo-pm-m1 angareion channel create role-myaistorage-pm --backend aicompany-channel
 exit=0
 stdout:
-dm-secretary
-
---- rebuilt channels.json ---
-{
+role-myaistorage-pm
+REBUILT {
   "channels": {
-    "dm-secretary": {
+    "role-myaistorage-pm": {
       "backend": "aicompany-channel",
       "issue": 100
-    },
-    "team-mypmo-m1": {
-      "backend": "aicompany-channel",
-      "issue": 42
     }
   },
   "version": 1
 }
 
-$ ANGAREION_IDENTITY=myaientry-secretary-p1 angareion send --channel dm-secretary --to mypmo-pm-m1 --body 請問 #582 進度？
-exit=0
-stdout:
-01M8G1DCV15APQBBC0NR4H4SJR
-
-$ ANGAREION_IDENTITY=mypmo-pm-m1 angareion read --json
-exit=0
-stdout:
-[
-  {
-    "id": "01M8G1DCV15APQBBC0NR4H4SJR",
-    "at": "2026-11-28T02:58:08.353989+00:00",
-    "from": "myaientry-secretary-p1",
-    "to": "mypmo-pm-m1",
-    "channel": "dm-secretary",
-    "urgency": 5,
-    "content": "請問 #582 進度？",
-    "attachments": [],
-    "mentions": [],
-    "in_reply_to": null,
-    "datatype": "message",
-    "received_at": "2026-11-28T02:00:04Z"
-  }
-]
-
-$ ANGAREION_IDENTITY=mylinuxpool-impl-w1-1 angareion read --json
+$ ANGAREION_IDENTITY=myaistorage-pm-w1 angareion read --json
 exit=0
 stdout:
 []
 
-$ ANGAREION_IDENTITY=mylinuxpool-impl-w1-1 angareion read --channel team-mypmo-m1 --json
-exit=0
-stdout:
-[]
-stderr:
-Warning: --channel reads every message in the channel, including messages addressed to other agents; omit --channel to get only messages addressed to you.
-
-$ ANGAREION_IDENTITY=mypmo-pm-m1 angareion send --channel dm-secretary --to myaientry-secretary-p1 --in-reply-to 01M8G1DCV15APQBBC0NR4H4SJR --body 設計文件審核中。
-exit=0
-stdout:
-01M8G1DCVG64J0KJGQ292PJT13
-
-$ ANGAREION_IDENTITY=myaientry-secretary-p1 angareion read --json
-exit=0
-stdout:
-[
-  {
-    "id": "01M8G1DCVG64J0KJGQ292PJT13",
-    "at": "2026-11-28T02:58:08.368366+00:00",
-    "from": "mypmo-pm-m1",
-    "to": "myaientry-secretary-p1",
-    "channel": "dm-secretary",
-    "urgency": 5,
-    "content": "設計文件審核中。",
-    "attachments": [],
-    "mentions": [],
-    "in_reply_to": "01M8G1DCV15APQBBC0NR4H4SJR",
-    "datatype": "message",
-    "received_at": "2026-11-28T02:00:16Z"
-  }
-]
-
-$ ANGAREION_IDENTITY=mylinuxpool-impl-w1-1 angareion read --json
+$ ANGAREION_IDENTITY=myaistorage-pm-w2 angareion read --json
 exit=0
 stdout:
 []
 
-$ ANGAREION_IDENTITY=mylinuxpool-impl-w1-1 angareion log --channel dm-secretary --to me --json
+$ ANGAREION_IDENTITY=myaientry-secretary-p1 angareion send --channel role-myaistorage-pm --mention myaistorage-pm-w1 --body mention-only
 exit=0
 stdout:
-[]
+01M8GFB9DX3ZMNBFSEKH3ZETT2
 
-$ ANGAREION_IDENTITY=mylinuxpool-impl-w1-1 angareion read --channel dm-secretary --json
+$ ANGAREION_IDENTITY=myaistorage-pm-w1 angareion read --json
 exit=0
 stdout:
 [
   {
-    "id": "01M8G1DCV15APQBBC0NR4H4SJR",
-    "at": "2026-11-28T02:58:08.353989+00:00",
-    "from": "myaientry-secretary-p1",
-    "to": "mypmo-pm-m1",
-    "channel": "dm-secretary",
-    "urgency": 5,
-    "content": "請問 #582 進度？",
-    "attachments": [],
-    "mentions": [],
-    "in_reply_to": null,
-    "datatype": "message",
-    "received_at": "2026-11-28T02:00:04Z"
-  },
-  {
-    "id": "01M8G1DCVG64J0KJGQ292PJT13",
-    "at": "2026-11-28T02:58:08.368366+00:00",
-    "from": "mypmo-pm-m1",
-    "to": "myaientry-secretary-p1",
-    "channel": "dm-secretary",
-    "urgency": 5,
-    "content": "設計文件審核中。",
-    "attachments": [],
-    "mentions": [],
-    "in_reply_to": "01M8G1DCV15APQBBC0NR4H4SJR",
-    "datatype": "message",
-    "received_at": "2026-11-28T02:00:16Z"
-  }
-]
-stderr:
-Warning: --channel reads every message in the channel, including messages addressed to other agents; omit --channel to get only messages addressed to you.
-
-$ ANGAREION_IDENTITY=myaientry-secretary-p1 angareion send --channel dm-secretary --body 遺漏 --to 的廣播
-exit=0
-stdout:
-01M8G1DCW1AF0J83HBDJ2D6NKC
-
-$ ANGAREION_IDENTITY=mylinuxpool-impl-w1-1 angareion read --json
-exit=0
-stdout:
-[
-  {
-    "id": "01M8G1DCW1AF0J83HBDJ2D6NKC",
-    "at": "2026-11-28T02:58:08.385390+00:00",
+    "id": "01M8GFB9DX3ZMNBFSEKH3ZETT2",
+    "at": "2026-11-28T07:01:39.389796+00:00",
     "from": "myaientry-secretary-p1",
     "to": null,
-    "channel": "dm-secretary",
+    "channel": "role-myaistorage-pm",
     "urgency": 5,
-    "content": "遺漏 --to 的廣播",
-    "attachments": [],
-    "mentions": [],
-    "in_reply_to": null,
-    "datatype": "message",
-    "received_at": "2026-11-28T02:00:24Z"
-  }
-]
-
-$ ANGAREION_IDENTITY=myaientry-secretary-p1 angareion send --channel dm-secretary --to mypmo-pm-m1 --mention mylinuxpool-impl-w1-1 --body 帶第三者 mention
-exit=0
-stdout:
-01M8G1DCWAF52MQVGHHVFC6H4N
-
-$ ANGAREION_IDENTITY=mylinuxpool-impl-w1-1 angareion read --json
-exit=0
-stdout:
-[
-  {
-    "id": "01M8G1DCWAF52MQVGHHVFC6H4N",
-    "at": "2026-11-28T02:58:08.394141+00:00",
-    "from": "myaientry-secretary-p1",
-    "to": "mypmo-pm-m1",
-    "channel": "dm-secretary",
-    "urgency": 5,
-    "content": "帶第三者 mention",
+    "content": "mention-only",
     "attachments": [],
     "mentions": [
-      "mylinuxpool-impl-w1-1"
+      "myaistorage-pm-w1"
     ],
     "in_reply_to": null,
     "datatype": "message",
-    "received_at": "2026-11-28T02:00:28Z"
+    "received_at": "2026-11-28T02:00:08Z"
   }
 ]
 
-$ ANGAREION_IDENTITY=mypmo-pm-m1 angareion channel create dm_myaientry-secretary-p1_mypmo-pm-m1 --backend aicompany-channel
+$ ANGAREION_IDENTITY=myaistorage-pm-w2 angareion read --json
 exit=0
 stdout:
-dm_myaientry-secretary-p1_mypmo-pm-m1
+[
+  {
+    "id": "01M8GFB9DX3ZMNBFSEKH3ZETT2",
+    "at": "2026-11-28T07:01:39.389796+00:00",
+    "from": "myaientry-secretary-p1",
+    "to": null,
+    "channel": "role-myaistorage-pm",
+    "urgency": 5,
+    "content": "mention-only",
+    "attachments": [],
+    "mentions": [
+      "myaistorage-pm-w1"
+    ],
+    "in_reply_to": null,
+    "datatype": "message",
+    "received_at": "2026-11-28T02:00:08Z"
+  }
+]
 
-ALL CHECKS PASSED
+$ ANGAREION_IDENTITY=myaientry-secretary-p1 angareion send --channel role-myaistorage-pm --to myaistorage-pm-w1 --mention myaistorage-pm-w1 --body targeted
+exit=0
+stdout:
+01M8GFB9E8TZ79WGC6KDMT9H5D
+
+$ ANGAREION_IDENTITY=myaistorage-pm-w1 angareion read --json
+exit=0
+stdout:
+[
+  {
+    "id": "01M8GFB9E8TZ79WGC6KDMT9H5D",
+    "at": "2026-11-28T07:01:39.400394+00:00",
+    "from": "myaientry-secretary-p1",
+    "to": "myaistorage-pm-w1",
+    "channel": "role-myaistorage-pm",
+    "urgency": 5,
+    "content": "targeted",
+    "attachments": [],
+    "mentions": [
+      "myaistorage-pm-w1"
+    ],
+    "in_reply_to": null,
+    "datatype": "message",
+    "received_at": "2026-11-28T02:00:12Z"
+  }
+]
+
+$ ANGAREION_IDENTITY=myaistorage-pm-w2 angareion read --json
+exit=0
+stdout:
+[]
+
+$ ANGAREION_IDENTITY=myaistorage-pm-w2 angareion read --channel role-myaistorage-pm --json
+exit=0
+stdout:
+[
+  {
+    "id": "01M8GFB9DX3ZMNBFSEKH3ZETT2",
+    "at": "2026-11-28T07:01:39.389796+00:00",
+    "from": "myaientry-secretary-p1",
+    "to": null,
+    "channel": "role-myaistorage-pm",
+    "urgency": 5,
+    "content": "mention-only",
+    "attachments": [],
+    "mentions": [
+      "myaistorage-pm-w1"
+    ],
+    "in_reply_to": null,
+    "datatype": "message",
+    "received_at": "2026-11-28T02:00:08Z"
+  },
+  {
+    "id": "01M8GFB9E8TZ79WGC6KDMT9H5D",
+    "at": "2026-11-28T07:01:39.400394+00:00",
+    "from": "myaientry-secretary-p1",
+    "to": "myaistorage-pm-w1",
+    "channel": "role-myaistorage-pm",
+    "urgency": 5,
+    "content": "targeted",
+    "attachments": [],
+    "mentions": [
+      "myaistorage-pm-w1"
+    ],
+    "in_reply_to": null,
+    "datatype": "message",
+    "received_at": "2026-11-28T02:00:12Z"
+  }
+]
+stderr:
+Warning: --channel reads every message in the channel, including messages addressed to other agents; omit --channel to get only messages addressed to you.
+$ aicomm send --channel role-myaistorage-pm --mention myaistorage-pm-w1 --body aicomm-mention
+01M8GFB9FSESHQJZQ6NZFJV68G
+fake-wake myaistorage-pm-w1
+FAKE_WAKE_TARGETS=["myaistorage-pm-w1"]
+$ aicomm inbox --json (myaistorage-pm-w1)
+[
+  {
+    "id": "01M8GFB9FSESHQJZQ6NZFJV68G",
+    "at": "2026-11-28T07:01:39.449245+00:00",
+    "from": "myaientry-secretary-p1",
+    "to": null,
+    "channel": "role-myaistorage-pm",
+    "urgency": 5,
+    "content": "aicomm-mention",
+    "attachments": [],
+    "mentions": [
+      "myaistorage-pm-w1"
+    ],
+    "in_reply_to": null,
+    "datatype": "message",
+    "received_at": "2026-11-28T02:00:16Z"
+  }
+]
+ALL CHECKS PASSED (fake wake assumes eligible running/idle agent; no real sidecar)
 ```
 
----
+## 6. PMO 建立清單與交付邊界
 
-## 6. 若未來要改程式的清單（本單不改程式）
+現有 `channels.json` 的團隊頻道推得專案：life、llmgateway、myaientry、myaistorage、mycodequality、mycostcontrol、mylinuxpool、mypmo。以相應最短席位可通過 ainame 驗證；其中 `team-mylinuxpool` 是歷史無 team 名稱，`team-mylinuxpool-wN-b`、`team-mypmo-m1-b` 是既有另用頻道，**不**因此多推 `mylinuxpool-wN` 或 `mypmo-m1` 專案。test／實驗頻道不算專案。
 
-建議案 (C) 採行時**不需要改任何程式**；僅在日後決定要加下列能力時才另開單修改：
+以下 16 個頻道目前尚未出現在設定中；由 PMO 在有註冊簿授權與 channel token 的環境建立，本設計未執行真實建立。執行前重新查映射，已存在就跳過，不刪除重建；等重建落地後交 App 刷新。
 
-1. **若要在註冊簿／`channels.json` 顯式加 `kind`（例如 `"kind": "dm"`）**：
-   - `src/angareion/registry.py`：`parse_comment`、`register_comment`、`Action` 允許選填 `kind`（驗證合法值）。
-   - `src/angareion/registry_rules.py`：`rebuild_channels` 將 `kind` 寫入（或省略預設 `"team"` 保持既有頻道逐位元組不變）。
-   - `src/angareion/channel_config.py`：`ChannelRef` 與 `ChannelStore.channels()` 讀取並驗證 `kind`。
-   - `src/angareion/channel_cli.py`：`cmd_channel_create` 增加 `--kind`（或依慣例帶入）。
-   - `openspec/specs/angareion/channel-config/spec.md`：更新註冊簿 JSON 與 `channels.json` 規格。
-2. **若要改採 (A)＋`datatype: dm`（0 新增實體的替代路徑）**：
-   - `src/angareion/cli.py`（`build_parser`、`cmd_send`）與 `src/aicomm/cli.py`：新增 `--datatype` 選項（預設 `message`），否則 CLI 送不出 `datatype: dm`。
-   - `src/angareion/messages.py`：若要明確宣告 `dm` 語意或防自我回傳，更新相關常數（現有 `DATATYPE_RE` 已允許 `"dm"` 寬鬆讀取）。
-3. **若要替 `angareion log` 加雙向查詢便利旗標（可選 UX 改善）**：
-   - `src/angareion/log_query.py`（`select`）與 `src/angareion/cli.py`（`p_log`）：新增 `--peer <AI 名>`（語意為 `(from == me and to == peer) or (from == peer and to == me)`），讓單一指令即可取回雙向 DM 串。
+```sh
+angareion channel create role-life-pm --backend aicompany-channel
+angareion channel create role-life-arch --backend aicompany-channel
+angareion channel create role-llmgateway-pm --backend aicompany-channel
+angareion channel create role-llmgateway-arch --backend aicompany-channel
+angareion channel create role-myaientry-pm --backend aicompany-channel
+angareion channel create role-myaientry-arch --backend aicompany-channel
+angareion channel create role-myaistorage-pm --backend aicompany-channel
+angareion channel create role-myaistorage-arch --backend aicompany-channel
+angareion channel create role-mycodequality-pm --backend aicompany-channel
+angareion channel create role-mycodequality-arch --backend aicompany-channel
+angareion channel create role-mycostcontrol-pm --backend aicompany-channel
+angareion channel create role-mycostcontrol-arch --backend aicompany-channel
+angareion channel create role-mylinuxpool-pm --backend aicompany-channel
+angareion channel create role-mylinuxpool-arch --backend aicompany-channel
+angareion channel create role-mypmo-pm --backend aicompany-channel
+angareion channel create role-mypmo-arch --backend aicompany-channel
+```
 
----
-
-## 7. 風險與未決（Q-*）
-
-### 已知風險
-- **誤漏 `--to` 成為廣播（現行無程式擋）**：現行 `angareion send`／`aicomm send` 不檢查 `dm-secretary` 的 `--to` 與 `--mention`，強制帶 `--to` 目前僅屬約定；若有人或腳本忘記帶 `--to`，訊息會進入全公司所有 AI 的 `read` inbox。緩解：App N34 端寫死必須有合法 `to`；`skills/angareion/SKILL.md` 與 `skills/aicomm/SKILL.md` 於定案後加註「`dm-secretary` 嚴禁省略 `--to` 與帶第三者 `--mention`」；**建議另開 `d` 單於 `aicomm send --channel dm-secretary` 檢查必帶 `--to` 並拒絕第三者 `--mention`**（不在本單範圍）。
-- **沒有後端 ACL（且過濾在客戶端）**：同 `docs/angareion.md` 既有風險，任何能讀 `AiCompany-channel` 的隊員都可看 `dm-secretary` 的 GitHub issue 或用 `read --channel`／`angareion log` 讀出全部 DM；且因客戶端過濾機制，有新 DM 時各 AI 機器的 `read`／`wait` 都會下載整份新留言後再於本機丟棄。**因此禁止在 DM 內貼私人資訊或憑證，一律改參照 MyBrain 路徑或案件 id。**若未來真的需要機密級 DM，須另開私有 backend repo 與獨立 token（非本單範圍）。
-- **`dm-secretary` 集中 2500 則上限**：所有 DM 共用一頁時會比每對一頁更快碰到 2400 換頁；#542 PR-3c 已合併至 `main`，自動換頁（`PAGE_ROLLOVER_AT = 2400`、`PAGE_FILL_LIMIT = 2490`）與 48 小時寬限期讀取已上線，不需手動換頁，僅須留意集中流量會使換頁頻率高於單對頻道並每次消耗 1 則註冊簿（`MyAiStorage#47`）額度。
-
-### 待決定（Q-*）
-
-- **Q-1（本人／PM 裁定）**：DM 頻道架構採 **(C) 單一專用 DM 頻道 `dm-secretary`**（架構師建議）、**(B) 每對一頻道 `dm_<a>_<b>`**，還是 **(A) 不新增實體（既有頻道雙人視圖，若要區分需另開單加 `--datatype dm`）**？
-- **Q-2（PM 決定）**：註冊簿與 `channels.json` 是否維持**零改碼**（靠固定頻道名 `dm-secretary` 或 `dm_` 前綴辨識），還是另開單在註冊簿與 `channels.json` 加 `kind` 欄？建議維持零改碼。
-- **Q-3（PMO／本人決定）**：在 `dm-secretary` 傳給 `mypmo-pm-m1` 的高 urgency 訊息，是否維持現狀只當 `叫人`（`is_call`），急件仍走 `secretary-pmo`（`pmo.inbox.should_poke` 僅認 `dispatch_channel`）？建議維持現狀。
-- **Q-4（PM／本人執行）**：若 Q-1 採 (C)，誰在上線前執行一次 `angareion channel create dm-secretary --backend aicompany-channel`（建議由 PMO 或本人執行），並同步將使用規則（含回同一頻道、僅限回應本人先開的 DM／AI 不主動在 `dm-secretary` 開問本人、嚴禁省略 `--to`，以及 `dm-secretary` 排除在 App 全域「@你」之外）補進 `skills/aicomm/SKILL.md` 與 `skills/angareion/SKILL.md`（另案或交接給檔案維護者）；**是否放寬為 AI 可主動 DM 本人：待本人（預設不放寬）**。
+本 PR 只交設計與 D-39，PMO 建頻道、App N34 的角色頻道入口／名冊與 poke 接線、必要的使用說明更新由各負責方依此契約排程；不擅改訊息格式或註冊 schema。待重審的建議包括 16 個首批入口與 App 預設 to＋mention，不再把已裁定的「專案×角色」退回 A／B／C 選案。
